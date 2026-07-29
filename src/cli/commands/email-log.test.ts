@@ -360,8 +360,12 @@ describe("emails export routes to /v1 in the self-hosted client", () => {
       outbound("export-2", "April invoice", "2026-04-01T00:00:00.000Z"),
     ]);
 
-    const stdout = await captureStdout(() => runEmailLogCommand(["export", "emails", "--limit", "10"]));
-    const rows = JSON.parse(stdout) as Array<{ id: string; subject: string }>;
+    // The JSON export now flows through output(parsed, raw) — the structured
+    // channel carries the rows and the text channel carries the raw document —
+    // instead of console.log (which the --json wrapper double-encoded).
+    const { data, out } = await runEmailLogCommand(["export", "emails", "--limit", "10"]);
+    const rows = data as Array<{ id: string; subject: string }>;
+    expect(JSON.parse(out)).toEqual(data);
 
     expect(rows.map((row) => row.id).sort()).toEqual(["export-1", "export-2"]);
     expect(rows.map((row) => row.subject).sort()).toEqual(["April invoice", "March invoice"]);
@@ -389,7 +393,8 @@ describe("emails export routes to /v1 in the self-hosted client", () => {
       }],
     } as V1StubResources);
 
-    const stdout = await captureStdout(() => runEmailLogCommand(["export", "events", "--limit", "10"]));
+    const { data: eventData } = await runEmailLogCommand(["export", "events", "--limit", "10"]);
+    const stdout = JSON.stringify(eventData);
     const rows = JSON.parse(stdout) as Array<{ id: string; type: string }>;
 
     expect(rows).toHaveLength(1);

@@ -14,7 +14,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .action(async (name: string, opts: { description?: string }) => {
       try {
         const group = await createGroup(name, opts.description);
-        console.log(chalk.green(`✓ Group created: ${group.name} (${group.id.slice(0, 8)})`));
+        output(group, chalk.green(`✓ Group created: ${group.name} (${group.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
       }
@@ -138,7 +138,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         for (const email of emails) {
           await addMember(group!.id, email, opts.name);
         }
-        console.log(chalk.green(`✓ Added ${emails.length} member(s) to group '${name}'`));
+        output({ added: emails.length, group: name }, chalk.green(`✓ Added ${emails.length} member(s) to group '${name}'`));
       } catch (e) {
         handleError(e);
       }
@@ -153,7 +153,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const removed = await removeMember(group!.id, email);
         if (!removed) handleError(new Error(`Member not found: ${email}`));
-        console.log(chalk.green(`✓ Removed ${email} from group '${name}'`));
+        output({ removed: true, group: name, email }, chalk.green(`✓ Removed ${email} from group '${name}'`));
       } catch (e) {
         handleError(e);
       }
@@ -169,7 +169,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
         if (!group) handleError(new Error(`Group not found: ${name}`));
         await confirmDestructiveAction(`Delete group ${name}?`, opts.yes);
         await deleteGroup(group!.id);
-        console.log(chalk.green(`✓ Group deleted: ${name}`));
+        output({ deleted: true, name }, chalk.green(`✓ Group deleted: ${name}`));
       } catch (e) {
         handleError(e);
       }
