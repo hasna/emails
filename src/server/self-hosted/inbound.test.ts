@@ -212,7 +212,8 @@ describe("Emails self-hosted inbound messages", () => {
     expect(ids).toContain("0019_inbox_perf_rollups");
     expect(ids).toContain("0020_attachment_repair_ledger");
     expect(ids).toContain("0021_idp_principal_tenants");
-    expect(ids.at(-1)).toBe("0022_events_type_enum_check");
+    expect(ids).toContain("0022_events_type_enum_check");
+    expect(ids.at(-1)).toBe("0023_webhook_event_idempotency");
   });
 
   test("POST inbound preserves all fields and returns 201", async () => {
