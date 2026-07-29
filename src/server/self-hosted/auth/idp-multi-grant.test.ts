@@ -192,10 +192,10 @@ describe("grant persistence — (sub, tenant_id) keying", () => {
   });
 });
 
-describe("migration 0022 — composite keying is declared additively", () => {
+describe("migration 0024 — composite keying is declared additively", () => {
   it("ships an idempotent migration that keys the table on (sub, tenant_id)", () => {
     const migration = emailsSelfHostedMigrations().find(
-      (m) => m.id === "0022_idp_principal_tenants_multi_grant",
+      (m) => m.id === "0024_idp_principal_tenants_multi_grant",
     );
     expect(migration).toBeDefined();
     expect(migration!.sql).toContain("idp_principal_tenants_sub_tenant_key");

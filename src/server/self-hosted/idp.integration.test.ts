@@ -107,9 +107,9 @@ describe.skipIf(!pg)("migration 0021 — idp_principal_tenants", () => {
     expect(migration).toBeDefined();
   });
 
-  it("keys the table on (sub, tenant_id) after 0022, idempotently", async () => {
+  it("keys the table on (sub, tenant_id) after 0024, idempotently", async () => {
     const migration = emailsSelfHostedMigrations().find(
-      (m) => m.id === "0022_idp_principal_tenants_multi_grant",
+      (m) => m.id === "0024_idp_principal_tenants_multi_grant",
     )!;
     await pg!.execute(migration.sql);
     await pg!.execute(migration.sql);
