@@ -23,6 +23,19 @@ import {
  * (per-app verifiers are audit-free) so an accepted alias key does not also emit
  * a spurious `app_mismatch` deny line.
  */
+/**
+ * The structured, secret-free `[api-auth]` audit line. Carries the tenant
+ * (`tid`) so the API-key trail is organization-attributable like the IdP
+ * trail — an audit line that cannot answer "which organization did this" is
+ * not an audit line. Ids and outcome fields only; never token material.
+ */
+export function formatApiAuthAuditLine(e: AuthAuditEvent): string {
+  return (
+    `[api-auth] ${e.outcome} app=${e.app} kid=${e.kid ?? "-"} tid=${e.tid ?? "-"} ` +
+    `reason=${e.reason ?? "-"} ${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`
+  );
+}
+
 export function verifyApiKeyWithAliases(
   options: Omit<VerifyApiKeyOptions, "app" | "audit"> & { audit?: AuthAuditHook },
   apps: readonly [string, ...string[]],

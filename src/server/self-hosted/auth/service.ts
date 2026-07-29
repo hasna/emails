@@ -15,7 +15,7 @@
 // humans. Enumeration is avoided (generic messages, constant-time login).
 
 import type { ApiKeyVerifier } from "@hasna/contracts/auth";
-import { extractToken, hasAllScopes } from "@hasna/contracts/auth";
+import { extractToken, hasAllScopes, tenantIdsEqual } from "@hasna/contracts/auth";
 import {
   looksLikeIdpToken,
   normalizeIdpScopes,
@@ -171,6 +171,14 @@ export async function resolveRequestContext(
     }
     const tenantId = await deps.authStore.getApiKeyTenant(decision.principal.kid);
     if (!tenantId) return fail(403, "api key is not bound to a tenant", "no_tenant");
+    // The DB mapping remains the AUTHORITY for which tenant the key acts in
+    // (a client-presented claim must never pick the tenant) — but when the key
+    // carries the signed, tamper-evident `tid` claim, drift between what it
+    // was minted for and what it resolves to is a refusal, not a silent pass
+    // into the other organization. Untenanted (pre-tid) keys are unaffected.
+    if (decision.principal.tid && !tenantIdsEqual(decision.principal.tid, tenantId)) {
+      return fail(403, "api key's signed tenant does not match its local tenant binding", "tenant_mismatch");
+    }
     return {
       ok: true,
       ctx: {
