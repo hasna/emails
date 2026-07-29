@@ -44,7 +44,10 @@ import type {
   MessageListRecord,
   MessageRecord,
   Page,
+  ResourceInput,
+  ResourceRow,
 } from "./records.js";
+import type { ResourceRepository } from "./repositories.js";
 
 /**
  * One behavioural case.
@@ -435,6 +438,327 @@ async function drainAttachments(
     cursor = answer.value.next_cursor;
   }
   fail("an attachment inventory scan did not terminate within 200 pages");
+}
+
+// ---- uniform resource case-writing helpers --------------------------------
+
+type UniformResourceRepository = ResourceRepository<ResourceRow>;
+
+interface UniformResourceFixture {
+  input: ResourceInput;
+  /** Scalar fields whose exact round trip proves the family used the right schema. */
+  expected: ResourceInput;
+}
+
+interface UniformResourceCaseSpec {
+  family: string;
+  repository(store: EmailStore): UniformResourceRepository;
+  create(store: EmailStore, variant: "first" | "second"): Promise<UniformResourceFixture>;
+  patch: UniformResourceFixture;
+}
+
+function uniformResourceId(row: Record<string, unknown>, what: string): string {
+  // SQLite's webhook-receipts table has a composite primary key and is addressed by
+  // rowid; Postgres gives that resource an ordinary id. The repository deliberately
+  // exposes whichever identity its backing schema can address.
+  const id = row["id"] ?? row["rowid"];
+  if ((typeof id !== "string" && typeof id !== "number") || String(id).length === 0) {
+    fail(`${what} carries no addressable id: ${show(row)}`);
+  }
+  return String(id);
+}
+
+function assertResourceFields(row: Record<string, unknown>, expected: ResourceInput, what: string): void {
+  for (const [field, wanted] of Object.entries(expected)) {
+    same(row[field], wanted, `${what} ${field}`);
+  }
+}
+
+/**
+ * Enumerate a uniform family through its public offset paging contract.
+ *
+ * The stores intentionally publish different row orders, so callers compare the
+ * resulting identities as a set. Paging still requires each store's own order to be
+ * total: a repeated or missing row makes one of the per-family cases fail.
+ */
+async function drainUniformResource(repository: UniformResourceRepository, family: string): Promise<ResourceRow[]> {
+  const rows: ResourceRow[] = [];
+  const limit = 2;
+  for (let page = 0; page < 250; page += 1) {
+    const batch = await must(repository.list({ limit, offset: rows.length }), `${family}.list page ${page + 1}`);
+    rows.push(...batch);
+    if (batch.length < limit) return rows;
+  }
+  fail(`${family}.list did not terminate within 250 pages`);
+}
+
+function uniformResourceCase(spec: UniformResourceCaseSpec): ConformanceCase {
+  const caseId = `resources/${spec.family}/uniform-crud-round-trip`;
+  return {
+    id: caseId,
+    what: `${spec.family} create/read/list/update/delete behaviour round-trips through its uniform resource repository`,
+    requires: null,
+    async exercise(store: EmailStore): Promise<unknown> {
+      const repository = spec.repository(store);
+      const firstFixture = await spec.create(store, "first");
+      const secondFixture = await spec.create(store, "second");
+      const first = asObject(
+        await must(repository.create(firstFixture.input), `${spec.family}.create first`),
+        `created ${spec.family}`,
+      );
+      const second = asObject(
+        await must(repository.create(secondFixture.input), `${spec.family}.create second`),
+        `second ${spec.family}`,
+      );
+      const firstId = uniformResourceId(first, `created ${spec.family}`);
+      const secondId = uniformResourceId(second, `second ${spec.family}`);
+      check(firstId !== secondId, `${spec.family}.create returned the same identity for two writes`);
+      assertResourceFields(first, firstFixture.expected, `created ${spec.family}`);
+
+      const read = asObject(await must(repository.get(firstId), `${spec.family}.get`), `read ${spec.family}`);
+      assertResourceFields(read, firstFixture.expected, `read ${spec.family}`);
+
+      const listed = await drainUniformResource(repository, spec.family);
+      const createdIds = [firstId, secondId].sort();
+      const listedIds = listed
+        .map((row) => uniformResourceId(row, `listed ${spec.family}`))
+        .filter((id) => createdIds.includes(id))
+        .sort();
+      same(show(listedIds), show(createdIds), `${spec.family}.list emits both created rows exactly once`);
+
+      // Every family performs its own validation. Testing this only on contacts lets
+      // one miswired schema accept and silently drop a field while the suite stays green.
+      refusal(
+        await repository.create({ nonsense_column: 1 }),
+        "invalid_input",
+        422,
+        `${spec.family}.create with an unknown column`,
+      );
+
+      const updated = asObject(
+        await must(repository.update(firstId, spec.patch.input), `${spec.family}.update`),
+        `updated ${spec.family}`,
+      );
+      assertResourceFields(updated, spec.patch.expected, `updated ${spec.family}`);
+      const readAfterUpdate = asObject(
+        await must(repository.get(firstId), `${spec.family}.get after update`),
+        `read updated ${spec.family}`,
+      );
+      assertResourceFields(readAfterUpdate, spec.patch.expected, `read updated ${spec.family}`);
+
+      same(await must(repository.remove(secondId), `${spec.family}.remove second`), true, "the companion remove");
+      same(await must(repository.remove(firstId), `${spec.family}.remove`), true, "the first remove");
+      same(await must(repository.remove(firstId), `${spec.family}.remove again`), false, "the second remove");
+      stash(caseId, { id: firstId });
+      return repository.get(firstId);
+    },
+    expect(outcome: unknown): void {
+      stashed(caseId);
+      same(value(outcome, `${spec.family}.get after remove`), null, `a removed ${spec.family} row must not be readable`);
+    },
+  };
+}
+
+function simpleFixture(input: ResourceInput, expected: ResourceInput = input): UniformResourceFixture {
+  return { input, expected };
+}
+
+function buildUniformResourceCases(): ConformanceCase[] {
+  const specs: UniformResourceCaseSpec[] = [
+    {
+      family: "contacts",
+      repository(store) {
+        return store.contacts;
+      },
+      async create(_store, variant) {
+        const email = `${token(`contact-${variant}`)}@example.test`;
+        return simpleFixture({ email, name: `Contact ${variant}` });
+      },
+      patch: simpleFixture({ name: "Updated contact" }),
+    },
+    {
+      family: "groups",
+      repository(store) {
+        return store.groups;
+      },
+      async create(_store, variant) {
+        return simpleFixture({ name: token(`group-${variant}`), description: `Group ${variant}` });
+      },
+      patch: simpleFixture({ description: "Updated group" }),
+    },
+    {
+      family: "owners",
+      repository(store) {
+        return store.owners;
+      },
+      async create(_store, variant) {
+        return simpleFixture({ type: "human", name: token(`owner-${variant}`) });
+      },
+      patch: simpleFixture({ name: "Updated owner" }),
+    },
+    {
+      family: "providers",
+      repository(store) {
+        return store.providers;
+      },
+      async create(_store, variant) {
+        return simpleFixture({ name: token(`provider-${variant}`), type: "sandbox", region: `test-${variant}` });
+      },
+      patch: simpleFixture({ region: "test-updated" }),
+    },
+    {
+      family: "templates",
+      repository(store) {
+        return store.templates;
+      },
+      async create(_store, variant) {
+        return simpleFixture({ name: token(`template-${variant}`), subject_template: `Subject ${variant}` });
+      },
+      patch: simpleFixture({ subject_template: "Updated subject" }),
+    },
+    {
+      family: "sequences",
+      repository(store) {
+        return store.sequences;
+      },
+      async create(_store, variant) {
+        return simpleFixture({
+          name: token(`sequence-${variant}`),
+          description: `Sequence ${variant}`,
+          status: "active",
+        });
+      },
+      patch: simpleFixture({ description: "Updated sequence", status: "paused" }),
+    },
+    {
+      family: "scheduled",
+      repository(store) {
+        return store.scheduled;
+      },
+      async create(store, variant) {
+        const providerId = await provider(store);
+        return simpleFixture({
+          provider_id: providerId,
+          from_address: `${token(`scheduled-${variant}`)}@example.test`,
+          subject: `Scheduled ${variant}`,
+          scheduled_at: variant === "first" ? "2030-01-01T01:00:00.000Z" : "2030-01-01T02:00:00.000Z",
+        });
+      },
+      patch: simpleFixture({ subject: "Updated scheduled message" }),
+    },
+    {
+      family: "aliases",
+      repository(store) {
+        return store.aliases;
+      },
+      async create(_store, variant) {
+        return simpleFixture({
+          domain: `${token(`alias-${variant}`)}.test`,
+          local_part: `local-${variant}`,
+          target_address: `${token(`target-${variant}`)}@example.test`,
+        });
+      },
+      patch: simpleFixture({ target_address: "updated-alias@example.test" }),
+    },
+    {
+      family: "forwarding",
+      repository(store) {
+        return store.forwarding;
+      },
+      async create(_store, variant) {
+        return simpleFixture({
+          source_address: `${token(`forward-source-${variant}`)}@example.test`,
+          target_address: `${token(`forward-target-${variant}`)}@example.test`,
+          mode: "app-copy",
+        });
+      },
+      patch: simpleFixture({ target_address: "updated-forward@example.test" }),
+    },
+    {
+      family: "warming",
+      repository(store) {
+        return store.warming;
+      },
+      async create(_store, variant) {
+        return simpleFixture({
+          domain: `${token(`warming-${variant}`)}.test`,
+          target_daily_volume: variant === "first" ? 100 : 200,
+          start_date: variant === "first" ? "2030-02-01" : "2030-02-02",
+          status: "active",
+        });
+      },
+      patch: simpleFixture({ status: "paused" }),
+    },
+    {
+      family: "events",
+      repository(store) {
+        return store.events;
+      },
+      async create(store, variant) {
+        const providerId = await provider(store);
+        return simpleFixture({
+          provider_id: providerId,
+          provider_event_id: token(`event-${variant}`),
+          type: "delivered",
+          recipient: `${variant}@example.test`,
+          occurred_at: variant === "first" ? "2030-03-01T01:00:00.000Z" : "2030-03-01T02:00:00.000Z",
+        });
+      },
+      patch: simpleFixture({ recipient: "updated-event@example.test" }),
+    },
+    {
+      family: "emailDigests",
+      repository(store) {
+        return store.emailDigests;
+      },
+      async create(_store, variant) {
+        const hour = variant === "first" ? "01" : "02";
+        return simpleFixture({
+          period: "today",
+          since: `2030-04-01T${hour}:00:00.000Z`,
+          until: `2030-04-01T${hour}:30:00.000Z`,
+          provider: "local",
+          model: `model-${variant}`,
+          status: "ok",
+          summary: `Digest ${variant}`,
+          started_at: `2030-04-01T${hour}:00:00.000Z`,
+          completed_at: `2030-04-01T${hour}:01:00.000Z`,
+        });
+      },
+      patch: simpleFixture({ summary: "Updated digest" }),
+    },
+    {
+      family: "webhookReceipts",
+      repository(store) {
+        return store.webhookReceipts;
+      },
+      async create(_store, variant) {
+        return simpleFixture({
+          provider: "resend",
+          event_id: token(`webhook-${variant}`),
+          resource_id: `resource-${variant}`,
+          completed_at: variant === "first" ? "2030-05-01T01:00:00.000Z" : "2030-05-01T02:00:00.000Z",
+        });
+      },
+      patch: simpleFixture({ resource_id: "updated-resource" }),
+    },
+    {
+      family: "sandbox",
+      repository(store) {
+        return store.sandbox;
+      },
+      async create(store, variant) {
+        const providerId = await provider(store);
+        return simpleFixture({
+          provider_id: providerId,
+          from_address: `${token(`sandbox-${variant}`)}@example.test`,
+          subject: `Sandbox ${variant}`,
+        });
+      },
+      patch: simpleFixture({ subject: "Updated sandbox message" }),
+    },
+  ];
+  return specs.map(uniformResourceCase);
 }
 
 // ---- the cases --------------------------------------------------------------
@@ -1242,43 +1566,10 @@ function buildConformanceCases(): ConformanceCase[] {
     },
 
     // ---- the uniform resource families ----------------------------------
-    {
-      id: "resources/uniform-crud-round-trip",
-      what: "a uniform family create is readable by id, filterable in list, updatable, and gone after remove",
-      requires: null,
-      async exercise(store: EmailStore): Promise<unknown> {
-        const email = `contact-${token("c")}@example.test`;
-        const created = asObject(
-          await must(store.contacts.create({ email, name: "Original" }), "contacts.create"),
-          "created contact",
-        );
-        const id = String(created["id"]);
-        const read = asObject(await must(store.contacts.get(id), "contacts.get"), "read contact");
-        same(read["email"], email, "the created email reads back");
-        same(read["name"], "Original", "the created name reads back");
-        const filtered = asArray(
-          await must(store.contacts.list({ limit: 500, filters: { email } }), "contacts.list"),
-          "filtered contacts",
-        );
-        same(filtered.length, 1, "an equality filter finds exactly the created row");
-        // An unknown column is REFUSED rather than silently ignored: a dropped field is
-        // a write the caller believes happened.
-        refusal(await store.contacts.create({ nonsense_column: 1 }), "invalid_input", 422, "an unknown column");
-        await must(store.contacts.update(id, { name: "Updated" }), "contacts.update");
-        const updated = asObject(
-          await must(store.contacts.get(id), "contacts.get after update"),
-          "updated contact",
-        );
-        same(updated["name"], "Updated", "the update reads back");
-        same(await must(store.contacts.remove(id), "contacts.remove"), true, "the first remove reports true");
-        same(await must(store.contacts.remove(id), "contacts.remove again"), false, "the second remove reports false");
-        stash("resources/uniform-crud-round-trip", { id });
-        return store.contacts.get(id);
-      },
-      expect(outcome: unknown): void {
-        same(value(outcome, "contacts.get after remove"), null, "a removed row must not be readable");
-      },
-    },
+    // One independently reported case per family. A single generic case over contacts
+    // cannot detect that (say) warming points at the wrong schema or events pages with
+    // a non-total order.
+    ...buildUniformResourceCases(),
 
     // ---- keysetPagination ------------------------------------------------
     {

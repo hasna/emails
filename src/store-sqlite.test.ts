@@ -41,7 +41,7 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-// Forty-eight cases, each writing a handful of rows, run once clean plus once per
+// Sixty-one cases, each writing a handful of rows, run once clean plus once per
 // neutering. Well past the 5s default on a loaded runner.
 const SUITE_TIMEOUT_MS = 60_000;
 

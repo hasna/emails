@@ -4,7 +4,7 @@
 //
 // THREE THINGS THIS FILE HAS TO ESTABLISH, and they are separable:
 //
-// 1. THE STORE BEHAVES. The same 48 unmodified conformance cases the SQLite store
+// 1. THE STORE BEHAVES. The same 61 unmodified conformance cases the SQLite store
 //    runs, over real HTTP, against a `/v1` service backed by a real store. No case is
 //    skipped and no capability excuses one: a false capability still runs its case and
 //    still has to answer with the typed refusal.
@@ -64,7 +64,7 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-// Forty-eight cases, each one several HTTP round trips, run once clean plus once per
+// Sixty-one cases, each one several HTTP round trips, run once clean plus once per
 // neutering. Well past the 5s default.
 const SUITE_TIMEOUT_MS = 120_000;
 
@@ -214,6 +214,13 @@ describe("HttpEmailStore conformance", () => {
     ];
     // Every declared family is wired; nothing missing and nothing extra claimed.
     expect(families.map(([family]) => family).sort()).toEqual([...RESOURCE_FAMILIES].sort());
+    // And every family has its OWN behavioural conformance case. A single contacts
+    // case cannot detect a schema or paging divergence in any of the other thirteen.
+    const coveredByConformance = CONFORMANCE_CASES.flatMap((testCase) => {
+      const match = /^resources\/([^/]+)\/uniform-crud-round-trip$/.exec(testCase.id);
+      return match?.[1] ? [match[1]] : [];
+    });
+    expect(coveredByConformance.sort()).toEqual([...RESOURCE_FAMILIES].sort());
     // And each path is a resource the SERVICE actually registers — the check that
     // catches `sandbox` being served at `sandbox-emails` rather than `sandbox`.
     const registered = new Set(SELF_HOSTED_RESOURCES.map((resource) => resource.path));
@@ -404,7 +411,7 @@ describe("HttpEmailStore conformance", () => {
 
   it("reports the three-state attachment lookup in all three states", async () => {
     // Conformance only exercises "available". A client collapsing the 409 into ok(null)
-    // would pass all 48 cases, so the other two states are asserted directly.
+    // would pass all 61 cases, so the other two states are asserted directly.
     const subject = store();
     const withBytes = await subject.messages.createMessage({
       direction: "inbound",
