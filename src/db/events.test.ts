@@ -383,6 +383,46 @@ describe.each(STORE_VARIANTS)("event writes (%s)", (_label, variant) => {
     expect(result.event.id).toBe("evt-race-winner");
   });
 
+  it("re-checks BOTH halves of the dedup key against a store that ignores filters", async () => {
+    // The pushed-down (provider_id, provider_event_id) filters are a BOUND, not the
+    // answer. A store or fixture that ignores equality filters serves the whole
+    // table — including ANOTHER provider's event carrying the same provider event id
+    // — and an upsert that trusted it would return that foreign row as "existing"
+    // and silently drop this provider's delivery. Driven through a stand-in store
+    // because both shipped stores DO apply the filters, which is exactly what made
+    // the weakened re-check invisible to every other case (a mutation-test survivor
+    // found it).
+    const foreign: ResourceRow = {
+      id: "evt-foreign",
+      email_id: null,
+      provider_id: OTHER_PROVIDER_ID,
+      provider_event_id: "pe-cross",
+      type: "delivered",
+      recipient: null,
+      metadata: "{}",
+      occurred_at: isoAt(9),
+      created_at: isoAt(9),
+    };
+    const base = sqliteStore();
+    const filterBlind: EmailStore = {
+      ...base,
+      events: {
+        ...base.events,
+        async list(opts?: ListOptions & { filters?: Record<string, string> }): Promise<Outcome<ResourceRow[]>> {
+          // Every filter ignored; the foreign row is always served, then the end.
+          return { ok: true, value: (opts?.offset ?? 0) === 0 ? [foreign] : [] };
+        },
+      },
+    };
+    const result = await upsertEventWithResult(
+      { provider_id: PROVIDER_ID, provider_event_id: "pe-cross", type: "delivered", occurred_at: isoAt(0) },
+      filterBlind,
+    );
+    expect(result.created).toBe(true);
+    expect(result.event.id).not.toBe("evt-foreign");
+    expect(result.event.provider_id).toBe(PROVIDER_ID);
+  });
+
   it("surfaces the store's refusal when the dedup key cannot be asked about, instead of creating blindly", async () => {
     // A service older than the `provider_event_id` filter declaration is refused by
     // the HTTP store's contract check. The upsert must let that refusal out — an
