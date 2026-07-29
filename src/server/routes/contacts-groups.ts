@@ -1,6 +1,8 @@
 // API route handlers — contacts-groups.ts
-import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.local.js';
+import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
 import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
+import { getDatabase } from '../../db/database.js';
 import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
 import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
 import { getEmailContent } from '../../db/email-content.js';
@@ -10,6 +12,23 @@ import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId
 
 const EXPORT_DEFAULT_LIMIT = 1000;
 const EXPORT_MAX_LIMIT = 5000;
+
+/**
+ * The store the `/api/contacts` routes read and write through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and the neighbouring imports in this
+ * file are still local-SQLite modules reading the process-wide connection. When
+ * `src/db/contacts` collapsed onto the store seam its exports stopped requiring a
+ * `Database` and started resolving the CONFIGURED store when given nothing — so passing
+ * nothing here would have silently repointed these routes at an operator's API on any
+ * installation configured for one. They therefore name the SQLite store bound to that
+ * same connection, exactly as the `/api/sequences` routes do
+ * (src/server/routes/inbound-sequences.ts). Built per request: the repositories are
+ * thin wrappers over the memoised connection.
+ */
+function localContactStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
 
 function resolveGroupRef(raw: string): { id: string } | null {
   const ref = decodeURIComponent(raw);
@@ -30,7 +49,9 @@ if (path === "/api/contacts" && method === "GET") {
       ...(suppressedParam !== null ? { suppressed: suppressedParam === "true" } : {}),
       ...queryPage(url, 100),
     };
-    return json(listContacts(opts));
+    // Reads the store seam (async). A table it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listContacts(opts, localContactStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -38,7 +59,7 @@ if (path === "/api/contacts" && method === "GET") {
 const contactSuppressMatch = path.match(/^\/api\/contacts\/([^/]+)\/suppress$/);
 if (contactSuppressMatch && method === "POST") {
   try {
-    suppressContact(decodeURIComponent(contactSuppressMatch[1]!));
+    await suppressContact(decodeURIComponent(contactSuppressMatch[1]!), localContactStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }
@@ -47,7 +68,7 @@ if (contactSuppressMatch && method === "POST") {
 const contactUnsuppressMatch = path.match(/^\/api\/contacts\/([^/]+)\/unsuppress$/);
 if (contactUnsuppressMatch && method === "POST") {
   try {
-    unsuppressContact(decodeURIComponent(contactUnsuppressMatch[1]!));
+    await unsuppressContact(decodeURIComponent(contactUnsuppressMatch[1]!), localContactStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }

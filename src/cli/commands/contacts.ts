@@ -16,10 +16,10 @@ export function registerContactCommands(program: Command, output: (data: unknown
       .option("--limit <n>", "Maximum contacts to show (default 20 compact, 50 verbose/json)")
       .option("--offset <n>", "Number of contacts to skip", "0")
       .option("--verbose", "Show expanded contact rows")
-      .action((opts: { suppressed?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
+      .action(async (opts: { suppressed?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
         try {
           const page = parseCliListPage(opts);
-          const contacts = listContacts({
+          const contacts = await listContacts({
             ...(opts.suppressed !== undefined ? { suppressed: opts.suppressed } : {}),
             ...page,
           });
@@ -69,9 +69,9 @@ export function registerContactCommands(program: Command, output: (data: unknown
     cmd
       .command("suppress <email>")
       .description("Suppress a contact (prevent sending)")
-      .action((email: string) => {
+      .action(async (email: string) => {
         try {
-          suppressContact(email);
+          await suppressContact(email);
           console.log(chalk.green(`✓ Suppressed: ${email}`));
         } catch (e) { handleError(e); }
       });
@@ -79,9 +79,9 @@ export function registerContactCommands(program: Command, output: (data: unknown
     cmd
       .command("unsuppress <email>")
       .description("Unsuppress a contact (allow sending again)")
-      .action((email: string) => {
+      .action(async (email: string) => {
         try {
-          unsuppressContact(email);
+          await unsuppressContact(email);
           console.log(chalk.green(`✓ Unsuppressed: ${email}`));
         } catch (e) { handleError(e); }
       });

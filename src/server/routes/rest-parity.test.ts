@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createAddress } from "../../db/addresses.local.js";
-import { suppressContact, upsertContact } from "../../db/contacts.local.js";
+import { suppressContact, upsertContact } from "../../db/contacts.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
@@ -678,7 +678,7 @@ describe("emails serve REST parity smoke", () => {
     for (let i = 0; i < 101; i++) {
       createAddress({ provider_id: provider.id, email: `default-address-${i}@example.com` });
       createDomain(provider.id, `default-domain-${i}.example.com`);
-      upsertContact(`default-contact-${i}@example.com`);
+      await upsertContact(`default-contact-${i}@example.com`, getDatabase());
       createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
       createGroup(`default-group-${i}`);
       await createScheduledEmail({
@@ -719,9 +719,9 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates contacts after REST suppression filtering", async () => {
     for (let i = 0; i < 5; i++) {
-      suppressContact(`suppressed-${i}@example.com`);
+      await suppressContact(`suppressed-${i}@example.com`, getDatabase());
     }
-    upsertContact("active@example.com");
+    await upsertContact("active@example.com", getDatabase());
 
     const page = await json<Array<{ email: string; suppressed: boolean }>>("/api/contacts?suppressed=true&limit=2&offset=1");
 

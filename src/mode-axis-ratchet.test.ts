@@ -1090,14 +1090,70 @@ const root = join(import.meta.dir, "..");
  * module added; the family's suite and every consumer suite were rewritten or edited in
  * place.
  */
+
+/*
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/contacts` collapse — the suppression
+ * ledger and per-recipient counters. BASE `b5f9054` (the sequences merge), whose eleven
+ * live counts equal the ceilings the block above declares with ZERO slack. Fourteen
+ * exports handed to a 371-line SQLite arm and a 161-line second arm. Seven counters move:
+ *
+ *   twoArmFamilies                20 -> 19   both arm modules deleted, so the facade has no
+ *   remoteArmModules              20 -> 19   siblings left. THE PAIR THAT SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions       12 -> 11   the facade's dispatch helper is deleted.
+ *   routedCallExpressions        177 -> 163  it dispatched all FOURTEEN exports through
+ *                                            that helper.
+ *   selfHostedResourceBranches    32 -> 25   the deleted SQLite arm asked SEVEN TIMES
+ *                                            whether it was really the local arm — every
+ *                                            operation except its two point reads — which
+ *                                            is the split the collapsed module's header
+ *                                            records: one configuration could suppress an
+ *                                            address on a server while the point read
+ *                                            consulted a local island that had never heard
+ *                                            of it.
+ *   selfHostedResourceReferences 110 -> 96   those seven, plus the six calls the deleted
+ *                                            second arm made through the generic resource
+ *                                            helper and one type derivation on it — every
+ *                                            lookup among them answering out of a single
+ *                                            clamped page, which is why a contact past row
+ *                                            500 was unfindable, reported unsuppressed,
+ *                                            and re-created as a duplicate by the next
+ *                                            suppression write.
+ *   isSelfHostedModeReferences    46 -> 44   the deleted facade imported the client-side
+ *                                            deployment predicate and called it once.
+ *
+ * FOUR DO NOT MOVE, for the reasons the blocks above already record: this dispatcher went
+ * through the predicate rather than the process-wide read (55), and neither arm resolved
+ * or parsed the setting (65, 16). The env counter stayed at 219 under the same discipline
+ * as every collapse before it: the rebuilt suite names its storage through the
+ * resolution's own exported constants and proves every clamp through the store seam, with
+ * a one-page control asserting a 1000-row request really answers 500 of 521.
+ *
+ * The collapsed family and its rewritten suite contribute ZERO to every counter here,
+ * verified per file. Among the files this change EDITS, only the MCP tool module and the
+ * two send-surface suites carry counts at all, and their diffs against base contain none
+ * of the counted tokens — the send-suppression suite's deployment-word lines predate this
+ * change and are untouched by it.
+ *
+ * Corpus of this change: 652 tracked, 651 scanned, ~10.12M characters — both floors
+ * cleared with room. TWO fewer tracked files than the base: two arm modules deleted,
+ * nothing added — the seam already declares this family's repository, so no extension
+ * module was needed; the family's suite and every consumer suite were rewritten or
+ * edited in place.
+ *
+ * ONE REBASE (onto 77e3c54, the inbound bucket-policy fix) moved NO counter: the
+ * eleven were zeroed in their own commit first, the merged tree was measured over the
+ * real `git ls-files` corpus (652 tracked / 651 scanned / 10,146,546 characters), and
+ * it measures exactly the numbers pinned below — verified rather than assumed, because
+ * two earlier rebases in this programme are the proof that a clean apply can be wrong.
+ */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 20,
-  remoteArmModules: 20,
-  routedFacadeDefinitions: 12,
-  routedCallExpressions: 177,
-  selfHostedResourceBranches: 32,
-  selfHostedResourceReferences: 110,
-  isSelfHostedModeReferences: 46,
+  twoArmFamilies: 19,
+  remoteArmModules: 19,
+  routedFacadeDefinitions: 11,
+  routedCallExpressions: 163,
+  selfHostedResourceBranches: 25,
+  selfHostedResourceReferences: 96,
+  isSelfHostedModeReferences: 44,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

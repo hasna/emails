@@ -86,11 +86,30 @@ afterEach(() => {
 });
 
 describe("resource repos route reads to selfHosted in selfHosted mode", () => {
-  test("listContacts returns selfHosted rows", () => {
-    const rows = listContacts();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.email).toBe("selfHosted@example.com");
-    expect(rows[0]!.send_count).toBe(3);
+  // The contacts family no longer participates in the routing this file measures, and it
+  // stopped the way the schedule and the sent ledger did: it has collapsed to one
+  // implementation over the store seam, so it reaches this same `/v1` service because
+  // STORAGE CONFIGURATION named an Emails API — not because a mode word chose an arm.
+  // The database path is unset for the duration of this case, leaving exactly one
+  // configured store, because the pair is a CONTRADICTION that `planEmailStore` refuses
+  // outright. What it still guards: the rows come from the service, mapped (JSON number
+  // and boolean columns included), and not from a local read — this file leaves the
+  // local database empty precisely so a local read could not masquerade as these rows.
+  test("listContacts reads the configured API store", async () => {
+    const restore = DATABASE_PATH_SETTINGS.map((key) => [key, process.env[key]] as const);
+    for (const [key] of restore) delete process.env[key];
+    try {
+      const rows = await listContacts();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.email).toBe("selfHosted@example.com");
+      expect(rows[0]!.send_count).toBe(3);
+      expect(rows[0]!.suppressed).toBe(false);
+    } finally {
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("listGroups returns selfHosted rows", () => {

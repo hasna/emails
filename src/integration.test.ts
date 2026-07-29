@@ -132,11 +132,13 @@ describe("analytics", () => {
 });
 
 describe("contacts + suppression flow (via /v1)", () => {
-  it("suppresses a contact and reports suppression state", () => {
-    upsertContact("person@test.com");
-    expect(isContactSuppressed("person@test.com")).toBe(false);
-    suppressContact("person@test.com");
-    expect(isContactSuppressed("person@test.com")).toBe(true);
+  it("suppresses a contact and reports suppression state", async () => {
+    // The collapsed contacts family is async and resolves the API store from storage
+    // configuration — the same environment the stub applies for every case here.
+    await upsertContact("person@test.com");
+    expect(await isContactSuppressed("person@test.com")).toBe(false);
+    await suppressContact("person@test.com");
+    expect(await isContactSuppressed("person@test.com")).toBe(true);
   });
 });
 

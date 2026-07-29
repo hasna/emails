@@ -177,7 +177,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // Canonical comparison (see db/contacts): `Blocked@ext.com` and
         // `"Blocked Person <blocked@ext.com>"` are the same recipient as
         // `blocked@ext.com`, and an exact string match let both forms through.
-        const suppressedRecipients = suppressedRecipientsAmong(allRecipients);
+        const suppressedRecipients = await suppressedRecipientsAmong(allRecipients);
         if (suppressedRecipients.length > 0) {
           const list = suppressedRecipients.join(", ");
           console.log(chalk.yellow(`Warning: Suppressed recipients: ${list}`));

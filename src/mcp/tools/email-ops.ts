@@ -186,7 +186,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       //    remains behind it.
       const { suppressedRecipientsAmong } = await import('../../db/contacts.js');
       const recipients = [...addressList(input.to), ...addressList(input.cc), ...addressList(input.bcc)];
-      const suppressed = suppressedRecipientsAmong(recipients);
+      const suppressed = await suppressedRecipientsAmong(recipients);
       if (suppressed.length > 0) {
         throw new Error(
           `Refusing to send to suppressed recipient(s): ${suppressed.join(", ")}. `
@@ -524,7 +524,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ suppressed, limit, offset }) => {
     try {
       const { listContacts } = await import('../../db/contacts.js');
-      const contacts = listContacts({
+      const contacts = await listContacts({
         ...(suppressed !== undefined ? { suppressed } : {}),
         limit: limit ?? 100,
         offset: offset ?? 0,
@@ -545,7 +545,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ email }) => {
     try {
       const { suppressContact } = await import('../../db/contacts.js');
-      suppressContact(email);
+      await suppressContact(email);
       return { content: [{ type: "text", text: `Contact suppressed: ${email}` }] };
     } catch (e) {
       return toolError(e);
@@ -562,7 +562,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async ({ email }) => {
     try {
       const { unsuppressContact } = await import('../../db/contacts.js');
-      unsuppressContact(email);
+      await unsuppressContact(email);
       return { content: [{ type: "text", text: `Contact unsuppressed: ${email}` }] };
     } catch (e) {
       return toolError(e);

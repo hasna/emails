@@ -150,7 +150,8 @@ export function createEvent(input: CreateEventInput): EmailEvent {
  * The declared `/v1/events` filters are sent to the server too, but as a BOUND on
  * how much is read, never as the answer: re-checking here keeps the result
  * identical against a server (or a stub) that ignores unknown query params, the
- * convention in src/db/contacts.remote.ts. `since`/`until` and a multi-value `type`
+ * convention the collapsed contacts family also keeps for its pushed-down email
+ * filter (src/db/contacts.ts). `since`/`until` and a multi-value `type`
  * are not server filters at all, so for those this is the only check there is.
  */
 function eventMatchesFilter(event: EmailEvent, filter: EventFilter): boolean {

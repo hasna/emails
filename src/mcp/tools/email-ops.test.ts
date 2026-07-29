@@ -16,8 +16,8 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { closeDatabase, resetDatabase } from "../../db/database.js";
-import { suppressContact } from "../../db/contacts.local.js";
+import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
+import { suppressContact } from "../../db/contacts.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { createProvider } from "../../db/providers.local.js";
 import { listSandboxEmails } from "../../db/sandbox.js";
@@ -142,7 +142,7 @@ describe("collapsed email-ops tool family", () => {
   it("still refuses a suppressed recipient, with no force escape", async () => {
     // Carried over from the deleted local arm, which was the ONLY arm that had it.
     // The canonical comparison matters: a display-name form is the same recipient.
-    suppressContact("blocked@example.test");
+    await suppressContact("blocked@example.test", getDatabase());
 
     const result = await call("send_email", {
       from: "agent@example.test",
