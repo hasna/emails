@@ -25,9 +25,14 @@
 // keys here would add references the mode-axis ratchet counts).
 
 import { afterAll, describe, expect, it } from "bun:test";
+import { Command } from "commander";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { registerContactCommands } from "./contacts.js";
+import { registerGroupCommands } from "./groups.js";
+import { registerSequenceCommands } from "./sequences.js";
+import { registerTemplateCommands } from "./templates.js";
 
 const SCRUBBED_ENV_PREFIXES = ["EMAILS_", "HASNA_EMAILS_", "MAILERY_", "HASNA_MAILERY_"] as const;
 const SCRUBBED_ENV_KEYS = [
@@ -89,6 +94,71 @@ function structured(run: CliRun, what: string): unknown {
 
 afterAll(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("command-local JSON options", () => {
+  it("registers the standard option on every scoped command", () => {
+    const program = new Command();
+    const output = () => {};
+    registerContactCommands(program, output);
+    registerGroupCommands(program, output);
+    registerTemplateCommands(program, output);
+    registerSequenceCommands(program, output);
+
+    const pending = [...program.commands];
+    while (pending.length > 0) {
+      const command = pending.shift()!;
+      const json = command.options.find((option) => option.long === "--json");
+      expect(json, command.name()).toBeDefined();
+      expect(json?.short, command.name()).toBe("-j");
+      expect(json?.description, command.name()).toBe("Print JSON output");
+      expect(json?.defaultValue, command.name()).toBe(false);
+      pending.push(...command.commands);
+    }
+  });
+
+  it("contacts list --json emits contact records", () => {
+    const env = localEnv();
+    expect(runCli(["contact", "suppress", "json-contact@example.com"], env).exitCode).toBe(0);
+
+    const rows = structured(runCli(["contact", "list", "--json"], env), "contact list") as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ email: "json-contact@example.com", suppressed: true });
+  }, 120_000);
+
+  it("group list -j emits groups with member counts", () => {
+    const env = localEnv();
+    expect(runCli(["group", "create", "json-group"], env).exitCode).toBe(0);
+
+    const rows = structured(runCli(["group", "list", "-j"], env), "group list") as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ name: "json-group", member_count: 0 });
+  }, 120_000);
+
+  it("template list --json emits template summaries", () => {
+    const env = localEnv();
+    expect(runCli(["template", "add", "json-template", "--subject", "Hello", "--text", "Body"], env).exitCode).toBe(0);
+
+    const rows = structured(runCli(["template", "list", "--json"], env), "template list") as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ name: "json-template", subject_template: "Hello", has_text_template: true });
+  }, 120_000);
+
+  it("sequence step list --json emits step records", () => {
+    const env = localEnv();
+    expect(runCli(["template", "add", "json-step", "--subject", "Hello", "--text", "Body"], env).exitCode).toBe(0);
+    expect(runCli(["sequence", "create", "json-sequence"], env).exitCode).toBe(0);
+    expect(runCli(["sequence", "step", "add", "json-sequence", "--step", "1", "--delay", "0", "--template", "json-step"], env).exitCode).toBe(0);
+
+    const rows = structured(runCli(["sequence", "step", "list", "json-sequence", "--json"], env), "sequence step list") as Array<Record<string, unknown>>;
+    expect(rows[0]).toMatchObject({ step_number: 1, delay_hours: 0, template_name: "json-step" });
+  }, 120_000);
+
+  it("command-local --json emits structured errors on stderr", () => {
+    const run = runCli(["template", "show", "missing-template", "--json"], localEnv());
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout).toBe("");
+    expect(JSON.parse(run.stderr)).toMatchObject({
+      error: { code: "not_found", message: "Template not found: missing-template" },
+    });
+  }, 120_000);
 });
 
 describe("template/sequence read surfaces are structured under --json", () => {

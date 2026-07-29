@@ -5,11 +5,15 @@ import { truncate } from "../../lib/format.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, parseCliPage } from "../utils.js";
 
 export function registerGroupCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
-  const groupCmd = program.command("group").description("Manage recipient groups");
+  const groupCmd = program
+    .command("group")
+    .description("Manage recipient groups")
+    .option("-j, --json", "Print JSON output", false);
 
   groupCmd
     .command("create <name>")
     .description("Create a recipient group")
+    .option("-j, --json", "Print JSON output", false)
     .option("--description <text>", "Group description")
     .action(async (name: string, opts: { description?: string }) => {
       try {
@@ -23,6 +27,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("list")
     .description("List recipient groups")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", "Maximum groups to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of groups to skip", "0")
     .option("--verbose", "Show group descriptions inline")
@@ -64,6 +69,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("show <name>")
     .description("Show group details and members")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", "Maximum members to show", "50")
     .option("--offset <n>", "Number of members to skip", "0")
     .action(async (name: string, opts: { limit?: string; offset?: string }) => {
@@ -94,6 +100,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("members <name>")
     .description("List members in a recipient group")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", "Maximum members to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of members to skip", "0")
     .option("--verbose", "Show expanded list hints")
@@ -130,6 +137,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("add <name> <emails...>")
     .description("Add members to a group")
+    .option("-j, --json", "Print JSON output", false)
     .option("--name <displayName>", "Display name for the member(s)")
     .action(async (name: string, emails: string[], opts: { name?: string }) => {
       try {
@@ -147,6 +155,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("remove-member <name> <email>")
     .description("Remove a member from a group")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string, email: string) => {
       try {
         const group = await getGroupByName(name);
@@ -162,6 +171,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("delete <name>")
     .description("Delete a group")
+    .option("-j, --json", "Print JSON output", false)
     .option("--yes", "Skip confirmation prompt")
     .action(async (name: string, opts: { yes?: boolean }) => {
       try {

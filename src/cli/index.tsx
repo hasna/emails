@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     import("../lib/logger.js"),
     import("./utils.js"),
   ]);
-  const jsonRequested = cliArgs.includes("--json");
+  const jsonRequested = cliArgs.includes("--json") || cliArgs.includes("-j");
   const verboseRequested = cliArgs.includes("--verbose") || cliArgs.includes("-v");
   const quietRequested = cliArgs.includes("--quiet") || cliArgs.includes("-q");
   configureCliRuntime({ json: jsonRequested, verbose: verboseRequested });
@@ -98,13 +98,13 @@ async function main(): Promise<void> {
     .option("-v, --verbose", "Show debug info")
     .hook("preAction", async () => {
       const opts = program.opts();
-      configureCliRuntime({ json: !!opts.json, verbose: !!opts.verbose });
+      configureCliRuntime({ json: jsonRequested || !!opts.json, verbose: !!opts.verbose });
       setLogLevel(!!opts.quiet, !!opts.verbose);
     });
 
   function output(data: unknown, formatted: string): void {
     const opts = program.opts();
-    if (opts.json) {
+    if (jsonRequested || opts.json) {
       emitJson(data);
     } else {
       console.log(formatted);

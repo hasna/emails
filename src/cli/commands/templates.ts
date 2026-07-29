@@ -9,11 +9,15 @@ import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } fro
 import { openLocalTarget } from "../../lib/local-actions.js";
 
 export function registerTemplateCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
-  const templateCmd = program.command("template").description("Manage email templates");
+  const templateCmd = program
+    .command("template")
+    .description("Manage email templates")
+    .option("-j, --json", "Print JSON output", false);
 
   templateCmd
     .command("add <name>")
     .description("Add an email template")
+    .option("-j, --json", "Print JSON output", false)
     .requiredOption("--subject <subject>", "Subject template (supports {{var}} placeholders)")
     .option("--html <html>", "Inline HTML template")
     .option("--text <text>", "Inline text template")
@@ -48,6 +52,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("list")
     .description("List all templates")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", "Maximum templates to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of templates to skip", "0")
     .option("--verbose", "Show expanded list hints")
@@ -86,6 +91,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("show <name>")
     .description("Show template details")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const template = await getTemplate(name);
@@ -113,6 +119,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("remove <name>")
     .description("Remove a template")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const deleted = await deleteTemplate(name);
@@ -132,6 +139,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   // variables" it never supplied; the claim was fixed, not the behaviour.
   program.command("preview <template-name>")
     .description("Preview a template, rendering {{var}} placeholders from --vars (a placeholder without a value stays as {{var}})")
+    .option("-j, --json", "Print JSON output", false)
     .option("--vars <json>", "Template variables as JSON string")
     .option("--open", "Open rendered HTML in browser")
     .action(async (templateName: string, opts: { vars?: string; open?: boolean }) => {

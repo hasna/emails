@@ -16,12 +16,19 @@ function parseEnrollmentStatus(value?: string): EnrollmentStatus | undefined {
 }
 
 export function registerSequenceCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
-  const sequenceCmd = program.command("sequence").description("Manage email drip sequences");
-  const sequenceStepCmd = sequenceCmd.command("step").description("Manage steps in a sequence");
+  const sequenceCmd = program
+    .command("sequence")
+    .description("Manage email drip sequences")
+    .option("-j, --json", "Print JSON output", false);
+  const sequenceStepCmd = sequenceCmd
+    .command("step")
+    .description("Manage steps in a sequence")
+    .option("-j, --json", "Print JSON output", false);
 
   sequenceCmd
     .command("create <name>")
     .description("Create a new email sequence")
+    .option("-j, --json", "Print JSON output", false)
     .option("--description <text>", "Sequence description")
     .action(async (name: string, opts: { description?: string }) => {
       try {
@@ -35,6 +42,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("list")
     .description("List all sequences")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", "Maximum sequences to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of sequences to skip", "0")
     .option("--verbose", "Show sequence descriptions inline")
@@ -71,6 +79,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("show <name>")
     .description("Show sequence details, steps, and enrollment count")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const seq = await getSequence(name);
@@ -105,6 +114,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("pause <name>")
     .description("Pause a sequence (no new sends)")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const seq = await getSequence(name);
@@ -119,6 +129,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("archive <name>")
     .description("Archive a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const seq = await getSequence(name);
@@ -133,16 +144,18 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("enroll <name> <email>")
     .description("Enroll a contact in a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID to use for sending")
     .action(async (name: string, email: string, opts: { provider?: string }) => {
       try {
         const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const enrollment = await enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
-        output(enrollment, chalk.green(`✓ Enrolled ${email} in sequence '${name}' (${enrollment.id.slice(0, 8)})`));
+        const lines = [chalk.green(`✓ Enrolled ${email} in sequence '${name}' (${enrollment.id.slice(0, 8)})`)];
         if (enrollment.next_send_at) {
-          console.log(chalk.dim(`  Next send: ${enrollment.next_send_at}`));
+          lines.push(chalk.dim(`  Next send: ${enrollment.next_send_at}`));
         }
+        output(enrollment, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -151,6 +164,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("unenroll <name> <email>")
     .description("Unenroll a contact from a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string, email: string) => {
       try {
         const seq = await getSequence(name);
@@ -166,6 +180,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("enroll-bulk <name>")
     .description("Bulk-enroll contacts from a CSV file into a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .requiredOption("--csv <path>", "CSV file with 'email' column")
     .option("--provider <id>", "Provider ID (uses default if not specified)")
     .action(async (name: string, opts: { csv: string; provider?: string }) => {
@@ -197,6 +212,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("enrollments [name]")
     .description("List enrollments, optionally filtered by sequence")
+    .option("-j, --json", "Print JSON output", false)
     .option("--status <status>", "Filter by status: active|completed|cancelled")
     .option("--limit <n>", "Maximum enrollments to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of enrollments to skip", "0")
@@ -242,6 +258,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceStepCmd
     .command("add <name>")
     .description("Add a step to a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .requiredOption("--step <number>", "Step number (1, 2, 3...)")
     .requiredOption("--delay <hours>", "Delay in hours before sending this step")
     .requiredOption("--template <name>", "Template name to use")
@@ -268,21 +285,23 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceStepCmd
     .command("list <name>")
     .description("List steps in a sequence")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (name: string) => {
       try {
         const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const steps = await listSteps(seq!.id);
         if (steps.length === 0) {
-          console.log(chalk.dim("No steps."));
+          output([], chalk.dim("No steps."));
           return;
         }
-        console.log(chalk.bold(`\nSteps for '${name}':`));
+        const lines = [chalk.bold(`\nSteps for '${name}':`)];
         for (const step of steps) {
           const fromStr = step.from_address ? ` from ${step.from_address}` : "";
-          console.log(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
+          lines.push(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
         }
-        console.log();
+        lines.push("");
+        output(steps, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -291,6 +310,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceStepCmd
     .command("remove <step-id>")
     .description("Remove a step by ID")
+    .option("-j, --json", "Print JSON output", false)
     .action(async (stepId: string) => {
       try {
         const removed = await removeStep(stepId);

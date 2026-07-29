@@ -7,11 +7,15 @@ import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } fro
 export function registerContactCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // `contact` is the canonical command; `contacts` kept as alias for backwards compat
   for (const name of ["contact", "contacts"]) {
-    const cmd = program.command(name).description("Manage email contacts");
+    const cmd = program
+      .command(name)
+      .description("Manage email contacts")
+      .option("-j, --json", "Print JSON output", false);
 
     cmd
       .command("list")
       .description("List contacts")
+      .option("-j, --json", "Print JSON output", false)
       .option("--suppressed", "Show only suppressed contacts")
       .option("--limit <n>", "Maximum contacts to show (default 20 compact, 50 verbose/json)")
       .option("--offset <n>", "Number of contacts to skip", "0")
@@ -69,6 +73,7 @@ export function registerContactCommands(program: Command, output: (data: unknown
     cmd
       .command("suppress <email>")
       .description("Suppress a contact (prevent sending)")
+      .option("-j, --json", "Print JSON output", false)
       .action(async (email: string) => {
         try {
           await suppressContact(email);
@@ -79,6 +84,7 @@ export function registerContactCommands(program: Command, output: (data: unknown
     cmd
       .command("unsuppress <email>")
       .description("Unsuppress a contact (allow sending again)")
+      .option("-j, --json", "Print JSON output", false)
       .action(async (email: string) => {
         try {
           await unsuppressContact(email);
