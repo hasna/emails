@@ -15099,6 +15099,581 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     }
   },
   {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "idp_principals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sub": {
+                "type": "string"
+              },
+              "tenant_id": {
+                "type": "string"
+              },
+              "idp_tid": {
+                "type": "string",
+                "nullable": true
+              },
+              "principal_type": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "service"
+                ]
+              },
+              "note": {
+                "type": "string",
+                "nullable": true
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "revoked_at": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            },
+            "required": [
+              "sub",
+              "tenant_id",
+              "idp_tid",
+              "principal_type",
+              "revoked_at"
+            ]
+          }
+        }
+      },
+      "required": [
+        "idp_principals"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 201,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "grant": {
+          "type": "object",
+          "properties": {
+            "sub": {
+              "type": "string"
+            },
+            "tenant_id": {
+              "type": "string"
+            },
+            "idp_tid": {
+              "type": "string",
+              "nullable": true
+            },
+            "principal_type": {
+              "type": "string",
+              "enum": [
+                "user",
+                "service"
+              ]
+            },
+            "note": {
+              "type": "string",
+              "nullable": true
+            },
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "revoked_at": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true
+            }
+          },
+          "required": [
+            "sub",
+            "tenant_id",
+            "idp_tid",
+            "principal_type",
+            "revoked_at"
+          ]
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 400,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revoked",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "restored": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "restored",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revoked",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
     "method": "POST",
     "operationId": "acceptInvite",
     "path": "/v1/invites/accept",

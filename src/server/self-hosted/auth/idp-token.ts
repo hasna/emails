@@ -29,6 +29,15 @@ export const IDP_JWKS_URL_ENV = "EMAILS_IDP_JWKS_URL";
 /** Optional override for the JWKS cache TTL (seconds). */
 export const IDP_JWKS_CACHE_SECONDS_ENV = "EMAILS_IDP_JWKS_CACHE_SECONDS";
 export const DEFAULT_IDP_JWKS_CACHE_SECONDS = 300;
+/**
+ * Optional override for the maximum JWKS staleness (seconds). Stale-if-error
+ * keeps the last-good key set through TRANSIENT fetch failures, but only up to
+ * this ceiling: past it the cache is discarded and verification fails with the
+ * typed 503 the class promises, because keys that have been unverifiable for
+ * this long are no longer evidence of anything. Must be >= the cache TTL.
+ */
+export const IDP_JWKS_MAX_STALE_SECONDS_ENV = "EMAILS_IDP_JWKS_MAX_STALE_SECONDS";
+export const DEFAULT_IDP_JWKS_MAX_STALE_SECONDS = 3_600;
 
 export interface IdpTokenClaims {
   /** Fixed idp issuer string (IDP_TOKEN_ISSUER). */
@@ -45,6 +54,8 @@ export interface IdpTokenClaims {
   scope: string[];
   iat: number;
   exp: number;
+  /** Optional not-before, epoch seconds; enforced when present. */
+  nbf?: number;
   /** Token id (audit join key between IdP and emails). */
   jti: string;
 }
@@ -61,6 +72,7 @@ export interface IdpJwk {
 export type IdpVerifyFailureReason =
   | "malformed"
   | "unsupported_alg"
+  | "unsupported_typ"
   | "missing_kid"
   | "unknown_kid"
   | "bad_signature"
@@ -84,7 +96,12 @@ export function looksLikeIdpToken(token: string): boolean {
   if (parts.length !== 3) return false;
   try {
     const header = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
-    return header?.typ === IDP_TOKEN_TYPE || header?.alg === IDP_TOKEN_ALG;
+    // The declared token TYPE decides the class, not the signature algorithm:
+    // matching on `alg` alone routed every EdDSA JWS the IdP key ever signs —
+    // refresh tokens, id tokens, anything future — into the access-token
+    // verifier, which then had to be trusted to notice. The wire contract pins
+    // typ "at+jwt"; anything else is not this credential class.
+    return header?.typ === IDP_TOKEN_TYPE;
   } catch {
     return false;
   }
@@ -151,8 +168,12 @@ export function verifyIdpToken(token: string, options: VerifyIdpTokenOptions): I
   // The signing keys are shared by the IdP's token families, so signature,
   // issuer and audience alone do not prove this is an access token. Pin the
   // wire type from ADR-0001 to prevent a different, correctly signed JWS from
-  // being accepted at the bearer-token boundary.
-  if (header.typ !== IDP_TOKEN_TYPE) return { ok: false, reason: "malformed" };
+  // being accepted at the bearer-token boundary — enforced HERE, not only in
+  // the dispatcher's structural sniff, so a direct verify call cannot accept
+  // an id/refresh token the same key happens to sign. The refusal is TYPED
+  // (`unsupported_typ`, mirroring `unsupported_alg`), not folded into
+  // `malformed`: the token parses fine, it is the declared type that is wrong.
+  if (header.typ !== IDP_TOKEN_TYPE) return { ok: false, reason: "unsupported_typ" };
   if (!header.kid) return { ok: false, reason: "missing_kid" };
   const jwk = options.jwks.find((k) => k.kid === header.kid);
   if (!jwk) return { ok: false, reason: "unknown_kid" };
@@ -172,6 +193,7 @@ export function verifyIdpToken(token: string, options: VerifyIdpTokenOptions): I
   const leeway = options.leewaySeconds ?? 0;
   if (typeof claims.exp !== "number" || nowSec > claims.exp + leeway) return { ok: false, reason: "expired" };
   if (typeof claims.iat === "number" && claims.iat - leeway > nowSec) return { ok: false, reason: "not_yet_valid" };
+  if (typeof claims.nbf === "number" && claims.nbf - leeway > nowSec) return { ok: false, reason: "not_yet_valid" };
   if (!validClaims(claims)) return { ok: false, reason: "invalid_claims" };
   return { ok: true, claims, kid: header.kid };
 }
@@ -205,7 +227,8 @@ export type IdpAuthenticateResult =
   | { ok: false; reason: "jwks_unavailable"; status: 503 };
 
 export interface IdpJwksEvent {
-  type: "refresh" | "error";
+  /** `expired`: the stale-if-error ceiling discarded an unrefreshable key set. */
+  type: "refresh" | "error" | "expired";
   /** Host only — never a token, never key material. */
   urlHost: string;
   kids?: string[];
@@ -216,6 +239,8 @@ export interface IdpTokenAuthenticatorOptions {
   jwksUrl: string;
   expectedAudiences: readonly string[];
   cacheSeconds?: number;
+  /** Hard stale-if-error ceiling (seconds); see IDP_JWKS_MAX_STALE_SECONDS_ENV. */
+  maxStaleSeconds?: number;
   leewaySeconds?: number;
   /** Test/embedding seam; production uses the built-in fetch. */
   fetchJwks?: (url: string) => Promise<unknown>;
@@ -224,6 +249,13 @@ export interface IdpTokenAuthenticatorOptions {
   onEvent?: (event: IdpJwksEvent) => void;
 }
 
+/**
+ * Parse a fetched JWKS document. `null` means the DOCUMENT is malformed (not a
+ * `{ keys: [...] }` object) — an error, handled stale-if-error. An EMPTY array
+ * is a well-formed answer meaning "no usable Ed25519 keys exist": that is how
+ * an IdP fully revokes its signing keys, and it must REPLACE any cached set
+ * rather than be mistaken for a fetch failure that keeps trusting removed keys.
+ */
 function parseJwksDocument(value: unknown): IdpJwk[] | null {
   if (!value || typeof value !== "object") return null;
   const keys = (value as { keys?: unknown }).keys;
@@ -236,7 +268,7 @@ function parseJwksDocument(value: unknown): IdpJwk[] | null {
       out.push({ kty: "OKP", crv: "Ed25519", x: jwk["x"], kid: jwk["kid"], use: "sig", alg: "EdDSA" });
     }
   }
-  return out.length > 0 ? out : null;
+  return out;
 }
 
 async function defaultFetchJwks(url: string): Promise<unknown> {
@@ -253,13 +285,17 @@ async function defaultFetchJwks(url: string): Promise<unknown> {
  *
  * Cache policy: TTL-cached; an UNKNOWN kid forces one refetch within a request
  * (key rotation); a failed refresh falls back to the last good key set (keys
- * rotate rarely and signatures still decide) but NEVER to accepting anything —
- * with no key set at all the result is a typed 503, fail closed.
+ * rotate rarely and signatures still decide) but only within the max-staleness
+ * ceiling, and NEVER to accepting anything — with no key set at all, or a key
+ * set older than the ceiling, the result is a typed 503, fail closed. An
+ * EMPTY fetched key set is a revocation and replaces the cache (see
+ * parseJwksDocument).
  */
 export class IdpTokenAuthenticator {
   readonly jwksUrl: string;
   private readonly expectedAudiences: readonly string[];
   private readonly cacheMs: number;
+  private readonly maxStaleMs: number;
   private readonly leewaySeconds: number | undefined;
   private readonly fetchJwks: (url: string) => Promise<unknown>;
   private readonly nowMs: () => number;
@@ -272,6 +308,12 @@ export class IdpTokenAuthenticator {
     this.jwksUrl = options.jwksUrl;
     this.expectedAudiences = options.expectedAudiences;
     this.cacheMs = (options.cacheSeconds ?? DEFAULT_IDP_JWKS_CACHE_SECONDS) * 1_000;
+    // The ceiling can never undercut the TTL itself, or a fresh fetch would be
+    // discarded as stale on arrival.
+    this.maxStaleMs = Math.max(
+      (options.maxStaleSeconds ?? DEFAULT_IDP_JWKS_MAX_STALE_SECONDS) * 1_000,
+      this.cacheMs,
+    );
     this.leewaySeconds = options.leewaySeconds;
     this.fetchJwks = options.fetchJwks ?? defaultFetchJwks;
     this.nowMs = options.nowMs ?? (() => Date.now());
@@ -292,7 +334,10 @@ export class IdpTokenAuthenticator {
       this.inflight = (async () => {
         try {
           const parsed = parseJwksDocument(await this.fetchJwks(this.jwksUrl));
-          if (!parsed) throw new Error("JWKS document has no usable Ed25519 keys");
+          if (!parsed) throw new Error("JWKS document is malformed (no keys array)");
+          // A well-formed document ALWAYS replaces the cache — including an
+          // empty one, which is the IdP revoking every signing key. Only a
+          // fetch/parse failure falls through to stale-if-error below.
           this.keys = parsed;
           this.fetchedAtMs = this.nowMs();
           this.onEvent?.({ type: "refresh", urlHost: this.urlHost(), kids: parsed.map((k) => k.kid) });
@@ -302,7 +347,8 @@ export class IdpTokenAuthenticator {
             urlHost: this.urlHost(),
             error: error instanceof Error ? error.message : String(error),
           });
-          // Keep any previous key set (stale-if-error); callers fail typed when none exists.
+          // Keep any previous key set (stale-if-error, bounded by the ceiling
+          // in currentKeys); callers fail typed when none survives.
         } finally {
           this.inflight = null;
         }
@@ -311,9 +357,22 @@ export class IdpTokenAuthenticator {
     await this.inflight;
   }
 
+  /**
+   * Enforce the max-staleness ceiling: a key set that could not be refreshed
+   * for longer than the ceiling is discarded, so authentication fails with the
+   * typed 503 instead of trusting keys the IdP may long since have rotated.
+   */
+  private enforceStalenessCeiling(): void {
+    if (this.keys !== null && this.nowMs() - this.fetchedAtMs >= this.maxStaleMs) {
+      this.keys = null;
+      this.onEvent?.({ type: "expired", urlHost: this.urlHost() });
+    }
+  }
+
   private async currentKeys(): Promise<IdpJwk[] | null> {
     const fresh = this.keys !== null && this.nowMs() - this.fetchedAtMs < this.cacheMs;
     if (!fresh) await this.refresh();
+    this.enforceStalenessCeiling();
     return this.keys;
   }
 
@@ -329,6 +388,7 @@ export class IdpTokenAuthenticator {
     if (!result.ok && result.reason === "unknown_kid") {
       // Possible key rotation since the last fetch: refresh once and retry.
       await this.refresh();
+      this.enforceStalenessCeiling();
       keys = this.keys;
       if (!keys) return { ok: false, reason: "jwks_unavailable", status: 503 };
       result = verifyIdpToken(token, {
@@ -377,10 +437,21 @@ export function buildIdpAuthenticatorFromEnv(
   if (cacheSeconds !== undefined && (!Number.isFinite(cacheSeconds) || cacheSeconds <= 0)) {
     throw new Error(`${IDP_JWKS_CACHE_SECONDS_ENV} must be a positive number of seconds.`);
   }
+  const maxStaleRaw = env[IDP_JWKS_MAX_STALE_SECONDS_ENV]?.trim();
+  const maxStaleSeconds = maxStaleRaw ? Number(maxStaleRaw) : undefined;
+  if (maxStaleSeconds !== undefined) {
+    const floor = cacheSeconds ?? DEFAULT_IDP_JWKS_CACHE_SECONDS;
+    if (!Number.isFinite(maxStaleSeconds) || maxStaleSeconds < floor) {
+      throw new Error(
+        `${IDP_JWKS_MAX_STALE_SECONDS_ENV} must be a number of seconds >= the JWKS cache TTL (${floor}).`,
+      );
+    }
+  }
   return new IdpTokenAuthenticator({
     jwksUrl: url,
     expectedAudiences,
     ...(cacheSeconds !== undefined ? { cacheSeconds } : {}),
+    ...(maxStaleSeconds !== undefined ? { maxStaleSeconds } : {}),
     ...(onEvent ? { onEvent } : {}),
   });
 }

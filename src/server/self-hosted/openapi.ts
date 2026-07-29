@@ -460,6 +460,21 @@ const tenantKeyListItemSchema = {
   ],
 } as const;
 
+/** One IdP-principal federation grant row (ADR-0001/0002 operator surface). */
+const idpPrincipalGrantSchema = {
+  type: "object",
+  properties: {
+    sub: { type: "string" },
+    tenant_id: { type: "string" },
+    idp_tid: { type: "string", nullable: true },
+    principal_type: { type: "string", enum: ["user", "service"] },
+    note: { type: "string", nullable: true },
+    created_at: { type: "string", format: "date-time" },
+    revoked_at: { type: "string", format: "date-time", nullable: true },
+  },
+  required: ["sub", "tenant_id", "idp_tid", "principal_type", "revoked_at"],
+} as const;
+
 const sendKeySchema = {
   type: "object",
   properties: {
@@ -1517,6 +1532,7 @@ const listParams = [
 ] as const;
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
+const subParam = [{ name: "sub", in: "path", required: true, schema: { type: "string" } }] as const;
 const attachmentRepairIdParam = [{
   name: "id",
   in: "path",
@@ -1770,7 +1786,9 @@ function addRoutineErrorParity(document: EmailsOpenApiDocument): void {
         || path.startsWith("/v1/memberships/")
         || path === "/v1/invites/accept"
         || path === "/v1/keys"
-        || path.startsWith("/v1/keys/");
+        || path.startsWith("/v1/keys/")
+        || path === "/v1/idp-principals"
+        || path.startsWith("/v1/idp-principals/");
 
       if (protectedVersionedOperation) {
         setRoutineErrorResponse(
@@ -2927,6 +2945,135 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
                     kid: { type: "string" },
                   },
                   required: ["revoked", "kid"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals": {
+      get: {
+        operationId: "listIdpPrincipals",
+        summary: "List this tenant's IdP-principal federation grants (revoked included); tenant operator required",
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    idp_principals: {
+                      type: "array",
+                      items: idpPrincipalGrantSchema,
+                    },
+                  },
+                  required: ["idp_principals"],
+                },
+              },
+            },
+          },
+        },
+      },
+      post: {
+        operationId: "grantIdpPrincipal",
+        summary: "Grant an IdP principal (sub) access to the caller's tenant; a re-grant never un-revokes",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  sub: { type: "string" },
+                  idp_tid: { type: "string", nullable: true },
+                  principal_type: { type: "string", enum: ["user", "service"] },
+                  note: { type: "string", nullable: true },
+                },
+                required: ["sub"],
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    grant: idpPrincipalGrantSchema,
+                    warning: { type: "string" },
+                  },
+                  required: ["grant"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}": {
+      delete: {
+        operationId: "revokeIdpPrincipal",
+        summary: "Throw the emails-side kill switch on a federation grant; tenant operator required",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["revoked", "sub"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}/revoke": {
+      post: {
+        operationId: "revokeIdpPrincipalByPost",
+        summary: "Compatibility verb for revoking a federation grant",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["revoked", "sub"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}/restore": {
+      post: {
+        operationId: "restoreIdpPrincipal",
+        summary: "Deliberately lift the kill switch on one federation grant; tenant operator required",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    restored: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["restored", "sub"],
                 },
               },
             },

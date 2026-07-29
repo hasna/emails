@@ -66,13 +66,17 @@ describe("verifyIdpToken", () => {
   });
 
   it("refuses a signed JWS that is not explicitly an access token", () => {
+    // Two layers agree, and both are pinned: the structural sniff does not even
+    // CLASS a non-`at+jwt` JWS as this credential (typ decides the class, not the
+    // signature algorithm), and a direct verify call refuses it TYPED — the token
+    // parses fine, it is the declared type that is wrong.
     const wrongType = signTestIdpToken(key, { header: { alg: "EdDSA", kid: key.kid, typ: "JWT" } });
-    expect(looksLikeIdpToken(wrongType.token)).toBe(true);
-    expect(verify(wrongType.token)).toEqual({ ok: false, reason: "malformed" });
+    expect(looksLikeIdpToken(wrongType.token)).toBe(false);
+    expect(verify(wrongType.token)).toEqual({ ok: false, reason: "unsupported_typ" });
 
     const missingType = signTestIdpToken(key, { header: { alg: "EdDSA", kid: key.kid } });
-    expect(looksLikeIdpToken(missingType.token)).toBe(true);
-    expect(verify(missingType.token)).toEqual({ ok: false, reason: "malformed" });
+    expect(looksLikeIdpToken(missingType.token)).toBe(false);
+    expect(verify(missingType.token)).toEqual({ ok: false, reason: "unsupported_typ" });
   });
 
   it("refuses a header without kid (missing_kid)", () => {

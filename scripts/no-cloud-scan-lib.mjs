@@ -203,7 +203,7 @@ const exactLegacyHostedEnvUnsetBridgeSpec = {
   path: "scripts/run-hermetic-tests.sh",
   startAnchor: "run_scrubbed() {\n",
   endAnchor: '    "$@"\n',
-  sha256: "18b1bd8e8dc7b8b43986e1787c9f400946a2299d939fd7957defdce2c9e322d2",
+  sha256: "edb93fbafacf86ca83122b98c7b7ffb31718dc3a42ac34eb0d1577408cf1b375",
 };
 
 function locateExactLegacyHostedEnvUnsetBridge(content, path) {

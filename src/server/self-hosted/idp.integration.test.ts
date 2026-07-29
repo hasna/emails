@@ -106,6 +106,23 @@ describe.skipIf(!pg)("migration 0021 — idp_principal_tenants", () => {
     await pg!.execute(migration.sql);
     expect(migration).toBeDefined();
   });
+
+  it("keys the table on (sub, tenant_id) after 0024, idempotently", async () => {
+    const migration = emailsSelfHostedMigrations().find(
+      (m) => m.id === "0024_idp_principal_tenants_multi_grant",
+    )!;
+    await pg!.execute(migration.sql);
+    await pg!.execute(migration.sql);
+    const index = await pg!.get<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'idp_principal_tenants_sub_tenant_key'`,
+    );
+    expect(index?.indexdef).toContain("UNIQUE");
+    const pk = await pg!.get<{ conname: string }>(
+      `SELECT conname FROM pg_constraint WHERE conname = 'idp_principal_tenants_pkey'`,
+    );
+    expect(pk).toBeNull();
+  });
 });
 
 describe.skipIf(!pg)("AuthStore idp mapping — real SQL round-trip", () => {
@@ -118,7 +135,7 @@ describe.skipIf(!pg)("AuthStore idp mapping — real SQL round-trip", () => {
       idpTid: IDP_TID,
       note: "integration",
     });
-    const mapping = await store().getIdpPrincipalTenant("sp-roundtrip");
+    const [mapping] = await store().listIdpPrincipalTenantsForSub("sp-roundtrip");
     expect(mapping).toMatchObject({
       sub: "sp-roundtrip",
       tenantId: TENANT_ID,
@@ -128,13 +145,42 @@ describe.skipIf(!pg)("AuthStore idp mapping — real SQL round-trip", () => {
     });
 
     expect(await store().revokeIdpPrincipalTenant("sp-roundtrip")).toBe(true);
-    const revoked = await store().getIdpPrincipalTenant("sp-roundtrip");
+    const [revoked] = await store().listIdpPrincipalTenantsForSub("sp-roundtrip");
     expect(revoked?.revokedAt).not.toBeNull();
     // Second revoke is a no-op, reported as such.
     expect(await store().revokeIdpPrincipalTenant("sp-roundtrip")).toBe(false);
-    // Re-granting clears the revocation (explicit re-grant, audited by caller).
-    await store().upsertIdpPrincipalTenant({ sub: "sp-roundtrip", tenantId: TENANT_ID, idpTid: IDP_TID });
-    expect((await store().getIdpPrincipalTenant("sp-roundtrip"))?.revokedAt).toBeNull();
+    // Re-granting must NOT resurrect the kill switch: the revocation stands
+    // until the explicit restore operation lifts it.
+    const regrant = await store().upsertIdpPrincipalTenant({ sub: "sp-roundtrip", tenantId: TENANT_ID, idpTid: IDP_TID });
+    expect(regrant?.revokedAt).not.toBeNull();
+    expect((await store().listIdpPrincipalTenantsForSub("sp-roundtrip"))[0]?.revokedAt).not.toBeNull();
+    expect(await store().restoreIdpPrincipalTenant("sp-roundtrip", TENANT_ID)).toBe(true);
+    expect((await store().listIdpPrincipalTenantsForSub("sp-roundtrip"))[0]?.revokedAt).toBeNull();
+  });
+
+  it("holds several tenant grants per sub, each with an independent kill switch", async () => {
+    const second = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await pg!.execute(
+      `INSERT INTO tenants (id, slug, name, status) VALUES ($1, 'idp-second', 'Second', 'active')
+       ON CONFLICT (id) DO NOTHING`,
+      [second],
+    );
+    await store().upsertIdpPrincipalTenant({ sub: "sp-multi", tenantId: TENANT_ID, idpTid: IDP_TID });
+    await store().upsertIdpPrincipalTenant({ sub: "sp-multi", tenantId: second, idpTid: IDP_TID });
+    const grants = await store().listIdpPrincipalTenantsForSub("sp-multi");
+    // Granting the second tenant did NOT re-point (revoke) the first grant.
+    expect(grants.map((g) => g.tenantId).sort()).toEqual([TENANT_ID, second].sort());
+
+    // A tenant-scoped revoke kills exactly one grant.
+    expect(await store().revokeIdpPrincipalTenant("sp-multi", second)).toBe(true);
+    const after = await store().listIdpPrincipalTenantsForSub("sp-multi");
+    expect(after.find((g) => g.tenantId === second)?.revokedAt).not.toBeNull();
+    expect(after.find((g) => g.tenantId === TENANT_ID)?.revokedAt).toBeNull();
+
+    // The unscoped incident path kills everything left.
+    expect(await store().revokeIdpPrincipalTenant("sp-multi")).toBe(true);
+    const killed = await store().listIdpPrincipalTenantsForSub("sp-multi");
+    expect(killed.every((g) => g.revokedAt !== null)).toBe(true);
   });
 
   it("fails closed when the mapped tenant is suspended", async () => {
@@ -145,7 +191,7 @@ describe.skipIf(!pg)("AuthStore idp mapping — real SQL round-trip", () => {
       [suspended],
     );
     await store().upsertIdpPrincipalTenant({ sub: "sp-suspended", tenantId: suspended });
-    expect(await store().getIdpPrincipalTenant("sp-suspended")).toBeNull();
+    expect(await store().listIdpPrincipalTenantsForSub("sp-suspended")).toEqual([]);
   });
 });
 

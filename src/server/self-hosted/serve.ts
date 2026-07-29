@@ -6,7 +6,7 @@
 import { ApiKeyStore, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import { assertServingRoleCannotBypassRls } from "./rls-guard.js";
 import { getSelfHostedPool, requireSigningSecret, SELF_HOSTED_APP, SELF_HOSTED_APP_ALIASES } from "./env.js";
-import { verifyApiKeyWithAliases } from "./api-key-verifier.js";
+import { formatApiAuthAuditLine, verifyApiKeyWithAliases } from "./api-key-verifier.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
@@ -38,11 +38,8 @@ export function buildSelfHostedService(version: string): SelfHostedServiceDeps {
       signingSecret,
       isRevoked: keys.statusChecker(),
       audit: (e) => {
-        // Structured, secret-free audit line (kid + outcome only).
-        console.log(
-          `[api-auth] ${e.outcome} app=${e.app} kid=${e.kid ?? "-"} reason=${e.reason ?? "-"} ` +
-            `${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`,
-        );
+        // Structured, secret-free audit line (kid + tenant + outcome only).
+        console.log(formatApiAuthAuditLine(e));
       },
     },
     [SELF_HOSTED_APP, ...SELF_HOSTED_APP_ALIASES],
