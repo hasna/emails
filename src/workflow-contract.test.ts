@@ -82,6 +82,7 @@ describe("repository workflow safety", () => {
     const ci = readWorkflow("ci.yml");
     expect(ci.match(/bun-version:\s*1\.3\.14/g)).toHaveLength(2);
     expect(ci).not.toContain("bun-version: 1.3.13");
+    expect(ci).toContain("PATH=/usr/bin:/bin ./deploy/aws/tests/static_contract.sh");
   });
 
   it("scans the locally patched Bun base without weakening either vulnerability gate", () => {

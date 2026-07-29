@@ -148,6 +148,11 @@ export function verifyIdpToken(token: string, options: VerifyIdpTokenOptions): I
     return { ok: false, reason: "malformed" };
   }
   if (header.alg !== IDP_TOKEN_ALG) return { ok: false, reason: "unsupported_alg" };
+  // The signing keys are shared by the IdP's token families, so signature,
+  // issuer and audience alone do not prove this is an access token. Pin the
+  // wire type from ADR-0001 to prevent a different, correctly signed JWS from
+  // being accepted at the bearer-token boundary.
+  if (header.typ !== IDP_TOKEN_TYPE) return { ok: false, reason: "malformed" };
   if (!header.kid) return { ok: false, reason: "missing_kid" };
   const jwk = options.jwks.find((k) => k.kid === header.kid);
   if (!jwk) return { ok: false, reason: "unknown_kid" };
@@ -350,10 +355,22 @@ export function buildIdpAuthenticatorFromEnv(
 ): IdpTokenAuthenticator | null {
   const url = env[IDP_JWKS_URL_ENV]?.trim();
   if (!url) return null;
+  let parsed: URL;
   try {
-    new URL(url);
+    parsed = new URL(url);
   } catch {
     throw new Error(`${IDP_JWKS_URL_ENV} is not a valid URL.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${IDP_JWKS_URL_ENV} must use http or https.`);
+  }
+  const loopback =
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "::1" ||
+    parsed.hostname === "[::1]";
+  if (parsed.protocol !== "https:" && !loopback) {
+    throw new Error(`${IDP_JWKS_URL_ENV} must use https except for a loopback development URL.`);
   }
   const cacheRaw = env[IDP_JWKS_CACHE_SECONDS_ENV]?.trim();
   const cacheSeconds = cacheRaw ? Number(cacheRaw) : undefined;
