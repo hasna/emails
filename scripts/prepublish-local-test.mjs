@@ -22,7 +22,7 @@ const legacyKeys = [
   ["HASNA", "EMAILS", "STORAGE", "MODE"],
 ];
 
-const env = { ...process.env, HOME: tmpHome, EMAILS_MODE: "local", EMAILS_DB_PATH: ":memory:" };
+const env = { ...process.env, HOME: tmpHome, EMAILS_DB_PATH: ":memory:" };
 for (const key of legacyKeys) delete env[key.join("_")];
 
 try {

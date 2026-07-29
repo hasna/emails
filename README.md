@@ -69,8 +69,8 @@ emails inbox list --folder unread --source provider:<id>
 emails email list
 
 # Operate a self-hosted PostgreSQL service
-EMAILS_MODE=self_hosted EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails db migrate
-EMAILS_MODE=self_hosted EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails self-hosted key create
+EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails db migrate
+EMAILS_DATABASE_URL=postgres://... EMAILS_API_SIGNING_KEY=... emails self-hosted key create
 ```
 
 ## Domain Modes

@@ -81,7 +81,6 @@ describe("effective pg TLS configuration", () => {
 
   test("the shared migration and runtime pool keeps the verified CA effective", () => {
     const result = getSelfHostedPool({
-      EMAILS_MODE: "self_hosted",
       EMAILS_DATABASE_URL: "postgresql://emails:password@db.example/emails?sslmode=require",
       EMAILS_DATABASE_CA_FILE: caFile("RDS CA"),
       EMAILS_API_SIGNING_KEY: "a-signing-key-that-is-at-least-32-characters",

@@ -1407,6 +1407,21 @@ const root = join(import.meta.dir, "..");
  * providers. Corpus of the merged tree: 644 tracked, 643 scanned, ~10.36M
  * characters. Re-measured AFTER this paragraph was written, because this file sits
  * inside the corpus it scans.
+ *
+ * RE-MEASURED AND RE-PINNED ON THE SERVER-SIDE AXIS DELETION, rebased after the
+ * events and owners collapses above. Unlike those client-family collapses, this
+ * change deletes no arm family and no facade. It removes the service binary's
+ * separate storage selector, so the operator service now chooses its internal
+ * store from the database setting alone: set means the Postgres-backed `/v1`
+ * service, unset means the SQLite dashboard.
+ *
+ * Only the service-side counters move. The structural pair, facade pair and
+ * resource counters stay at the current-main measurements because no client
+ * family was collapsed. The predicate counter loses the service definition and
+ * its migration caller; the resolver counter loses the service entry-point read;
+ * and the environment counter loses the service, deployment and smoke-test
+ * spellings that used to configure the retired selector. The client half still
+ * exists and this PR does not claim otherwise.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 14,
@@ -1415,11 +1430,11 @@ const CEILINGS: Record<string, number> = {
   routedCallExpressions: 115,
   selfHostedResourceBranches: 9,
   selfHostedResourceReferences: 36,
-  isSelfHostedModeReferences: 34,
+  isSelfHostedModeReferences: 31,
   getEmailsModeReferences: 55,
-  resolveEmailsModeReferences: 65,
+  resolveEmailsModeReferences: 64,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 219,
+  emailsModeEnvReferences: 209,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in

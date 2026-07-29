@@ -1,5 +1,9 @@
 import { createPgPool, createQueryClient, type PoolQueryClient } from "../../storage-kit/index.js";
 import { assertNoLegacyHostedEnvironment } from "../../lib/mode.js";
+import {
+  SERVER_DATABASE_URL_SETTING,
+  resolveServerStorageBackend,
+} from "../storage-backend.js";
 
 // API-key app slug. "emails" is canonical and matches the published package,
 // the deployed bin, and hasna.contract.json. The unreleased "mailery" rename
@@ -8,8 +12,15 @@ import { assertNoLegacyHostedEnvironment } from "../../lib/mode.js";
 // `keys list`/`keys revoke` still find those keys.
 export const SELF_HOSTED_APP = "emails";
 export const SELF_HOSTED_APP_ALIASES = ["mailery"] as const;
-export const SELF_HOSTED_MODE_ENV = "EMAILS_MODE";
-export const SELF_HOSTED_DATABASE_ENV = "EMAILS_DATABASE_URL";
+/**
+ * The setting that selects operator-owned PostgreSQL, re-exported under this module's
+ * historical name so its callers keep one import site.
+ *
+ * It is DEFINED in src/server/storage-backend.ts, which is the only place the server
+ * decides its internal store. There used to be a second constant here naming a
+ * deployment word; it is gone, along with the branch that read it.
+ */
+export const SELF_HOSTED_DATABASE_ENV = SERVER_DATABASE_URL_SETTING;
 export const SELF_HOSTED_SIGNING_ENV = "EMAILS_API_SIGNING_KEY";
 
 // Removed hosted-runtime vars kept rejected.
@@ -33,32 +44,24 @@ export function assertSelfHostedEnvironment(env: NodeJS.ProcessEnv = process.env
     if (env[key]?.trim()) {
       throw new Error(
         `${key} belongs to the removed Mailery/cloud runtime. ` +
-          `Use EMAILS_MODE=self_hosted, ${SELF_HOSTED_DATABASE_ENV}, and ${SELF_HOSTED_SIGNING_ENV}.`,
+          `Use ${SELF_HOSTED_DATABASE_ENV} and ${SELF_HOSTED_SIGNING_ENV}.`,
       );
     }
   }
-  const mode = env[SELF_HOSTED_MODE_ENV]?.trim();
-  if (mode !== "self_hosted") {
+  // The deployment word is REFUSED here rather than merely unread, and the refusal comes
+  // from the one module that owns the decision — so an operator who carried the retired
+  // variable forward is told to delete it instead of watching it do nothing.
+  if (resolveServerStorageBackend(env) !== "postgresql") {
     throw new Error(
-      `Emails self-hosted service requires ${SELF_HOSTED_MODE_ENV}=self_hosted exactly; ` +
-        "cloud, remote, and hybrid aliases are not supported.",
+      `Emails operator API requires ${SELF_HOSTED_DATABASE_ENV}. ` +
+        "Leave it unset only to run the local SQLite dashboard, which needs no PostgreSQL.",
     );
-  }
-  if (!env[SELF_HOSTED_DATABASE_ENV]?.trim()) {
-    throw new Error(`Emails self-hosted service requires ${SELF_HOSTED_DATABASE_ENV}.`);
   }
 }
 
-export function isSelfHostedMode(env: NodeJS.ProcessEnv = process.env): boolean {
-  const mode = env[SELF_HOSTED_MODE_ENV]?.trim();
-  if (!mode || mode === "local") return false;
-  if (mode !== "self_hosted") {
-    throw new Error(
-      `Unsupported Emails mode '${mode}'. Use exactly local or self_hosted; ` +
-        "cloud, remote, and hybrid aliases were removed.",
-    );
-  }
-  return true;
+/** True when this process is configured to serve its own PostgreSQL. */
+export function usesPostgresBackend(env: NodeJS.ProcessEnv = process.env): boolean {
+  return resolveServerStorageBackend(env) === "postgresql";
 }
 
 export function requireSigningSecret(env: NodeJS.ProcessEnv = process.env): string {

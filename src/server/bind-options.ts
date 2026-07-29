@@ -1,4 +1,16 @@
-export type ServerMode = "local" | "self_hosted";
+import type { ServerStorageBackend } from "./storage-backend.js";
+
+/**
+ * The bind defaults follow the server's INTERNAL STORE, not a deployment mode.
+ *
+ * That is not a rename: the two defaults encode a security property that belongs to the
+ * store rather than to any product variant. A PostgreSQL server is reachable by other
+ * hosts by construction (its database is), so it binds 0.0.0.0:8080 behind the operator's
+ * own load balancer; a SQLite server holds one operator's private mailbox in a file under
+ * their home directory and binds loopback only, so nothing on the network can read it
+ * without an explicit `--host` and `EMAILS_ALLOW_REMOTE=1`.
+ */
+export type ServerMode = ServerStorageBackend;
 
 export interface ServerBindOptions {
   host: string;
@@ -42,16 +54,16 @@ function parsePort(raw: string, source: "--port" | "PORT"): number {
   return port;
 }
 
-/** Resolve bind settings with explicit CLI > environment > mode-default precedence. */
+/** Resolve bind settings with explicit CLI > environment > backend-default precedence. */
 export function resolveServerBindOptions(
   args: string[],
   env: Record<string, string | undefined>,
-  mode: ServerMode,
+  backend: ServerStorageBackend,
 ): ServerBindOptions {
   const hostFlag = optionValue(args, "--host");
   const portFlag = optionValue(args, "--port");
-  const defaultHost = mode === "self_hosted" ? "0.0.0.0" : "127.0.0.1";
-  const defaultPort = mode === "self_hosted" ? 8080 : 3900;
+  const defaultHost = backend === "postgresql" ? "0.0.0.0" : "127.0.0.1";
+  const defaultPort = backend === "postgresql" ? 8080 : 3900;
 
   const envPort = env["PORT"] || undefined;
   return {

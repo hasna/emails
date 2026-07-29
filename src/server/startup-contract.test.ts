@@ -60,7 +60,7 @@ describe("server startup contract", () => {
     const missingCutoff = Bun.spawnSync({
       cmd: ["bun", "src/server/index.ts", "inbound-provenance-audit"],
       cwd: join(import.meta.dir, "..", ".."),
-      env: { ...process.env, EMAILS_MODE: "self_hosted", EMAILS_DATABASE_URL: "" },
+      env: { ...process.env, EMAILS_DATABASE_URL: "" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -84,7 +84,7 @@ describe("server startup contract", () => {
     const invalid = Bun.spawnSync({
       cmd: ["bun", "src/server/index.ts", "inbound-provenance-fence", "--since", "host-clock"],
       cwd: join(import.meta.dir, "..", ".."),
-      env: { ...process.env, EMAILS_MODE: "self_hosted", EMAILS_DATABASE_URL: "" },
+      env: { ...process.env, EMAILS_DATABASE_URL: "" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -109,10 +109,15 @@ describe("server startup contract", () => {
     expect(combined).toContain("removed hosted/legacy runtime");
   });
 
-  it("selects the operator service without requiring self-hosted client credentials", () => {
+  it("selects the service from storage configuration, never from a deployment word", () => {
+    // The entrypoint used to resolve a deployment mode here. It now resolves the SERVER'S
+    // INTERNAL STORE, which is the same question asked of the configuration that actually
+    // answers it — and it must not reach for a client-credential-dependent resolver to do
+    // it, because an operator service has to boot without any client credential at all.
     const source = readFileSync(serverIndexFile, "utf8");
-    expect(source).toContain("resolveEmailsModeSelection");
-    expect(source).not.toMatch(/const mode = resolveEmailsMode\(\)\.mode/);
+    expect(source).toContain("resolveServerStorageBackend");
+    expect(source).not.toMatch(/resolveEmailsMode(?:Selection)?\(/);
+    expect(source).not.toMatch(/\bgetEmailsMode\b/);
   });
 
   for (const command of ["ingest-worker", "ingest-s3-backfill"] as const) {
@@ -122,7 +127,6 @@ describe("server startup contract", () => {
         delete env[key];
       }
       Object.assign(env, {
-        EMAILS_MODE: "self_hosted",
         EMAILS_DATABASE_URL: "postgres://operator.invalid/emails",
       });
       if (command === "ingest-worker") {
@@ -160,7 +164,6 @@ describe("server startup contract", () => {
       env: {
         PATH: process.env["PATH"] ?? "",
         HOME: home,
-        EMAILS_MODE: "local",
         EMAILS_DB_PATH: ":memory:",
         HOST: "invalid-host.invalid",
         PORT: "0",

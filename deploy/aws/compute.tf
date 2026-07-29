@@ -61,7 +61,6 @@ locals {
     { name = "HOST", value = "0.0.0.0" },
     { name = "HOME", value = "/tmp" },
     { name = "PORT", value = tostring(local.api_port) },
-    { name = "EMAILS_MODE", value = "self_hosted" },
     { name = "EMAILS_DATABASE_CA_FILE", value = local.database_ca_file },
     { name = "NODE_EXTRA_CA_CERTS", value = local.database_ca_file },
   ]

@@ -1,10 +1,10 @@
-// Migration runner for the Emails self_hosted Postgres schema.
+// Migration runner for the Emails operator-owned PostgreSQL schema.
 //
 // Used by the one-shot deploy migration task (`emails db migrate`) and by the
 // `emails db status` command. Runs directly against operator-owned Postgres.
 
 import { MigrationLedger } from "../../storage-kit/index.js";
-import { getSelfHostedPool, closeSelfHostedPool, isSelfHostedMode } from "./env.js";
+import { SELF_HOSTED_DATABASE_ENV, getSelfHostedPool, closeSelfHostedPool, usesPostgresBackend } from "./env.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
 export interface MigrateOutcome {
@@ -13,18 +13,18 @@ export interface MigrateOutcome {
   pending: string[];
 }
 
-function assertSelfHosted(): void {
-  if (!isSelfHostedMode()) {
+function assertPostgresBackend(): void {
+  if (!usesPostgresBackend()) {
     throw new Error(
-      "emails db migrate requires EMAILS_MODE=self_hosted and EMAILS_DATABASE_URL. " +
-        "Local mode uses SQLite and needs no Postgres migration runner.",
+      `emails db migrate requires ${SELF_HOSTED_DATABASE_ENV}. ` +
+        "A SQLite installation needs no PostgreSQL migration runner.",
     );
   }
 }
 
 /** Apply all pending migrations (or report the plan with `dryRun`). */
 export async function runMigrations(opts: { dryRun?: boolean } = {}): Promise<MigrateOutcome> {
-  assertSelfHosted();
+  assertPostgresBackend();
   const { client } = getSelfHostedPool();
   const migrations = emailsSelfHostedMigrations();
   try {

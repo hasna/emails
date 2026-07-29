@@ -290,23 +290,33 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain("process.env.PORT");
   });
 
-  test("uses a bounded SQLite-backed probe for every accepted local mode spelling", async () => {
-    expect(runtimeSmoke).toContain("--env EMAILS_MODE=local");
+  test("probes the endpoint the configured storage backend actually serves", async () => {
+    // THE HEALTHCHECK AND THE SERVER MUST AGREE ON ONE SETTING, and until this change they
+    // did not. The healthcheck keyed on the deployment word and treated its ABSENCE as the
+    // PostgreSQL arm (`/ready`), while src/server/index.ts treated the same absence as the
+    // SQLite arm (the dashboard, which serves no `/ready`). A container started with no
+    // deployment word therefore ran the dashboard and was probed for a route it does not
+    // have — permanently unhealthy, with no configuration error anywhere to explain it.
+    // Both now read EMAILS_DATABASE_URL, so they cannot disagree on any input.
+    expect(runtimeSmoke).not.toContain("EMAILS_MODE");
     expect(runtimeSmoke).toContain(
       'fetch("http://127.0.0.1:8080/api/providers?limit=1")',
     );
     expect(runtimeSmoke).not.toContain(
       'fetch("http://127.0.0.1:8080/ready")',
     );
-    expect(healthcheckScript).toContain("?.trim().toLowerCase()");
+    expect(healthcheckScript).toContain("EMAILS_DATABASE_URL");
+    expect(healthcheckScript).not.toContain("EMAILS_MODE");
 
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
       ...args: string[]
     ) => (...args: unknown[]) => Promise<void>;
-    const selectedUrl = async (mode?: string) => {
+    const selectedUrl = async (databaseUrl?: string) => {
       let url: string | undefined;
       let exitCode: number | undefined;
-      const env = mode === undefined ? { PORT: "8123" } : { EMAILS_MODE: mode, PORT: "8123" };
+      const env = databaseUrl === undefined
+        ? { PORT: "8123" }
+        : { EMAILS_DATABASE_URL: databaseUrl, PORT: "8123" };
       await new AsyncFunction("process", "fetch", healthcheckScript)(
         { env, exit: (code: number) => { exitCode = code; } },
         async (input: string) => {
@@ -318,11 +328,18 @@ describe("self-hosted container TLS contract", () => {
       return url;
     };
 
-    for (const mode of ["local", "LOCAL", "  LOCAL  ", "LoCaL"]) {
-      expect(await selectedUrl(mode)).toBe("http://127.0.0.1:8123/api/providers?limit=1");
+    // A blank or whitespace-only value is NOT a configuration: the deploy path injects this
+    // variable from a secret, and an unresolved secret arrives as the empty string. Both
+    // the healthcheck and src/server/storage-backend.ts must read that as SQLite, or the
+    // probe and the process disagree in exactly the case that is hardest to diagnose.
+    for (const blank of [undefined, "", "   "]) {
+      expect(await selectedUrl(blank)).toBe("http://127.0.0.1:8123/api/providers?limit=1");
     }
-    for (const mode of [undefined, "self_hosted", " SELF_HOSTED "]) {
-      expect(await selectedUrl(mode)).toBe("http://127.0.0.1:8123/ready");
+    for (const configured of [
+      "postgres://operator.invalid/emails",
+      "  postgres://operator.invalid/emails  ",
+    ]) {
+      expect(await selectedUrl(configured)).toBe("http://127.0.0.1:8123/ready");
     }
   });
 
