@@ -7,6 +7,7 @@ import {
   parseCliListPage,
   parseCliNonNegativeIntOption,
   parseCliPage,
+  formatListHint,
   parseCliPositiveIntOption,
   parseDuration,
   resolveId,
@@ -104,5 +105,31 @@ describe("cli/utils", () => {
       (console as unknown as { error: typeof originalError }).error = originalError;
       (process as unknown as { exit: typeof originalExit }).exit = originalExit;
     }
+  });
+});
+
+// ─── THE CLI PAGE CAP MATCHES THE SEAM'S DOCUMENTED HARD CAP ──────────────────
+//
+// Task 9ec32ef4(b): the API list contract clamps every list read to 500 rows
+// (src/store/records.ts — "Server clamps: limit defaults to 100, hard cap
+// 500"), but the CLI accepts --limit up to 1000 and keyed its paging hint to
+// shown >= REQUESTED limit. A clamped 500-row page of a 1000-row request could
+// never satisfy that, so the hint vanished exactly when the set was incomplete
+// and a clamped page read as the complete set. The hint now keys on the
+// effective page size, min(limit, SEAM_LIST_HARD_CAP). The CLI cap itself
+// stays at 1000: the local database serves such pages in full (pinned by
+// output-safety.test.ts), so lowering the cap would trade a hint bug for a
+// capability regression.
+describe("the paging hint and the API list clamp", () => {
+  it("shows the paging hint on a page the store clamped below the request", () => {
+    // 500 rows against a 1000-row request: the API contract's hard cap means
+    // the request can never be filled, so a full clamped page must hint.
+    const hint = formatListHint({ shown: 500, limit: 1000, noun: "provider" });
+    expect(hint).toContain("--offset 500");
+  });
+
+  it("still hints when the request itself is filled, and stays quiet on a short page", () => {
+    expect(formatListHint({ shown: 20, limit: 20, noun: "provider" })).toContain("--offset 20");
+    expect(formatListHint({ shown: 7, limit: 20, noun: "provider" })).not.toContain("--offset");
   });
 });
