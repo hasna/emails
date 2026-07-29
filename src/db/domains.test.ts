@@ -32,6 +32,7 @@ import {
   deleteDomain,
   updateDnsStatus,
 } from "./domains.js";
+import { SELF_HOSTED_ENUMERATION_PAGE_BUDGET, SELF_HOSTED_SERVER_PAGE_MAX } from "./self-hosted-page.js";
 import { DomainNotFoundError } from "../types/index.js";
 
 let stub: V1Stub;
@@ -250,6 +251,15 @@ describe("listUsableDomains / countUsableDomains", () => {
     expect(page[0]!.id).toBe("domain-000550");
     expect(page[49]!.id).toBe("domain-000599");
   });
+
+  it("serves a bounded usable page when the table exceeds the enumeration budget", async () => {
+    const scanCap = SELF_HOSTED_ENUMERATION_PAGE_BUDGET * SELF_HOSTED_SERVER_PAGE_MAX;
+    await stub.seed({
+      domains: domainRows(scanCap + SELF_HOSTED_SERVER_PAGE_MAX, (index) => ({ verified: index === 0 })),
+    });
+
+    expect(listUsableDomains({ limit: 1 }).map((domain) => domain.id)).toEqual(["domain-000000"]);
+  }, 240_000);
 
   it("refuses totals when the paging window shifts", async () => {
     await stub.seed({ domains: domainRows(1200, () => ({ verified: true })) });
