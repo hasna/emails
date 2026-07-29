@@ -226,6 +226,21 @@ describe.each(STORE_VARIANTS)("template CRUD (%s)", (_label, variant) => {
     expect(await getTemplateByName("nope", store)).toBeNull();
   });
 
+  it("matches a name EXACTLY, never as a prefix of a longer one", async () => {
+    // "welcome" and "welcome-extended" are different templates, and a send that asks
+    // for one must never render the other. A prefix or substring match here survived
+    // the first mutation pass of this suite — this case is the regression test that
+    // kills it.
+    seedTemplate({ id: "t-short", name: "welcome", subject_template: "Short" });
+    seedTemplate({ id: "t-long", name: "welcome-extended", subject_template: "Long" });
+    const store = variant();
+    expect((await getTemplateByName("welcome", store))?.id).toBe("t-short");
+    expect((await getTemplateByName("welcome-extended", store))?.id).toBe("t-long");
+    expect(await getTemplateByName("welc", store)).toBeNull();
+    expect(await getTemplate("welc", store)).toBeNull();
+    expect((await getTemplate("welcome", store))?.id).toBe("t-short");
+  });
+
   it("tolerates malformed metadata and maps it to {} (divergence 4)", async () => {
     seedTemplate({ id: "t-bad", name: "badmeta", metadata: "not-json" });
     const found = await getTemplate("t-bad", variant());
