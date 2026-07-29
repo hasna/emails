@@ -810,3 +810,50 @@ describe("formatDiagnostics", () => {
     expect(out).not.toContain("2 warnings");
   });
 });
+
+// ─── PROVISIONING HONESTY ON AN API-BACKED INSTALLATION ──────────────────────────────
+//
+// Live repro (task 1c675265): `emails doctor --json` on a client whose store is the
+// hosted API returned {name:"Provisioning: cloudflare",status:"fail"} because the
+// cloudflare/resend rows keyed off LOCAL env/config unconditionally — the same
+// fabricated negative the aws row was already spared ("unknown", above), one provider
+// over. Provisioning on such an installation is executed by the service, whose
+// credentials this client cannot observe.
+describe("provisioning credentials on an API-backed installation", () => {
+  function configureApiStorage(): void {
+    delete process.env["EMAILS_DB_PATH"];
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://mail.example.test";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+  }
+
+  it("reports absent local cloudflare/resend credentials as unknown, never fail", async () => {
+    configureApiStorage();
+
+    const checks = await runDiagnostics({ _store: realStore() });
+
+    const cloudflare = named(checks, "Provisioning: cloudflare");
+    expect(cloudflare.status).toBe("unknown");
+    expect(cloudflare.message).toContain("service");
+    const resend = named(checks, "Provisioning: resend");
+    expect(resend.status).toBe("unknown");
+    expect(checks.some((check) => check.name.startsWith("Provisioning: ") && check.status === "fail")).toBe(false);
+  });
+
+  it("keeps the fail verdict for a local installation, where the credential really is the operator's to set", async () => {
+    const checks = await runDiagnostics({ _store: realStore() });
+
+    expect(named(checks, "Provisioning: cloudflare").status).toBe("fail");
+    expect(named(checks, "Provisioning: cloudflare").message).toContain("CLOUDFLARE_API_TOKEN");
+  });
+
+  it("still reports a present local cloudflare credential as pass on an API-backed installation", async () => {
+    // Positive control: the unknown path must not swallow an observable credential.
+    configureApiStorage();
+    process.env["CLOUDFLARE_API_TOKEN"] = "token";
+    process.env["CLOUDFLARE_ACCOUNT_ID"] = "account";
+
+    const checks = await runDiagnostics({ _store: realStore() });
+
+    expect(named(checks, "Provisioning: cloudflare").status).toBe("pass");
+  });
+});

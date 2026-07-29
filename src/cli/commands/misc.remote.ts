@@ -243,7 +243,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   // nothing behind either command set can honour it now. `emails provider status` does.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics (reads through the configured store)")
+    .description("Run system diagnostics (reads through the configured store). Always exits 0 — the report is the product; gate automation on the --json check statuses, not the exit code")
     .action(async () => {
       try {
         const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");

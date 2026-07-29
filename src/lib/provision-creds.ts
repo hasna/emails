@@ -39,6 +39,16 @@ export interface ProvisionCredConfig {
   cloudflare_api_key?: string;
   cloudflare_email?: string;
   cloudflare_account_id?: string;
+  /**
+   * Whether provisioning for this installation is executed by the service behind its
+   * configured API rather than by this process. When true, an ABSENT local Cloudflare or
+   * Resend credential is `"unknown"`, not `fail`: the service holds its own provisioning
+   * credentials, which are not observable from this client, so "Set CLOUDFLARE_API_TOKEN"
+   * with status `fail` at an operator whose service-side credentials are fine is the same
+   * fabricated negative `aws_provider_credentials` was widened to avoid (task 1c675265).
+   * A credential that IS present locally still reports normally — presence is observable.
+   */
+  service_owned_provisioning?: boolean;
 }
 
 export function checkProvisionCredentials(
@@ -76,19 +86,30 @@ export function checkProvisionCredentials(
     configEmail: config.cloudflare_email,
   });
   const cfAccountId = env["CLOUDFLARE_ACCOUNT_ID"] ?? config.cloudflare_account_id;
+  const cfAbsentUnknown = !cf && config.service_owned_provisioning === true;
   out.push({
     provider: "cloudflare",
-    configured: !!cf,
-    status: cf ? cfAccountId ? "pass" : "warn" : "fail",
-    detail: cf ? describeCloudflareAuth(cf) + (cfAccountId ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
+    configured: cfAbsentUnknown ? "unknown" : !!cf,
+    status: cf ? cfAccountId ? "pass" : "warn" : cfAbsentUnknown ? "unknown" : "fail",
+    detail: cf
+      ? describeCloudflareAuth(cf) + (cfAccountId ? " (+account)" : " (no account id — zone create needs it)")
+      : cfAbsentUnknown
+        ? "No Cloudflare credentials on this client, and provisioning for an API-backed installation is executed by the service, whose credentials are not observable from here. Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL only for local provisioning workflows."
+        : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
   });
 
   // Resend (optional secondary send + inbound webhook).
   const resend = !!env["RESEND_API_KEY"];
+  const resendAbsentUnknown = !resend && config.service_owned_provisioning === true;
   out.push({
     provider: "resend",
-    configured: resend,
-    detail: resend ? "key present" : "optional — set RESEND_API_KEY for Resend send/inbound",
+    configured: resendAbsentUnknown ? "unknown" : resend,
+    ...(resendAbsentUnknown ? { status: "unknown" as const } : {}),
+    detail: resend
+      ? "key present"
+      : resendAbsentUnknown
+        ? "optional — Resend send/inbound for an API-backed installation is configured on the service; set RESEND_API_KEY only for local workflows"
+        : "optional — set RESEND_API_KEY for Resend send/inbound",
   });
 
   return out;

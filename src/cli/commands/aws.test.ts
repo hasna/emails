@@ -166,11 +166,14 @@ describe("aws setup-inbound command", () => {
     expect(result.data).toBeTruthy();
   });
 
-  it("fails on a missing bucket without touching AWS, and names the config key", async () => {
+  it("fails on a missing bucket without touching AWS, and names a remediation that exists", async () => {
     const result = await runAwsExpectingExit(["aws", "setup-inbound", "--domain", "example.com"]);
 
     expect(result.error).toBe("process.exit:1");
-    expect(result.stderr).toContain("emails config set inbound_s3_bucket");
+    // The old hint said "emails config set inbound_s3_bucket" — a command this CLI
+    // does not have (task 0d03f185). The refusal must name mechanisms that run.
+    expect(result.stderr).toContain("EMAILS_INBOUND_S3_BUCKET");
+    expect(result.stderr).not.toContain("emails config set");
     // Says what is missing, not which mode the operator is in.
     expect(result.stderr).not.toContain("self-hosted");
     expect(mockSesSend).not.toHaveBeenCalled();

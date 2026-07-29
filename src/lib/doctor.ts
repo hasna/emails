@@ -340,7 +340,9 @@ function configCheck(): DoctorCheck {
   const configPath = join(getEmailsDataDir(), "config.json");
   return existsSync(configPath)
     ? { name: "Config", status: "pass", message: `Config file exists (${configPath})` }
-    : { name: "Config", status: "warn", message: "No config file (run 'emails config set' to create)" };
+    // Names no "emails config set": that command does not exist (task 0d03f185). The
+    // file appears when a command first stores a setting; its absence needs no action.
+    : { name: "Config", status: "warn", message: `No config file (${configPath}) — created automatically the first time a command stores a setting, e.g. \`emails aws setup-inbound\`.` };
 }
 
 /**
@@ -457,8 +459,21 @@ async function provisioningChecks(): Promise<DoctorCheck[]> {
         `could not be read: ${detailOf(error)}`,
     }];
   }
+  // Whether this installation's storage resolves to the API decides whether an absent
+  // LOCAL provisioning credential is a fault (local installation: yes, it is the
+  // operator's to set) or unobservable (API-backed: the service provisions with its own
+  // credentials — task 1c675265). A storage configuration that cannot be planned is
+  // already reported by the Store check; local semantics are kept for that case.
+  let serviceOwnedProvisioning = false;
+  try {
+    const { planEmailStore } = await import("../store-resolution.js");
+    serviceOwnedProvisioning = planEmailStore(process.env).store === "api";
+  } catch {
+    // Reported by the Store check; the credential rows keep local semantics.
+  }
   return checkProvisionCredentials(undefined, {
     aws_provider_credentials: "unknown",
+    service_owned_provisioning: serviceOwnedProvisioning,
     cloudflare_api_token: config["cloudflare_api_token"] as string | undefined,
     cloudflare_api_key: config["cloudflare_api_key"] as string | undefined,
     cloudflare_email: config["cloudflare_email"] as string | undefined,
