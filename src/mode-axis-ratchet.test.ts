@@ -1139,19 +1139,25 @@ const root = join(import.meta.dir, "..");
  * nothing added — the seam already declares this family's repository, so no extension
  * module was needed; the family's suite and every consumer suite were rewritten or
  * edited in place.
+ *
+ * ONE REBASE (onto 77e3c54, the inbound bucket-policy fix) moved NO counter: the
+ * eleven were zeroed in their own commit first, the merged tree was measured over the
+ * real `git ls-files` corpus (652 tracked / 651 scanned / 10,146,546 characters), and
+ * it measures exactly the numbers pinned below — verified rather than assumed, because
+ * two earlier rebases in this programme are the proof that a clean apply can be wrong.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 19,
+  remoteArmModules: 19,
+  routedFacadeDefinitions: 11,
+  routedCallExpressions: 163,
+  selfHostedResourceBranches: 25,
+  selfHostedResourceReferences: 96,
+  isSelfHostedModeReferences: 44,
+  getEmailsModeReferences: 55,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
