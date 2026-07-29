@@ -1352,11 +1352,15 @@ const root = join(import.meta.dir, "..");
  * all eleven live counts equalled the declared ceilings, so there was no inherited
  * slack to reclaim. Six ceilings move and all six are paid for here: 16 -> 15,
  * 16 -> 15, 8 -> 7, 139 -> 132, 64 -> 61, 38 -> 36. The other five were already
- * exact and stay put. Corpus of this change: 644 tracked, 643 scanned, ~10.29M
- * characters — three tracked files fewer than base, which is exactly the two
- * deleted arms plus the second arm's own test file (superseded by the collapsed
- * family's two-store suite). Re-measured AFTER this paragraph was written, because
- * this file sits inside the corpus it scans.
+ * exact and stay put. Corpus of this change: 645 tracked, 644 scanned, ~10.31M
+ * characters — three tracked files fewer than the arms-and-test deletion accounts
+ * for against its own base (the two deleted arms plus the second arm's test file,
+ * superseded by the collapsed family's two-store suite), plus the one file the
+ * rebase brought in: all eleven were ZEROED and re-measured on the merged tree
+ * after rebasing onto the list-ordering-contract merge, and every count came back
+ * IDENTICAL — that change names no counted identifier — so only this corpus note
+ * moved. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 15,
