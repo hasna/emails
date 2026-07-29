@@ -7,7 +7,7 @@
 // All data operations hit the operator-owned Postgres via the
 // store, which wraps the product-owned storage utilities' typed client.
 
-import type { ApiKeyVerifier } from "@hasna/contracts/auth";
+import { hasAllScopes, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
 import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
@@ -1341,8 +1341,16 @@ export async function handleSelfHostedRequest(
         from,
         recipients: [...to, ...cc, ...bcc],
         sendKeyToken: sendKeyToken || null,
+        // Tenant-wide send authority: API keys carry it structurally, tenant
+        // owner/admin sessions carry it by role, and an IdP-federated principal
+        // carries it when its (already tenant-scoped) grant includes the
+        // ordinary write scope — IdP principals have no role and no path to a
+        // send key (minting is operator-gated), so omitting the class here
+        // made every federated send an unfixable 403 send_key_required.
         allowTenantWideSend:
-          auth.ctx.principalType === "apikey" || auth.ctx.role === "owner" || auth.ctx.role === "admin",
+          auth.ctx.principalType === "apikey" ||
+          (auth.ctx.principalType === "idp" && hasAllScopes(auth.ctx.scopes, ["emails:write"])) ||
+          auth.ctx.role === "owner" || auth.ctx.role === "admin",
       });
       if (!policy.allowed) {
         const blocked = await auth.store.markSendBlocked(reserved.record.id, policy.code).catch(() => null);
