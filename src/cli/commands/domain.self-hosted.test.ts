@@ -131,9 +131,10 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
   });
 
   it("runs the warming lifecycle through the /v1 warming resource", async () => {
-    // Warming is NOT server-owned-only: /v1/warming exists and warming.remote.ts
-    // is a complete client, so the same six commands that work over local SQLite
-    // work here. Proven end to end against the stub's stored rows.
+    // Warming is NOT server-owned-only: /v1/warming exists and the collapsed
+    // family reaches it through the real HTTP store, so the same six commands
+    // that work over local SQLite work here. Proven end to end against the
+    // stub's stored rows.
     const created = await runDomainCommand(["domain", "warm", "ramp.example.com", "--target", "1000"]);
     expect(created.data).toMatchObject({
       schedule: { domain: "ramp.example.com", target_daily_volume: 1000, status: "active" },
