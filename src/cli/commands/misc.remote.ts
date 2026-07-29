@@ -8,6 +8,7 @@ import {
   isCliVerboseOutput,
   parseCliListPage,
   resolveId,
+  parseScheduledStatusFilter,
 } from "../utils.js";
 
 export interface SchedulerTickResult {
@@ -49,7 +50,7 @@ export async function runSchedulerTick(_opts: SchedulerTickOptions = {}): Promis
 }
 
 function scheduledStatusOf(opts: ScheduleListOptions) {
-  return opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+  return parseScheduledStatusFilter(opts.status);
 }
 
 function colorScheduledStatus(status: string): string {

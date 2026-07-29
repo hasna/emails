@@ -193,6 +193,35 @@ const MAIL_CHANGES_CURSOR_V2_KEYS = [
 // Hard cap on rows walked for a full scan (counts/search/resolve). Large enough
 // to cover a real mailbox without an unbounded walk.
 const MAX_SCAN_ROWS = 100_000;
+
+// ── server-side folder pushdown ───────────────────────────────────────────────
+//
+// GET /v1/messages accepts an index-backed `?folder=` filter (the serve rejects
+// unknown values by name). The client sends it so a scarce folder — starred,
+// archived, spam, trash — is answered by the server instead of by walking the
+// whole store client-side; `folderMatch` remains the second gate, so a server
+// that predates the parameter and ignores it still yields correct results.
+// `unread` is not a server folder: it maps to `inbox` and stays client-side.
+type ServerListFolder = "inbox" | "starred" | "sent" | "archived" | "spam" | "trash";
+
+function serverListFolderOf(mailbox: Mailbox): ServerListFolder {
+  return mailbox === "unread" ? "inbox" : mailbox;
+}
+
+// Hard cap on /messages requests for ONE filtered folder listing. Only a server
+// that ignores `?folder=` (or a pathologically deep offset) can reach it: with
+// the pushdown honoured, pages are match-dense and the page loop breaks as soon
+// as the requested window fills. Sized to the same worst case as MAX_SCAN_ROWS.
+const MAX_FILTER_WALK_REQUESTS = 200;
+
+function filterWalkExhausted(mailbox: Mailbox, scannedRows: number): Error {
+  return new Error(
+    `self-hosted emails: listing the ${mailbox} folder scanned ${scannedRows} rows over `
+      + `${MAX_FILTER_WALK_REQUESTS} requests without completing. This server ignored the `
+      + "GET /v1/messages ?folder= filter (it predates server-side folder listing) — "
+      + "upgrade the emails-serve deployment, or narrow the listing with --since.",
+  );
+}
 // How long a full scan is reused within one (short-lived) CLI/MCP invocation.
 const SCAN_TTL_MS = 15_000;
 // Hard cap on rows walked while collecting one conversation. The candidate read
@@ -883,12 +912,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
       from?: string;
       subject?: string;
       search?: string;
+      folder?: ServerListFolder;
     } = {},
   ): Promise<V1MessagePage> {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
     if (position.cursor) params.set("cursor", position.cursor);
     else if (position.offset !== undefined && position.offset > 0) params.set("offset", String(position.offset));
+    if (opts.folder) params.set("folder", opts.folder);
     if (opts.direction) params.set("direction", opts.direction);
     if (opts.since) params.set("since", opts.since);
     if (opts.to) params.set("to", opts.to);
@@ -918,6 +949,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
       from?: string;
       subject?: string;
       search?: string;
+      folder?: ServerListFolder;
     } = {},
   ): AsyncGenerator<V1Message[]> {
     let cursor: string | undefined;
@@ -1056,6 +1088,24 @@ export class SelfHostedMailDataSource implements MailDataSource {
       return matches ? candidate : null;
     };
 
+    // One request budget for the whole call, across every filter set and both
+    // sort branches. Only reachable when the server ignores the `?folder=`
+    // pushdown (see MAX_FILTER_WALK_REQUESTS): the alternative was the shipped
+    // behaviour — a silent, store-wide, 50-rows-per-request walk that made
+    // `inbox list --folder starred` look like a hang against a six-figure store
+    // (task a3f8e019).
+    let walkRequests = 0;
+    let scannedRows = 0;
+    const budgeted = async function* (this: SelfHostedMailDataSource, requestLimit: number, requestOpts: Parameters<SelfHostedMailDataSource["listPage"]>[2]): AsyncGenerator<V1Message[]> {
+      for await (const page of this.listPages(requestLimit, requestOpts)) {
+        walkRequests += 1;
+        if (walkRequests > MAX_FILTER_WALK_REQUESTS) throw filterWalkExhausted(mailbox, scannedRows);
+        scannedRows += page.length;
+        yield page;
+      }
+    }.bind(this);
+    const folder = serverListFolderOf(mailbox);
+
     if (opts?.sort === "oldest") {
       // The server is newest-first. Retain only the request-bounded oldest tail
       // while walking the cursor chain, never the whole mailbox.
@@ -1065,7 +1115,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
       // preserves global ordering and avoids duplicate rows across that union.
       const sourceFilters = filters.length > 1 ? [{}] : filters;
       for (const filtersForRequest of sourceFilters) {
-        for await (const page of this.listPages(PAGE_LIMIT, {
+        for await (const page of budgeted(PAGE_LIMIT, {
+          folder,
           direction,
           since,
           ...filtersForRequest,
@@ -1089,7 +1140,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const matches = new Map<string, V1Message>();
     for (const sourceFilters of scopeServerFilterSets(scope)) {
       let filterMatches = 0;
-      for await (const page of this.listPages(pageLimit, {
+      for await (const page of budgeted(pageLimit, {
+          folder,
           direction,
           since,
           ...sourceFilters,
