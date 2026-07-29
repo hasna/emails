@@ -23,6 +23,7 @@ import {
   getDomain,
   getDomainByName,
   listDomains,
+  listDomainsByProviderAndNames,
   listDomainsByProviderIds,
   listUsableDomains,
   moveDomainProvider,
@@ -63,6 +64,28 @@ function dom(row: { id: string; domain: string; provider?: string; verified?: bo
     created_at: ts,
     updated_at: ts,
   };
+}
+
+const NEWEST = Date.UTC(2026, 0, 1, 0, 0, 0);
+
+function domainRows(
+  count: number,
+  shape: (index: number) => Partial<{
+    domain: string;
+    provider: string;
+    verified: boolean;
+    created_at: string;
+  }> = () => ({}),
+): Array<Record<string, unknown>> {
+  return Array.from({ length: count }, (_, index) => {
+    const ts = new Date(NEWEST - index * 1000).toISOString();
+    return dom({
+      id: `domain-${String(index).padStart(6, "0")}`,
+      domain: `domain-${index}.example.com`,
+      created_at: ts,
+      ...shape(index),
+    });
+  });
 }
 
 describe("createDomain", () => {
@@ -115,6 +138,12 @@ describe("getDomainByName", () => {
   it("returns null for unknown domain", () => {
     expect(getDomainByName(PROVIDER, "unknown.com")).toBeNull();
   });
+
+  it("finds a real domain past the server's 500-row page cap", async () => {
+    await stub.seed({ domains: domainRows(520) });
+
+    expect(getDomainByName(PROVIDER, "domain-519.example.com")?.id).toBe("domain-000519");
+  });
 });
 
 describe("findDomainsByName", () => {
@@ -124,6 +153,19 @@ describe("findDomainsByName", () => {
 
     const matches = findDomainsByName("EXAMPLE.COM");
     expect(matches.map((domain) => domain.id).sort()).toEqual([first.id, second.id].sort());
+  });
+
+  it("returns matching rows on both sides of the server page cap", async () => {
+    await stub.seed({
+      domains: domainRows(520, (index) => (
+        index === 10 || index === 519 ? { domain: "duplicate.example.com" } : {}
+      )),
+    });
+
+    expect(findDomainsByName("DUPLICATE.EXAMPLE.COM").map((domain) => domain.id).sort()).toEqual([
+      "domain-000010",
+      "domain-000519",
+    ]);
   });
 });
 
@@ -160,6 +202,19 @@ describe("listDomains", () => {
     expect(domains.map((domain) => domain.id).sort()).toEqual([first.id, second.id].sort());
     expect(listDomainsByProviderIds([])).toEqual([]);
   });
+
+  it("filters provider ids and provider/name pairs past the server page cap", async () => {
+    await stub.seed({
+      domains: domainRows(620, (index) => index >= 600
+        ? { provider: "prov-z", domain: `late-${index}.example.com` }
+        : {}),
+    });
+
+    expect(listDomainsByProviderIds(["prov-z"])).toHaveLength(20);
+    expect(listDomainsByProviderAndNames([
+      { provider_id: "prov-z", domain: "late-619.example.com" },
+    ]).map((domain) => domain.id)).toEqual(["domain-000619"]);
+  });
 });
 
 describe("listUsableDomains / countUsableDomains", () => {
@@ -184,6 +239,24 @@ describe("listUsableDomains / countUsableDomains", () => {
     expect(listUsableDomains({ provider_id: "p1" }).map((d) => d.domain)).toEqual(["v1.com", "v2.com"]);
     expect(listUsableDomains({ provider_id: "p1", limit: 1, offset: 1 }).map((d) => d.domain)).toEqual(["v2.com"]);
     expect(listUsableDomains({ provider_id: "p2" }).map((d) => d.domain)).toEqual(["other.com"]);
+  });
+
+  it("lists and counts usable domains beyond the server page cap", async () => {
+    await stub.seed({ domains: domainRows(620, () => ({ verified: true })) });
+
+    expect(countUsableDomains()).toBe(620);
+    const page = listUsableDomains({ limit: 50, offset: 550 });
+    expect(page).toHaveLength(50);
+    expect(page[0]!.id).toBe("domain-000550");
+    expect(page[49]!.id).toBe("domain-000599");
+  });
+
+  it("refuses totals when the paging window shifts", async () => {
+    await stub.seed({ domains: domainRows(1200, () => ({ verified: true })) });
+    await stub.setListOrderInstability(7, ["domains"]);
+
+    expect(() => countUsableDomains()).toThrow(/partial domain list/);
+    expect(() => findDomainsByName("missing.example.com")).toThrow(/LOWER BOUND/);
   });
 });
 

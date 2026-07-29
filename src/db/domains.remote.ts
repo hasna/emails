@@ -10,7 +10,7 @@ import type {
 import { DomainNotFoundError } from "../types/index.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource } from "./self-hosted-resource.js";
-import { enumerateSelfHostedRows } from "./self-hosted-page.js";
+import { assertHonestSelfHostedRead, enumerateSelfHostedRows } from "./self-hosted-page.js";
 
 // ============================================================================
 // Self-hosted (self_hosted) routing — self-hosted-ONLY client
@@ -56,6 +56,25 @@ function apiToDomain(e: Record<string, unknown>): Domain {
   };
 }
 
+// Every filtered read below walks the whole `/v1/domains` table through the
+// shared pager instead of treating one server-clamped page as the table. A
+// bounded lookup may stop once it has found what it needs; an unbounded read
+// must prove it reached the end, or refuse rather than publish a partial result.
+function readDomains(bound: number | null, keep?: (domain: Domain) => boolean): Domain[] {
+  const enumeration = enumerateSelfHostedRows<Domain>(DOMAIN_RESOURCE, {
+    ...(bound === null ? {} : { need: bound }),
+    select: (row) => {
+      const domain = apiToDomain(row);
+      return keep && !keep(domain) ? null : domain;
+    },
+  });
+  assertHonestSelfHostedRead(enumeration, bound, {
+    noun: "domain",
+    narrowHint: "retry after narrowing the domain table or paging window.",
+  });
+  return enumeration.rows;
+}
+
 export function createDomain(provider_id: string, domain: string): Domain {
   const created = selfHostedResource(DOMAIN_RESOURCE).create({ domain, provider: provider_id });
   return apiToDomain(created);
@@ -69,20 +88,15 @@ export function getDomain(id: string): Domain | null {
 export function getDomainByName(_provider_id: string, domain: string): Domain | null {
   // A self-hosted deployment is one operator-owned instance; match by domain
   // name because the local provider row is not part of the service identity.
+  // This lookup protects `domain adopt` from creating a duplicate, so it may
+  // return null only after reaching the end of the table.
   const name = domain.trim().toLowerCase();
-  const match = selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .find((dm) => dm.domain.toLowerCase() === name);
-  return match ?? null;
+  return readDomains(1, (dm) => dm.domain.toLowerCase() === name)[0] ?? null;
 }
 
 export function findDomainsByName(domain: string): Domain[] {
   const name = domain.trim().toLowerCase();
-  return selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .filter((dm) => dm.domain.toLowerCase() === name)
+  return readDomains(null, (dm) => dm.domain.toLowerCase() === name)
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -98,10 +112,7 @@ export function listDomainsByProviderAndNames(pairs: Iterable<DomainProviderName
       .filter(Boolean),
   );
   if (wanted.size === 0) return [];
-  return selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .filter((dm) => wanted.has(dm.domain.toLowerCase()))
+  return readDomains(null, (dm) => wanted.has(dm.domain.toLowerCase()))
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -134,10 +145,7 @@ export function listDomains(provider_id?: string, opts?: ListDomainOptions): Dom
 export function listDomainsByProviderIds(providerIds: Iterable<string>): Domain[] {
   const ids = new Set([...providerIds].map((id) => id.trim()).filter(Boolean));
   if (ids.size === 0) return [];
-  return selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .filter((dm) => ids.has(dm.provider_id))
+  return readDomains(null, (dm) => ids.has(dm.provider_id))
     .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -152,19 +160,13 @@ function usableFilter(dm: Domain, opts: UsableDomainOptions): boolean {
 export function listUsableDomains(opts: UsableDomainOptions = {}): Domain[] {
   const lim = safeOptionalLimit(opts.limit);
   const off = safeOffset(opts.offset);
-  const domains = selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .filter((dm) => usableFilter(dm, opts))
+  const domains = readDomains(null, (dm) => usableFilter(dm, opts))
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
   return lim === null ? domains : domains.slice(off, off + lim);
 }
 
 export function countUsableDomains(opts: Omit<UsableDomainOptions, "limit" | "offset"> = {}): number {
-  return selfHostedResource(DOMAIN_RESOURCE)
-    .list({ limit: 1000 })
-    .map(apiToDomain)
-    .filter((dm) => usableFilter(dm, opts)).length;
+  return readDomains(null, (dm) => usableFilter(dm, opts)).length;
 }
 
 export function updateDomain(
