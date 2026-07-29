@@ -54,7 +54,10 @@ async function serverDomains(): Promise<Array<Record<string, unknown>>> {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` because the collapsed warming family reaches `/v1` through the
+  // REAL HTTP store, which reads the service's published contract before any
+  // filtered list or write; a missing document is deliberately a fault there.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
