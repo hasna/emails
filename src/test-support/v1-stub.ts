@@ -677,7 +677,8 @@ function decodeMessageOffsetCursor(raw) {
 
 function listMessages(params) {
   let ordered = rowsFor("messages").slice().sort(function (a, b) {
-    return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""));
+    return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""))
+      || String(b.id || "").localeCompare(String(a.id || ""));
   });
   const direction = params.get("direction");
   if (direction) ordered = ordered.filter(function (r) { return String(r.direction || "").toLowerCase() === direction; });
@@ -700,6 +701,11 @@ function listMessages(params) {
       return Number.isFinite(t) && t >= cutoff;
     });
   }
+  // The bespoke messages route has the same moving-window test control as the
+  // generic resources. Production's order is total, but writes between offset
+  // requests can still shift a legacy client's window; the honest pager must
+  // detect that before exposing a partial read or starting a destructive clear.
+  ordered = rotateForList("messages", ordered);
   // CLAMP like production. src/server/self-hosted/store.ts clampLimit caps every
   // list at 500, and the generic stub handler below already mirrors that. This
   // bespoke /v1/messages handler did NOT, so a client that asked for 1000 rows got
@@ -1112,6 +1118,8 @@ const server = Bun.serve({
       return json({ reconciled: true, outcome: body.outcome, message: target });
     }
     if (resource === "messages" && id === undefined && req.method === "GET") {
+      if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
+      listQueries[resource].push(url.search.replace(/^\?/, ""));
       const page = listMessages(url.searchParams);
       if (page.error) return json({ error: page.error }, 400);
       return json(page);
