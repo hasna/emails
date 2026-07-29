@@ -46,6 +46,16 @@ export interface WebhookEvent {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Own-key lookup. A plain `map[key]` also answers for Object.prototype keys —
+ * a payload of `type: "constructor"` / `"__proto__"` would come back with an
+ * inherited function/object instead of undefined, pass the truthy check, and
+ * crash the persist downstream (a permanently retried 500).
+ */
+function ownTypeMapping(typeMap: Record<string, string>, key: unknown): string | undefined {
+  return typeof key === "string" && Object.hasOwn(typeMap, key) ? typeMap[key] : undefined;
+}
+
 export function parseResendWebhook(body: any, signedEnvelopeId?: string): WebhookEvent | null {
   const typeMap: Record<string, string> = {
     "email.delivered": "delivered",
@@ -54,7 +64,7 @@ export function parseResendWebhook(body: any, signedEnvelopeId?: string): Webhoo
     "email.opened": "opened",
     "email.clicked": "clicked",
   };
-  const eventType = typeMap[body.type];
+  const eventType = ownTypeMapping(typeMap, body.type);
   if (!eventType) return null;
   const providerEventId = signedEnvelopeId || body.data?.email_id;
   if (!providerEventId) return null;
@@ -74,7 +84,7 @@ export function parseSesWebhook(body: any, signedEnvelopeId?: string): WebhookEv
     Bounce: "bounced",
     Complaint: "complained",
   };
-  const eventType = typeMap[body.notificationType];
+  const eventType = ownTypeMapping(typeMap, body.notificationType);
   if (!eventType) return null;
   const messageId = body.mail?.messageId;
   const providerEventId = signedEnvelopeId || messageId;

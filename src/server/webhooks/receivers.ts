@@ -144,6 +144,13 @@ export interface SesIngestResult {
   /** Set when the deployment could not route the object into a store. */
   ignored?: string;
   receiptRecorded?: boolean;
+  /**
+   * Failures the ingest SWALLOWED instead of throwing (per-object and listing
+   * errors — `syncS3Inbox` reports them this way). Non-empty is a FAILED
+   * ingest: the receiver throws instead of recording the receipt, so the
+   * notification is redelivered rather than answered "duplicate".
+   */
+  errors?: string[];
 }
 
 /** Persist a delivery/engagement event. `null` = no destination scope resolved. */
@@ -371,6 +378,13 @@ export async function receiveSesNotification(
       timestamp: note.timestamp,
       eventId,
     });
+    // A result that carries swallowed failures is NOT acknowledged, exactly
+    // like a throwing ingest: the receipt stays unwritten so SNS redelivers
+    // (re-ingest is dedup-safe) and the durable copy stays in S3. Recording it
+    // would answer every redelivery "duplicate" with zero rows stored.
+    if (result.errors && result.errors.length > 0) {
+      throw new Error(`inbound ingest failed for ${result.errors.length} object(s): ${result.errors.join("; ")}`);
+    }
     if (result.ignored) {
       return json({
         ok: true,
