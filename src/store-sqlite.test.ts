@@ -174,6 +174,38 @@ describe("SqliteEmailStore conformance", () => {
     }
   });
 
+  it("coerces string equality filters using the columns' declared SQLite types", async () => {
+    const subject = store();
+    const trueContact = await subject.contacts.create({
+      email: `true-${uuid()}@example.test`,
+      suppressed: true,
+      send_count: 3,
+    });
+    const falseContact = await subject.contacts.create({
+      email: `false-${uuid()}@example.test`,
+      suppressed: false,
+      send_count: 4,
+    });
+    expect(trueContact.ok && falseContact.ok).toBe(true);
+    if (!trueContact.ok || !falseContact.ok) return;
+
+    const ids = async (filters: Record<string, string>): Promise<string[]> => {
+      const listed = await subject.contacts.list({ filters });
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return [];
+      return listed.value.map((row) => String(row["id"]));
+    };
+
+    for (const suppressed of ["true", "1"]) {
+      expect(await ids({ suppressed })).toEqual([String(trueContact.value["id"])]);
+    }
+    for (const suppressed of ["false", "0"]) {
+      expect(await ids({ suppressed })).toEqual([String(falseContact.value["id"])]);
+    }
+    // The server's integer encoder truncates request values before binding them.
+    expect(await ids({ send_count: "3.9" })).toEqual([String(trueContact.value["id"])]);
+  });
+
   it("round-trips a row through the family whose table has no single-column key", async () => {
     // `webhook_receipts` is keyed on (provider, event_id), so the generic path
     // addresses it by rowid. That is the one non-derivable choice in resources.ts and

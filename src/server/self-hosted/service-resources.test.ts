@@ -11,6 +11,7 @@ import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
 import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
+import { resourceSpecForPath } from "./resources.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod";
 
@@ -202,6 +203,31 @@ describe("self_hosted service generic resources", () => {
     expect(del?.status).toBe(200);
     const get2 = await handleSelfHostedRequest(d, req("GET", `/v1/contacts/${created.id}`, { token: writeToken() }));
     expect(get2?.status).toBe(404);
+  });
+
+  test("generic list filters bind canonical boolean and integer values", async () => {
+    const calls: unknown[][] = [];
+    const client: TypedQueryClient = {
+      async query() { return { rows: [], rowCount: 0 }; },
+      async many<T>(_sql: string, params?: readonly unknown[]): Promise<T[]> {
+        calls.push([...(params ?? [])]);
+        return [];
+      },
+      async get() { return null; },
+      async one() { throw new Error("one not expected"); },
+      async execute() {},
+    };
+    const scoped = new EmailsSelfHostedStore(client).forTenant("tenant-1");
+    const contacts = resourceSpecForPath("contacts");
+    const triage = resourceSpecForPath("triage");
+    if (!contacts || !triage) throw new Error("resource fixture missing");
+
+    for (const [raw, expected] of [["true", true], ["1", true], ["false", false], ["0", false]] as const) {
+      await scoped.listResource(contacts, { filters: { suppressed: raw } });
+      expect(calls.at(-1)?.[1]).toBe(expected);
+    }
+    await scoped.listResource(triage, { filters: { priority: "3.9" } });
+    expect(calls.at(-1)?.[1]).toBe(3);
   });
 
   test("send-keys (hyphenated path) and scheduled resolve and never expose secrets", async () => {

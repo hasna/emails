@@ -1428,7 +1428,14 @@ function warmingLimit(target: number, startDate: string | null, now = new Date()
 function encodeColumn(col: ResourceColumn, value: unknown): unknown {
   if (value === undefined) return null;
   if (col.json) return JSON.stringify(value ?? null);
-  if (col.bool) return Boolean(value);
+  if (col.bool) {
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "false" || normalized === "0") return false;
+      if (normalized === "true" || normalized === "1") return true;
+    }
+    return Boolean(value);
+  }
   if (col.int) {
     const n = typeof value === "number" ? value : Number(value);
     return Number.isFinite(n) ? Math.trunc(n) : 0;
