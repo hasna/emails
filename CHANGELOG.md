@@ -4,6 +4,8 @@ All notable changes to `@hasna/emails` are documented here.
 
 ## [Unreleased]
 
+- feat(cli): every inbox and sync command now accepts `-j, --json`, emits one structured result document, and reports machine-readable failures without changing the existing human output.
+
 - **feat(auth): IdP-token credential class — the first committed step of the ADR-0001 identity federation.** The self-hosted server now accepts EdDSA access tokens minted by the `@hasna/tenants` IdP, verified statelessly against the JWKS URL configured via `EMAILS_IDP_JWKS_URL` (unset ⇒ the class is refused with a typed `idp_not_configured`; a JWKS outage is a typed 503, never an allow). A verified token's `sub` resolves through the new additive `idp_principal_tenants` resolution table (migration 0021 — outside RLS like `api_key_tenants`, with an IdP-tenant pin and an emails-side `revoked_at` kill switch), scopes are normalized onto the existing `emails:read`/`emails:write`/`emails:*` vocabulary, and `/v1/me` gains a third modeled `principal_type: "idp"` branch. Clients can present the token via `EMAILS_IDP_TOKEN` (session > IdP token > operator key precedence) and `emails auth whoami` reports `<org> (idp agent <sub>)`. Secret-free `[idp-auth]`/`[idp-jwks]` audit lines carry sub/jti/kid/reason — never the token. Existing `hasna_`/`emss_` dispatch is byte-equivalent: the IdP branch is structural JWS detection AFTER both prefix classes.
 
 - scope AWS module cross-account SES credentials to `EMAILS_SES_*` only; generic `AWS_*` credentials are no longer injected, so unrelated SDK clients retain the task-role default chain.
