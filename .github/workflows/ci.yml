@@ -141,6 +141,8 @@ jobs:
         run: |
           bun run no-cloud:source
           bun run no-cloud:pack
+      - name: Verify self-hosting release and rollback contract
+        run: PATH=/usr/bin:/bin ./deploy/aws/tests/static_contract.sh
       - name: Diff hygiene
         run: git diff --check
 

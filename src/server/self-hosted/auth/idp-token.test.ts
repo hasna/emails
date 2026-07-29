@@ -65,6 +65,16 @@ describe("verifyIdpToken", () => {
     expect(verify(token)).toEqual({ ok: false, reason: "unsupported_alg" });
   });
 
+  it("refuses a signed JWS that is not explicitly an access token", () => {
+    const wrongType = signTestIdpToken(key, { header: { alg: "EdDSA", kid: key.kid, typ: "JWT" } });
+    expect(looksLikeIdpToken(wrongType.token)).toBe(true);
+    expect(verify(wrongType.token)).toEqual({ ok: false, reason: "malformed" });
+
+    const missingType = signTestIdpToken(key, { header: { alg: "EdDSA", kid: key.kid } });
+    expect(looksLikeIdpToken(missingType.token)).toBe(true);
+    expect(verify(missingType.token)).toEqual({ ok: false, reason: "malformed" });
+  });
+
   it("refuses a header without kid (missing_kid)", () => {
     const { token } = signTestIdpToken(key, { header: { alg: "EdDSA", typ: "at+jwt" } });
     expect(verify(token)).toEqual({ ok: false, reason: "missing_kid" });
@@ -235,6 +245,27 @@ describe("buildIdpAuthenticatorFromEnv", () => {
     expect(() => buildIdpAuthenticatorFromEnv({ [IDP_JWKS_URL_ENV]: "not a url" }, [...AUDS])).toThrow(
       IDP_JWKS_URL_ENV,
     );
+  });
+
+  it("refuses a non-HTTP JWKS URL and plaintext HTTP off loopback", () => {
+    expect(() => buildIdpAuthenticatorFromEnv(
+      { [IDP_JWKS_URL_ENV]: "file:///tmp/jwks.json" },
+      [...AUDS],
+    )).toThrow("must use http or https");
+    expect(() => buildIdpAuthenticatorFromEnv(
+      { [IDP_JWKS_URL_ENV]: "http://idp.example.com/v1/.well-known/jwks.json" },
+      [...AUDS],
+    )).toThrow("must use https except for a loopback");
+  });
+
+  it("allows plaintext HTTP only for a loopback development JWKS", () => {
+    for (const host of ["127.0.0.1", "localhost", "[::1]"]) {
+      const auth = buildIdpAuthenticatorFromEnv(
+        { [IDP_JWKS_URL_ENV]: `http://${host}:8080/v1/.well-known/jwks.json` },
+        [...AUDS],
+      );
+      expect(auth).toBeInstanceOf(IdpTokenAuthenticator);
+    }
   });
 
   it("has a sane default cache TTL", () => {

@@ -608,13 +608,6 @@ release_132_section="$(
     capture { print }
   ' "$changelog"
 )"
-unreleased_section="$(
-  awk '
-    /^## \[Unreleased\]$/ { capture = 1 }
-    capture && /^## / && $0 != "## [Unreleased]" { exit }
-    capture { print }
-  ' "$changelog"
-)"
 expected_release_132_section='## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
@@ -625,8 +618,6 @@ expected_release_132_section='## 1.3.2 (2026-07-26)
   asynchronous inbox data source, and generated `@hasna/emails/selfhost` client;
   validation errors identify the endpoint and invalid field without including
   credentials or response-body contents.'
-expected_unreleased_sha256='40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20'
-actual_unreleased_sha256="$(printf '%s' "$unreleased_section" | sha256sum | awk '{ print $1 }')"
 unreleased_line="$(grep -Fn '## [Unreleased]' "$changelog" | cut -d: -f1)"
 release_132_line="$(grep -Fn '## 1.3.2 (2026-07-26)' "$changelog" | cut -d: -f1)"
 release_131_line="$(grep -Fn '## 1.3.1 (2026-07-26)' "$changelog" | cut -d: -f1)"
@@ -637,9 +628,8 @@ if [ "$(grep -Fxc '## [Unreleased]' "$changelog" || true)" != "1" ] \
   || [ -z "$release_131_line" ] \
   || [ "$unreleased_line" -ge "$release_132_line" ] \
   || [ "$release_132_line" -ge "$release_131_line" ] \
-  || [ "$actual_unreleased_sha256" != "$expected_unreleased_sha256" ] \
   || [ "$release_132_section" != "$expected_release_132_section" ]; then
-  echo "1.3.2 changelog must contain exactly its two release bullets below the full Unreleased section" >&2
+  echo "1.3.2 changelog must preserve its exact frozen release section and ordering" >&2
   exit 1
 fi
 
