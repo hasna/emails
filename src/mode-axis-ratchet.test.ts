@@ -1361,6 +1361,33 @@ const root = join(import.meta.dir, "..");
  * IDENTICAL — that change names no counted identifier — so only this corpus note
  * moved. Re-measured AFTER this paragraph was written, because this file sits
  * inside the corpus it scans.
+ * RE-MEASURED AND RE-PINNED AGAIN on the OWNERS collapse. Base measurement, recorded
+ * because it is the half a rebase invalidates: on 8309875 all eleven live counts
+ * equalled their declared ceilings, so there was no inherited slack to reclaim.
+ *
+ * This collapse moves SEVEN, which is more counters than any sibling family moved,
+ * and the reason is that the deleted facade was the heaviest one left: seventeen
+ * dispatched exports. `twoArmFamilies` and `remoteArmModules` fall by one each (the
+ * family's two arms are deleted); `routedFacadeDefinitions` by one and
+ * `routedCallExpressions` by SEVENTEEN (the facade's dispatch helper and its
+ * seventeen dispatched exports); the branch counter by six — the family's deleted
+ * SQLite arm was the second-heaviest interrogator of the legacy bridge, six of its
+ * owner-row reads asking it whether to route after all — and the tree-wide reference
+ * counter by twenty-five (those six branch sites plus the deleted second arm's
+ * nineteen). The client-side predicate counter falls by two: the deleted facade
+ * imported it and called it once. The four parser/env counters hold at 55/65/16/219:
+ * the collapsed implementation resolves its store from storage configuration, its
+ * one import from the module named for the axis is value coercion only (the
+ * contacts/groups/warming precedent), and the family's rewritten suite drives the
+ * REAL stores over the store-seam `/v1` fixture, so it never sets a deployment word
+ * at all. The split-brain coherence suite re-homed its word-routed exemplar onto the
+ * providers family — still word-routed, and not claimed by any concurrent lane — so
+ * that guard keeps a live subject without adding a counted reference.
+ *
+ * Corpus of this change: 646 tracked, 645 scanned, ~10.33M characters — one fewer
+ * tracked file than the base (two arm modules deleted, one non-seam ledger
+ * declaration added). Re-measured AFTER this paragraph was written, because this
+ * file sits inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 15,
