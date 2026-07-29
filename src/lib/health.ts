@@ -1,4 +1,4 @@
-import { listActiveProviders } from "../db/providers.js";
+import { applyDurableCredentials, listActiveProviders } from "../db/providers.js";
 import { listDomainsByProviderIds } from "../db/domains.js";
 import { listAddressesByProviderIds } from "../db/addresses.js";
 import { getAdapter } from "../providers/index.js";
@@ -44,10 +44,11 @@ function emptyLocalHealthMetrics(): ProviderLocalHealthMetrics {
 }
 
 async function checkCredentialState(provider: Provider, opts: ProviderHealthOptions): Promise<Pick<ProviderHealth, "credentialsValid" | "credentialsChecked" | "credentialError">> {
+  const executable = applyDurableCredentials(provider);
   const credentialsChecked = opts.validateCredentials !== false;
   if (credentialsChecked) {
     try {
-      const adapter = getAdapter(provider);
+      const adapter = getAdapter(executable);
       await adapter.listDomains();
       return { credentialsChecked, credentialsValid: true };
     } catch (e) {
@@ -59,7 +60,7 @@ async function checkCredentialState(provider: Provider, opts: ProviderHealthOpti
     }
   }
 
-  const local = locallyConfigured(provider);
+  const local = locallyConfigured(executable);
   return {
     credentialsChecked,
     credentialsValid: local.ok,

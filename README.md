@@ -27,6 +27,10 @@ bun install -g @hasna/emails
 
 Emails has exactly two modes: `local` and `self_hosted`. Local mode keeps SQLite, files, and credentials on the current machine. Self-hosted mode connects to an Emails service deployed in user-owned infrastructure. Provider integrations always use user-supplied credentials; the package has no hosted account or control-plane service.
 
+Local provider credentials are envelope-encrypted with a root key kept outside
+SQLite. Rotation, locked-keyring recovery, and backup rebind procedures are in
+[Provider credential storage](docs/PROVIDER_SECRETS.md).
+
 ## Quick Start
 
 ```bash

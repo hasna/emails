@@ -1,6 +1,13 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { assertProviderCredentialsStorable, createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, resolveProviderId, updateProvider } from "../../db/providers.js";
+import { assertProviderCredentialsStorable, createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, getProviderWithCredentials, resolveProviderId, updateProvider } from "../../db/providers.js";
+import { getDatabase } from "../../db/database.js";
+import {
+  providerSecretsKeyStatus,
+  rewrapProviderSecrets,
+  revokeProviderSecretsRootKey,
+  rotateProviderSecretsRootKey,
+} from "../../db/provider-secrets.js";
 import { getAdapter } from "../../providers/index.js";
 import { log } from "../../lib/logger.js";
 import { getEmailsMode } from "../../lib/mode.js";
@@ -92,6 +99,54 @@ function credentialValidationError(error: unknown): Error {
 
 export function registerProviderCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const providerCmd = program.command("provider").description("Manage email providers");
+
+  const secretsCmd = providerCmd.command("secrets").description("Manage the local provider credential keyring");
+
+  secretsCmd
+    .command("status")
+    .description("Show root-key IDs and envelope bindings (never secret values)")
+    .action(() => {
+      try {
+        const status = providerSecretsKeyStatus(getDatabase());
+        output(status, [
+          `Provider secret keyring: ${status.source}`,
+          `Active root key: ${status.activeKeyId ?? "not initialized"}`,
+          `Referenced root keys: ${status.referencedKeyIds.join(", ") || "none"}`,
+        ].join("\n"));
+      } catch (e) { handleError(e); }
+    });
+
+  secretsCmd
+    .command("rewrap")
+    .description("Rewrap all provider data keys with the active root key")
+    .action(() => {
+      try {
+        const count = rewrapProviderSecrets(getDatabase());
+        output({ rewrapped: count }, chalk.green(`✓ Rewrapped ${count} provider secret envelope(s).`));
+      } catch (e) { handleError(e); }
+    });
+
+  secretsCmd
+    .command("rotate-root")
+    .description("Stage a new root key and rewrap all provider data keys")
+    .action(() => {
+      try {
+        const result = rotateProviderSecretsRootKey(getDatabase());
+        output(result, chalk.green(`✓ Root key rotated to ${result.activeKeyId}; ${result.rewrapped} envelope(s) rewrapped.`));
+      } catch (e) { handleError(e); }
+    });
+
+  secretsCmd
+    .command("revoke-root <keyId>")
+    .description("Remove an unreferenced, inactive provider root key")
+    .option("--yes", "Skip confirmation prompt")
+    .action(async (keyId: string, opts: { yes?: boolean }) => {
+      try {
+        await confirmDestructiveAction(`Revoke provider root key ${keyId}?`, opts.yes);
+        revokeProviderSecretsRootKey(keyId, getDatabase());
+        output({ revoked: keyId }, chalk.green(`✓ Revoked provider root key ${keyId}.`));
+      } catch (e) { handleError(e); }
+    });
 
   providerCmd
     .command("add")
@@ -240,7 +295,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const existing = getProvider(resolvedId);
         if (!existing) handleError(new Error(`Provider not found: ${id}`));
 
-        const original = { ...existing! };
+        const original = { ...(getProviderWithCredentials(resolvedId) ?? existing!) };
         const updates: Record<string, string | undefined> = {};
         if (opts.name !== undefined) updates.name = opts.name;
         if (opts.apiKey !== undefined) updates.api_key = opts.apiKey;
@@ -316,14 +371,15 @@ export function registerProviderCommands(program: Command, output: (data: unknow
 
         console.log(chalk.bold(`\nChecking ${providers.length} provider(s)...\n`));
         for (const p of providers) {
+          const executable = getProviderWithCredentials(p.id) ?? p;
           const icon = p.active ? "" : chalk.dim("[inactive] ");
           process.stdout.write(`  ${icon}${chalk.cyan(p.name)} (${p.type}) ... `);
           if (p.type === "ses") {
-            if (!p.access_key || !p.secret_key) {
+            if (!executable.access_key || !executable.secret_key) {
               console.log(chalk.yellow("⚠ missing credentials"));
             } else {
               try {
-                const adapter = getAdapter(p);
+                const adapter = getAdapter(executable);
                 await adapter.listDomains();
                 console.log(chalk.green("✓ connected"));
               } catch (e) {
@@ -331,11 +387,11 @@ export function registerProviderCommands(program: Command, output: (data: unknow
               }
             }
           } else if (p.type === "resend") {
-            if (!p.api_key) {
+            if (!executable.api_key) {
               console.log(chalk.yellow("⚠ missing API key"));
             } else {
               try {
-                const adapter = getAdapter(p);
+                const adapter = getAdapter(executable);
                 await adapter.listDomains();
                 console.log(chalk.green("✓ connected"));
               } catch (e) {

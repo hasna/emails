@@ -106,13 +106,20 @@ export function queryPage(url: URL, defaultLimit = 100, maxLimit = 1000): { limi
   };
 }
 
-const CREDENTIAL_FIELDS = ["api_key", "secret_key", "access_key", "oauth_client_secret", "oauth_refresh_token", "oauth_access_token"] as const;
+const CREDENTIAL_FIELDS = [
+  "api_key",
+  "secret_key",
+  "access_key",
+  "oauth_client_id",
+  "oauth_client_secret",
+  "oauth_refresh_token",
+  "oauth_access_token",
+  "oauth_token_expiry",
+] as const;
 
 export function sanitizeProvider(provider: Record<string, unknown>): Record<string, unknown> {
   const sanitized = { ...provider };
-  for (const field of CREDENTIAL_FIELDS) {
-    if (sanitized[field]) sanitized[field] = "***";
-  }
+  for (const field of CREDENTIAL_FIELDS) delete sanitized[field];
   return sanitized;
 }
 

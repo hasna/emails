@@ -18,6 +18,12 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
+import { registerDatabasePath } from "./database-context.js";
+import {
+  assertProviderSecretRootKeysAvailable,
+  ensureProviderSecretsSchema,
+  migratePlaintextProviderSecrets,
+} from "./provider-secrets.js";
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:";
@@ -2031,6 +2037,28 @@ const MIGRATIONS = [
   ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
+
+  // Migration 49: provider credentials leave ordinary provider rows. The
+  // JavaScript migration below performs envelope encryption and records the
+  // sentinel in the SAME savepoint as clearing the legacy columns; this DDL
+  // intentionally does not mark 49 complete on its own.
+  `
+  CREATE TABLE IF NOT EXISTS provider_secrets (
+    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    envelope_version INTEGER NOT NULL,
+    ciphertext TEXT NOT NULL,
+    cipher_iv TEXT NOT NULL,
+    cipher_tag TEXT NOT NULL,
+    wrapped_key TEXT NOT NULL,
+    wrap_iv TEXT NOT NULL,
+    wrap_tag TEXT NOT NULL,
+    root_key_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_provider_secrets_root_key ON provider_secrets(root_key_id);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -2054,6 +2082,7 @@ export function getDatabase(dbPath?: string): Database {
   ensurePrivateDatabaseArtifacts(path, true);
 
   const db = new Database(path);
+  registerDatabasePath(db, path);
   try {
     // busy_timeout FIRST. Converting a fresh database to WAL takes an exclusive
     // lock, so when several processes open the same new database at once — which
@@ -2064,8 +2093,19 @@ export function getDatabase(dbPath?: string): Database {
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA foreign_keys = ON");
+    // Deleted/updated payload bytes must be overwritten, not left in SQLite
+    // freelist pages where a raw database or backup scan can recover them.
+    db.run("PRAGMA secure_delete = ON");
 
-    runMigrations(db);
+    const migratedProviderSecrets = runMigrations(db);
+    if (migratedProviderSecrets > 0 && !isInMemoryDb(path)) {
+      // The migration itself is atomic. Once committed, compact the old pages
+      // and truncate WAL frames so the legacy plaintext fixture is absent from
+      // both the live database and a file-level archive made afterwards.
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      db.exec("VACUUM");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
     ensurePrivateDatabaseArtifacts(path, false);
 
     _db = db;
@@ -2112,7 +2152,7 @@ function applyMigrations(db: Database): void {
 // `synchronous` downgrade), so an interrupted open still cannot observe a
 // half-applied schema. `runInTransaction` uses SAVEPOINTs, so callers nest
 // safely inside this transaction.
-function runMigrations(db: Database): void {
+function runMigrations(db: Database): number {
   // BEGIN IMMEDIATE, never a bare BEGIN. A deferred BEGIN takes only a WAL read
   // snapshot on the first statement below — `SELECT MAX(id) FROM _migrations` —
   // and each DDL then has to upgrade that read transaction to a write one. If
@@ -2137,13 +2177,18 @@ function runMigrations(db: Database): void {
   if (!batched) {
     applyMigrations(db);
     ensureSchema(db);
-    return;
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
+    return migrated;
   }
 
   try {
     applyMigrations(db);
     ensureSchema(db);
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
     db.exec("COMMIT");
+    return migrated;
   } catch {
     // The batch could not be committed. Discard it and rebuild one statement at
     // a time. The reapply is level-based on purpose: replaying from zero would
@@ -2163,6 +2208,9 @@ function runMigrations(db: Database): void {
     }
     applyMigrations(db);
     ensureSchema(db);
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
+    return migrated;
   }
 }
 
@@ -2176,6 +2224,46 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_access_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT");
+
+  // Migration 49 idempotent guarantee. Keep the legacy columns so old database
+  // files can be read and migrated, but make every post-migration write use the
+  // encrypted provider_secrets envelope.
+  ensureProviderSecretsSchema(db);
+  try {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_providers_reject_plaintext_secrets_insert
+      BEFORE INSERT ON providers
+      WHEN NEW.api_key IS NOT NULL
+        OR NEW.access_key IS NOT NULL
+        OR NEW.secret_key IS NOT NULL
+        OR NEW.oauth_client_id IS NOT NULL
+        OR NEW.oauth_client_secret IS NOT NULL
+        OR NEW.oauth_refresh_token IS NOT NULL
+        OR NEW.oauth_access_token IS NOT NULL
+        OR NEW.oauth_token_expiry IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'provider credentials must use the encrypted provider_secrets store');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_providers_reject_plaintext_secrets_update
+      BEFORE UPDATE OF api_key, access_key, secret_key, oauth_client_id,
+        oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry
+      ON providers
+      WHEN NEW.api_key IS NOT NULL
+        OR NEW.access_key IS NOT NULL
+        OR NEW.secret_key IS NOT NULL
+        OR NEW.oauth_client_id IS NOT NULL
+        OR NEW.oauth_client_secret IS NOT NULL
+        OR NEW.oauth_refresh_token IS NOT NULL
+        OR NEW.oauth_access_token IS NOT NULL
+        OR NEW.oauth_token_expiry IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'provider credentials must use the encrypted provider_secrets store');
+      END;
+    `);
+  } catch {
+    // A partially-created legacy providers table is repaired by the ordinary
+    // migration pass. The next open retries these guards.
+  }
 
   // Migration 19 (idempotent guarantee): provisioning fields for automated
   // domain/address provisioning. ALTER ADD COLUMN has no IF NOT EXISTS, so these

@@ -28,6 +28,15 @@ function json(data: unknown): ToolResult {
   return text(JSON.stringify(data, null, 2));
 }
 
+function publicProvider(provider: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...provider };
+  for (const field of [
+    "api_key", "access_key", "secret_key", "oauth_client_id",
+    "oauth_client_secret", "oauth_refresh_token", "oauth_access_token", "oauth_token_expiry",
+  ]) delete out[field];
+  return out;
+}
+
 function optionalString(input: Record<string, unknown>, key: keyof CreateProviderInput): string | undefined {
   const value = input[key];
   return typeof value === "string" ? value : undefined;
@@ -81,12 +90,12 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
           }
         }
 
-        return json(redactSecrets(provider));
+        return json(publicProvider(provider as unknown as Record<string, unknown>));
       }
       case "update_provider": {
         const resolvedId = resolveId("providers", String(input["id"]));
         const { id: _, ...updates } = input;
-        return json(redactSecrets(updateProvider(resolvedId, updates)));
+        return json(publicProvider(updateProvider(resolvedId, updates) as unknown as Record<string, unknown>));
       }
       case "remove_provider": {
         const providerRef = String(input["provider_id"]);
