@@ -126,9 +126,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
     .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
     .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
     .option("--idempotency-key <key>", "Prevent duplicate sends — returns existing email if key was used before")
-    .option("--track-opens", "Inject tracking pixel to detect email opens (requires emails serve running)")
-    .option("--track-clicks", "Rewrite links to track clicks (requires emails serve running)")
-    .option("--tracking-url <url>", "Base URL for tracking server (default: http://localhost:3900)")
+    .option("--track-opens", "Open tracking — not supported in this build; refuses rather than silently sending untracked mail")
+    .option("--track-clicks", "Click tracking — not supported in this build; refuses rather than silently sending untracked mail")
+    .option("--tracking-url <url>", "Tracking base URL — not supported in this build; refuses rather than silently sending untracked mail")
     .option("--in-reply-to <id>", "Reply to an existing sent email — sets In-Reply-To/References headers for threading")
     .action(async (opts: {
       from: string;
@@ -148,11 +148,33 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
       force?: boolean;
       dryRun?: boolean;
       schedule?: string;
+      unsubscribeUrl?: string;
       trackOpens?: boolean;
       trackClicks?: boolean;
       trackingUrl?: string;
     }) => {
       try {
+        // The tracking flags are a TYPED REFUSAL, not a capability. They used to be
+        // parsed and never read: the mail left untracked and the command printed
+        // success — an operator relying on open/click analytics believed they
+        // existed. No send path in this build applies tracking (the tracking
+        // utilities in src/lib/tracking.ts have no production caller, and the
+        // rewritten URLs would need the ledger row id, which the local path only
+        // mints after the provider call), so the honest answer is to refuse before
+        // anything is sent.
+        const requestedTracking = [
+          opts.trackOpens ? "--track-opens" : null,
+          opts.trackClicks ? "--track-clicks" : null,
+          opts.trackingUrl ? "--tracking-url" : null,
+        ].filter((flag): flag is string => flag !== null);
+        if (requestedTracking.length > 0) {
+          handleError(new Error(
+            `${requestedTracking.join(", ")}: open/click tracking is not supported in this build — `
+            + "no send path applies a tracking pixel or rewrites links, so the flag would be accepted "
+            + "and silently ignored. Remove the tracking flag(s) to send without tracking.",
+          ));
+        }
+
         const ds = resolveMailDataSource();
 
         // Resolve recipients from --to or --to-group.
@@ -346,6 +368,13 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           // explicitly (the server chooses the sender), so it is never silently
           // ignored again.
           providerId: opts.provider,
+          // `--unsubscribe-url` was in the same parsed-and-dropped class: declared,
+          // typed, and never read, so bulk mail left WITHOUT the RFC 8058 one-click
+          // headers the operator relied on for compliance. Local sends inject the
+          // List-Unsubscribe / List-Unsubscribe-Post pair at the provider; the serve
+          // API's send contract cannot carry the field, so that path refuses loudly
+          // instead of mailing without the headers.
+          unsubscribeUrl: opts.unsubscribeUrl,
           replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
           attachments: attachments.length > 0 ? attachments : undefined,
           scheduledAt: opts.schedule,

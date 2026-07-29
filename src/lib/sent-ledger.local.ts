@@ -18,6 +18,21 @@ function rowToEmail(row: EmailRow): Email {
 }
 
 /**
+ * The ledger row a send-idempotency key already produced, or null.
+ *
+ * This is the read half of the idempotency fence, and it is exported so that
+ * `sendWithFailover` can ask BEFORE the provider is invoked. The fence used to live
+ * only inside `createSentEmailLedger` below — which runs AFTER the provider call, so a
+ * repeated key deduplicated the ledger ROW while the recipient had already received a
+ * second copy, and the second delivery's provider message id was recorded nowhere.
+ */
+export function findSentEmailByIdempotencyKey(key: string, db?: Database): Email | null {
+  const d = db || getDatabase();
+  const existing = d.query("SELECT * FROM emails WHERE idempotency_key = ?").get(key) as EmailRow | null;
+  return existing ? rowToEmail(existing) : null;
+}
+
+/**
  * Record a sent message in the LOCAL sent ledger.
  *
  * ─── THIS SQL MOVED HERE, AND IT IS THE FIRST HALF OF THE WRITE BELOW ─────────────────
@@ -67,13 +82,15 @@ export async function createSentEmailLedger(
   const attachCount = opts.attachments?.length ?? 0;
 
   // Idempotency: if a key was supplied and that send is already ledgered, return the
-  // existing row. This is the ONLY working idempotency fence on the local send path —
-  // `src/lib/forwarding.ts` records that the key fences nothing before this point, and
-  // `createMessage` refuses the column outright on both stores.
+  // existing row. This is the SECOND line of the fence: `sendWithFailover` asks
+  // `findSentEmailByIdempotencyKey` above before it invokes a provider, so a repeated
+  // key never reaches a provider at all. This check stays because this function is
+  // also called directly (batch, forwarding) and a row-level dedupe is still the right
+  // answer for a caller that raced past the pre-send read.
   const idempotencyKey = (opts as unknown as Record<string, unknown>)["idempotency_key"] as string | undefined;
   if (idempotencyKey) {
-    const existing = d.query("SELECT * FROM emails WHERE idempotency_key = ?").get(idempotencyKey) as EmailRow | null;
-    if (existing) return rowToEmail(existing);
+    const existing = findSentEmailByIdempotencyKey(idempotencyKey, d);
+    if (existing) return existing;
   }
 
   d.run(

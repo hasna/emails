@@ -1650,6 +1650,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
           + "(EMAILS_SEND_PROVIDER) and holds its credentials. Re-run without --provider.",
       );
     }
+    if (input.unsubscribeUrl) {
+      // Same class as --provider above: the POST /v1/messages/send contract carries
+      // no unsubscribe_url field, so the RFC 8058 List-Unsubscribe headers cannot be
+      // honored on this path. Accepting the flag and mailing WITHOUT the headers is
+      // a compliance failure the operator cannot see — refuse before the request.
+      throw new Error(
+        "--unsubscribe-url is not supported against the emails serve send API: its send contract "
+          + "carries no unsubscribe_url field, so the List-Unsubscribe headers would be silently "
+          + "dropped. Re-run without --unsubscribe-url, or send through a local provider.",
+      );
+    }
     const to = input.to.split(",").map((v) => v.trim()).filter(Boolean);
     const useMarkdown = input.markdown !== false;
     const html = input.html ?? (useMarkdown ? renderMarkdown(input.body) : undefined);

@@ -529,6 +529,8 @@ export interface ComposeInput {
   attachments?: Array<{ filename: string; content: string; content_type: string }>;
   idempotencyKey?: string;
   providerId?: string;
+  /** RFC 8058 one-click unsubscribe target; the provider injects the header pair. */
+  unsubscribeUrl?: string;
   markdown?: boolean;
   replyTo?: TuiMessage;
 }

@@ -152,6 +152,13 @@ export interface MailSendInput {
   scheduledAt?: string;
   /** Stable caller-provided key used to make self-hosted sends retry-safe. */
   idempotencyKey?: string;
+  /**
+   * RFC 8058 one-click unsubscribe target: local providers inject the
+   * List-Unsubscribe / List-Unsubscribe-Post header pair. The self-hosted send
+   * contract cannot carry it, so that backend REFUSES rather than mailing
+   * without the headers.
+   */
+  unsubscribeUrl?: string;
 }
 
 export interface MailSendResult {
@@ -459,6 +466,7 @@ export class SqliteMailDataSource implements MailDataSource {
       attachments: input.attachments,
       idempotencyKey: input.idempotencyKey,
       providerId: input.providerId,
+      unsubscribeUrl: input.unsubscribeUrl,
       markdown: input.markdown,
       replyTo,
     };

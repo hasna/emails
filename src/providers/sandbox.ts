@@ -46,7 +46,20 @@ export class SandboxAdapter implements ProviderAdapter {
         html: opts.html ?? null,
         text_body: opts.text ?? null,
         attachments: opts.attachments ?? [],
-        headers: {},
+        // Capture the EFFECTIVE wire headers, the way the real adapters build them:
+        // caller headers plus the RFC 8058 pair derived from `unsubscribe_url` (the
+        // same derivation ses.ts and resend.ts perform). The sandbox exists so local
+        // runs and tests can observe what would have left — a hardcoded `{}` here hid
+        // the delivered headers from every observer.
+        headers: {
+          ...(opts.headers ?? {}),
+          ...(opts.unsubscribe_url
+            ? {
+                "List-Unsubscribe": `<${opts.unsubscribe_url}>`,
+                "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+              }
+            : {}),
+        },
       },
     );
     const toStr = Array.isArray(opts.to) ? opts.to.join(", ") : opts.to;

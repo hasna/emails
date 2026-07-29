@@ -59,6 +59,7 @@ import type { EmailStore } from "../store/email-store.js";
 import type { ResourceRow } from "../store/records.js";
 import type { Provider } from "../types/index.js";
 import { parseCsv } from "./csv.js";
+import { canonicalSender } from "./email-address.js";
 import { assertDomainOutboundReady, sendWithFailover } from "./send.js";
 import { createSentEmailLedger } from "./sent-ledger.local.js";
 
@@ -184,8 +185,15 @@ export async function batchSend(opts: BatchSendOptions): Promise<BatchResult> {
       continue;
     }
 
-    // Check suppression
-    if (!opts.force && suppressedEmailSet.has(email)) {
+    // Check suppression — CANONICALLY, matching how the set was built and how the CLI
+    // send path compares recipients. The set holds the STORED spelling and the
+    // canonical (lowercased addr-spec) form of every suppressed contact; testing the
+    // raw CSV string against it mailed `Blocked@Ext.com` — and counted it sent —
+    // against a suppressed `blocked@ext.com`. Suppression means "never mail this
+    // person", not "never mail this exact byte string". The fallback mirrors the
+    // contacts module's own canonicalisation for non-addr-spec values.
+    const canonicalEmail = canonicalSender(email) ?? email.trim().toLowerCase();
+    if (!opts.force && suppressedEmailSet.has(canonicalEmail)) {
       result.suppressed++;
       continue;
     }
