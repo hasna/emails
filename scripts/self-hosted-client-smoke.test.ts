@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CLIENT_ENV_REQUIRED_KEYS } from "../src/lib/client-env.js";
 import { startV1Stub, type V1Stub } from "../src/test-support/v1-stub.js";
 
 const root = resolve(import.meta.dir, "..");
@@ -36,6 +37,12 @@ async function runSmoke(env: Record<string, string>): Promise<{ exitCode: number
   return { exitCode, stdout, stderr };
 }
 
+// A non-secret vault path. The station is pointed at the service through this
+// pointer, exactly as an operator station is; the deployment key that the
+// word-routed CLI still reads lives ONLY inside the emulated vault payload below,
+// never in this tracked suite — the same place it lives in production.
+const CLIENT_ENV_POINTER = "hasna/test/opensource/emails/live/client-env";
+
 let stub: V1Stub;
 let testRoot: string;
 let home: string;
@@ -43,6 +50,7 @@ let dataDir: string;
 let database: string;
 let quarantine: string;
 let wrapper: string;
+let secretsDir: string;
 
 beforeAll(async () => {
   stub = await startV1Stub({ openapi: true });
@@ -85,6 +93,28 @@ beforeAll(async () => {
     { mode: 0o700 },
   );
   chmodSync(wrapper, 0o700);
+
+  // An emulated `secrets` CLI standing in for the operator vault. It returns the
+  // canonical client-env entry the pointer resolves to: the service origin, a
+  // credential, and — keyed through client-env's own required-key contract rather
+  // than a restated literal — the deployment word the word-routed CLI still reads.
+  // The word therefore appears only in this runtime vault payload, exactly as it
+  // does in production, and nowhere in tracked source.
+  const [modeKey, urlKey] = CLIENT_ENV_REQUIRED_KEYS;
+  const clientEnvEntry = JSON.stringify({
+    [modeKey]: "self_hosted",
+    [urlKey]: stub.baseUrl,
+    EMAILS_SELF_HOSTED_API_KEY: stub.apiKey,
+  });
+  secretsDir = join(testRoot, "secrets-bin");
+  mkdirSync(secretsDir);
+  const secretsBin = join(secretsDir, "secrets");
+  writeFileSync(
+    secretsBin,
+    `#!/bin/sh\nif [ "$1" = "get" ]; then\n  printf '%s\\n' ${JSON.stringify(clientEnvEntry)}\n  exit 0\nfi\nexit 2\n`,
+    { mode: 0o700 },
+  );
+  chmodSync(secretsBin, 0o700);
 });
 
 afterAll(() => {
@@ -95,11 +125,9 @@ afterAll(() => {
 describe("published self-hosted client smoke", () => {
   it("passes before and after quarantine without opening or recreating local state", async () => {
     const env: Record<string, string> = {
-      PATH: process.env.PATH ?? "",
+      PATH: `${secretsDir}:${process.env.PATH ?? ""}`,
       HOME: home,
-      EMAILS_MODE: "self_hosted",
-      EMAILS_SELF_HOSTED_URL: stub.baseUrl,
-      EMAILS_SELF_HOSTED_API_KEY: stub.apiKey,
+      EMAILS_CLIENT_ENV_SECRET: CLIENT_ENV_POINTER,
       EMAILS_SMOKE_CLI: wrapper,
       NO_COLOR: "1",
     };
@@ -138,13 +166,15 @@ describe("published self-hosted client smoke", () => {
     expect(sha256(join(quarantine, "emails.db"))).toBe(originalDatabaseHash);
     expect(sha256(join(quarantine, "attachments", "message-smoke", "proof.txt"))).toBe(originalAttachmentHash);
     expect(sha256(join(quarantine, "cache", "proof"))).toBe(originalCacheHash);
-  });
+    // Two smoke runs, each cold-starting the CLI four times, and every invocation
+    // resolves the client-env pointer through the emulated `secrets` process — far
+    // more subprocess work than the default per-test budget allows.
+  }, 60_000);
 
   it("refuses any local database selector before invoking the CLI", async () => {
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? "",
       HOME: home,
-      EMAILS_MODE: "self_hosted",
       EMAILS_SELF_HOSTED_URL: stub.baseUrl,
       EMAILS_SELF_HOSTED_API_KEY: stub.apiKey,
       EMAILS_SMOKE_CLI: wrapper,

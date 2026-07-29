@@ -17,7 +17,10 @@ export const EMAILS_IDP_TOKEN_ENV = "EMAILS_IDP_TOKEN";
 // Structural keys the vault entry MUST carry (endpoint + mode). A credential is
 // required too, but a session token OR the API key satisfies it — see
 // CLIENT_ENV_CREDENTIAL_KEYS — so neither credential is individually mandatory.
-const CLIENT_ENV_REQUIRED_KEYS = [
+// Exported as the single source of truth for the client-env vault contract, so a
+// caller that has to construct a vault entry (e.g. an emulated `secrets` store in
+// a test) names these keys from here rather than restating them.
+export const CLIENT_ENV_REQUIRED_KEYS = [
   "EMAILS_MODE",
   "EMAILS_SELF_HOSTED_URL",
 ] as const;

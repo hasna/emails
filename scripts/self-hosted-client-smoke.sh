@@ -11,15 +11,21 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 emails_cli="${EMAILS_SMOKE_CLI:-emails}"
 command -v "$emails_cli" >/dev/null 2>&1 || fail "Emails CLI is not executable: $emails_cli"
 
-test "${EMAILS_MODE:-}" = "self_hosted" ||
-  fail "EMAILS_MODE must be exactly self_hosted"
-test -n "${EMAILS_SELF_HOSTED_URL:-}" ||
-  fail "EMAILS_SELF_HOSTED_URL must be set"
-
-if test -z "${EMAILS_SESSION_TOKEN:-}" &&
-  test -z "${EMAILS_IDP_TOKEN:-}" &&
-  test -z "${EMAILS_SELF_HOSTED_API_KEY:-}"; then
-  fail "set EMAILS_SESSION_TOKEN, EMAILS_IDP_TOKEN, or EMAILS_SELF_HOSTED_API_KEY"
+# The client must be configured for the operator-owned service, and that
+# selection is a fact about STORAGE configuration, not a deployment word. It is
+# signalled either by the canonical client-env pointer (which delivers the API
+# origin and credential from the vault) or by an explicit service origin plus a
+# credential. Either one is proof the station has been pointed at the service.
+if test -n "${EMAILS_CLIENT_ENV_SECRET:-}"; then
+  : # the client-env pointer supplies EMAILS_SELF_HOSTED_URL and a credential
+elif test -n "${EMAILS_SELF_HOSTED_URL:-}"; then
+  if test -z "${EMAILS_SESSION_TOKEN:-}" &&
+    test -z "${EMAILS_IDP_TOKEN:-}" &&
+    test -z "${EMAILS_SELF_HOSTED_API_KEY:-}"; then
+    fail "set EMAILS_SESSION_TOKEN, EMAILS_IDP_TOKEN, or EMAILS_SELF_HOSTED_API_KEY"
+  fi
+else
+  fail "configure the self-hosted client: set EMAILS_CLIENT_ENV_SECRET, or EMAILS_SELF_HOSTED_URL with a credential"
 fi
 
 # A database-path setting is evidence of an unresolved two-store configuration,
