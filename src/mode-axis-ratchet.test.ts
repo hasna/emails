@@ -1201,17 +1201,17 @@ const root = join(import.meta.dir, "..");
  * two earlier rebases in this programme are the proof that a clean apply can be wrong.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 19,
-  remoteArmModules: 19,
-  routedFacadeDefinitions: 11,
-  routedCallExpressions: 165,
-  selfHostedResourceBranches: 27,
-  selfHostedResourceReferences: 94,
-  isSelfHostedModeReferences: 44,
-  getEmailsModeReferences: 55,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 219,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
