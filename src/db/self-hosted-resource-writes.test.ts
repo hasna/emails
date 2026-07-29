@@ -1,7 +1,7 @@
 // End-to-end proof that the resource repositories route WRITES to the selfHosted /v1
 // API in selfHosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see self-hosted-resource-routing.test.ts);
-// this covers createOwner and createGroup, plus
+// this covers createOwner, plus
 // send-key minting (which POSTs to the bespoke /v1/send-keys/mint endpoint — the
 // token/hash are server-minted and only a hash-free key summary reaches the client).
 //
@@ -13,7 +13,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Subprocess } from "bun";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
 import { createOwner, listOwners } from "./owners.js";
-import { createGroup, listGroups } from "./groups.js";
 import { createSendKey } from "./send-keys.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
@@ -171,11 +170,13 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listOwners().some((x) => x.id === o.id)).toBe(true);
   });
 
-  test("createGroup POSTs to /v1/groups and appears in selfHosted listGroups", () => {
-    const g = createGroup("writer-group", "desc");
-    expect(g.id).toStartWith("g");
-    expect(listGroups().some((x) => x.name === "writer-group")).toBe(true);
-  });
+  // The groups case that used to sit here proved the OLD routing bridge sent that
+  // family's writes to `/v1` when the deployment word said so. The family has collapsed
+  // onto the store seam and consults no such word, so the premise is gone — and the
+  // question that survives it (does a create land on the API dataset and come back from
+  // the API list?) is asked by src/db/groups.test.ts against a REAL HTTP store over the
+  // store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
   // The contacts case that used to sit here proved the OLD routing bridge sent that
   // family's suppress/unsuppress writes to `/v1` when the deployment word said so. The

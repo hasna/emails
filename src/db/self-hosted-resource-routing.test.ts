@@ -112,8 +112,25 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
     }
   });
 
-  test("listGroups returns selfHosted rows", () => {
-    expect(listGroups().map((g) => g.name)).toEqual(["selfHosted-group"]);
+  // Groups no longer participate in the routing this file measures, and the way they
+  // stopped is the same way the schedule and the sent ledger did: the family has
+  // collapsed to one implementation over the store seam, so it reaches this same `/v1`
+  // service because STORAGE CONFIGURATION named an Emails API — not because a mode
+  // word chose an arm. The database path is unset for the duration of this case,
+  // leaving exactly one configured store, because the pair is a CONTRADICTION that
+  // `planEmailStore` refuses outright. What it still guards is unchanged: the rows
+  // must come from the service, mapped, and not from a local read.
+  test("listGroups reads the configured API store", async () => {
+    const restore = DATABASE_PATH_SETTINGS.map((key) => [key, process.env[key]] as const);
+    for (const [key] of restore) delete process.env[key];
+    try {
+      expect((await listGroups()).map((g) => g.name)).toEqual(["selfHosted-group"]);
+    } finally {
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("listOwners returns selfHosted rows and filters by type", () => {
