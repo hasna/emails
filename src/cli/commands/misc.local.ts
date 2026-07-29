@@ -468,7 +468,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   // and silently ignored, with output byte-identical to running without it.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics (reads through the configured store)")
+    .description("Run system diagnostics (reads through the configured store). Always exits 0 — the report is the product; gate automation on the --json check statuses, not the exit code")
     .option("--live", "Ask for live provider credential validation (reported as not performed here — use 'emails provider status')")
     .action(async (opts: { live?: boolean }) => {
       try {

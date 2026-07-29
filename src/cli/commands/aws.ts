@@ -42,8 +42,10 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
         const region = opts.region ?? inbound.region;
         if (!bucket) {
           handleError(new Error(
-            "No S3 bucket for inbound mail: pass --bucket, or set one with "
-            + "`emails config set inbound_s3_bucket <name>`.",
+            // Points at mechanisms that exist: there is no `emails config set`
+            // command (task 0d03f185).
+            "No S3 bucket for inbound mail: pass --bucket, or set EMAILS_INBOUND_S3_BUCKET "
+            + "(equivalently the inbound_s3_bucket config key, which `emails domain adopt` records).",
           ));
           return;
         }
