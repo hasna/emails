@@ -1279,6 +1279,8 @@ export interface ComposeInput {
   attachments?: Array<{ filename: string; content: string; content_type: string }>;
   idempotencyKey?: string;
   providerId?: string;
+  /** RFC 8058 one-click unsubscribe target; the provider injects the header pair. */
+  unsubscribeUrl?: string;
   markdown?: boolean;
   replyTo?: TuiMessage;
 }
@@ -1368,6 +1370,7 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
     ...(html ? { html } : {}),
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(input.idempotencyKey ? { idempotency_key: input.idempotencyKey } : {}),
+    ...(input.unsubscribeUrl ? { unsubscribe_url: input.unsubscribeUrl } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
   const { sendWithFailover } = await import("../../lib/send.local.js");

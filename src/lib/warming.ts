@@ -90,11 +90,15 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
 /**
  * Count today's sent mail per sending domain in ONE ledger read.
  *
- * Sent mail is a `/v1`-backed resource (the emails repo routes to the operator's
- * API), so this fetches today's outbound messages once and buckets them by From
- * domain — filtering client-side over the bounded superset the repo returns (the
- * same pattern the other self-hosted repos use). Listing N schedules therefore
- * costs one request, not N.
+ * The read takes the WHOLE UTC-day window — deliberately no row cap. This used to
+ * pass `limit: 1000`, believing it a defensive clamp over a bounded superset; by the
+ * time `listEmails` collapsed onto the store seam that argument had become a
+ * client-side newest-first WINDOW across ALL domains. One busy sibling domain then
+ * crowded a warming domain's sends out of the window, this function answered 0, and
+ * `assertWarmingLimit` — which gates every local send on that number — never tripped
+ * the ramp cap. `listEmails` enumerates the whole filtered stream and REFUSES when it
+ * cannot finish, so the numbers returned here are totals, never lower bounds: a count
+ * this function cannot establish throws instead of under-reporting.
  *
  * Every requested domain is present in the result, zero included.
  */
@@ -110,7 +114,7 @@ export async function getTodaySentCountsByDomain(domains: readonly string[]): Pr
   const start = `${today}T00:00:00.000Z`;
   const tomorrow = new Date(start);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  for (const email of await listEmails({ since: start, until: tomorrow.toISOString(), limit: 1000 })) {
+  for (const email of await listEmails({ since: start, until: tomorrow.toISOString() })) {
     const sender = (email.from_address ?? "").toLowerCase().split("@")[1]?.trim();
     if (sender !== undefined && counts.has(sender)) counts.set(sender, counts.get(sender)! + 1);
   }

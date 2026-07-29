@@ -21,6 +21,10 @@ import { canonicalSender } from "./email-address.js";
 // local island holding none.
 import { getWarmingSchedule } from "../db/warming.js";
 import { getDomainByName } from "../db/domains.local.js";
+// NOT an arm reach-past: the sent ledger has no facade and no second implementation —
+// this module IS the local send path, and the fence has to read the same ledger the
+// send it fences writes to.
+import { findSentEmailByIdempotencyKey } from "./sent-ledger.local.js";
 import { resolveEmailsMode } from "./mode.js";
 import { getTodayLimit, getTodaySentCount } from "./warming.js";
 import type { Provider, SendEmailOptions } from "../types/index.js";
@@ -128,6 +132,30 @@ export async function sendWithFailover(
   opts: SendEmailOptions,
   db?: Database,
 ): Promise<SendResult> {
+  // Idempotency fence, BEFORE any provider is invoked. `--idempotency-key` promises
+  // "returns existing email if key was used before"; the only fence used to sit inside
+  // `createSentEmailLedger`, which runs AFTER the provider call — so a repeated key
+  // deduplicated the ledger row while the recipient received a second copy, and the
+  // second delivery's provider message id was recorded nowhere. A key whose send is
+  // already ledgered returns that FIRST outcome and touches nothing. Checked ahead of
+  // the warming/lifecycle gates on purpose: a replay sends no new mail, so there is
+  // nothing for those gates to gate.
+  if (opts.idempotency_key) {
+    const existing = findSentEmailByIdempotencyKey(opts.idempotency_key, db);
+    if (existing) {
+      return {
+        // `provider_message_id` can be legitimately NULL on a ledger row; an empty
+        // messageId is "the first send recorded no provider id", never a fabricated one.
+        messageId: existing.provider_message_id ?? "",
+        // The row type declares `provider_id` nullable even though every write path
+        // sets it; the caller's primary id is the only honest stand-in for a row
+        // that somehow lacks one.
+        providerId: existing.provider_id ?? primaryProviderId,
+        usedFailover: false,
+      };
+    }
+  }
+
   validateSendAttachments(opts.attachments);
   await assertWarmingLimit(opts, db);
 
