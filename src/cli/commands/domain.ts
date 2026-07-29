@@ -760,7 +760,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
   // ─── DOMAIN WARMING ────────────────────────────────────────────────────────
   // Warming schedules are a first-class repository resource (`warming_schedules`
   // in SQLite, `/v1/warming` on the self-hosted server), so these commands call
-  // the warming repo directly and work in every configuration. The MCP tools in
+  // the collapsed warming family (src/db/warming.ts) — one implementation over
+  // the store seam, async, resolved from storage configuration. The MCP tools in
   // src/mcp/tools/warming.ts are the same calls over a different transport.
 
   const warmingStatusColor = (status: WarmingSchedule["status"]): string =>
@@ -769,9 +770,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
   // pause/resume/complete are the same repository write with a different target
   // state, so they share one transition path: fail loud when the domain has no
   // schedule, otherwise emit the updated row.
-  const transitionWarmingStatus = (domain: string, status: WarmingSchedule["status"], formatted: string) => {
+  const transitionWarmingStatus = async (domain: string, status: WarmingSchedule["status"], formatted: string) => {
     try {
-      const updated = updateWarmingStatus(domain, status);
+      const updated = await updateWarmingStatus(domain, status);
       if (!updated) {
         handleError(new Error(
           `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
@@ -803,7 +804,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         // does, with a raw UNIQUE error), so check first: a second POST would
         // otherwise leave two schedules for one domain and whichever the reads
         // happened to find would win.
-        const existing = getWarmingSchedule(domain);
+        const existing = await getWarmingSchedule(domain);
         if (existing) {
           handleError(new Error(
             `${domain} already has a warming schedule (status ${existing.status}, target ${existing.target_daily_volume}/day, started ${existing.start_date}). ` +
@@ -812,7 +813,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           ));
         }
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const schedule = createWarmingSchedule({
+        const schedule = await createWarmingSchedule({
           domain,
           provider_id: providerId,
           target_daily_volume: opts.target,
@@ -835,7 +836,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Show warming schedule status for a domain")
     .action(async (domain: string) => {
       try {
-        const schedule = getWarmingSchedule(domain);
+        const schedule = await getWarmingSchedule(domain);
         if (!schedule) {
           handleError(new Error(
             `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
@@ -865,7 +866,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           handleError(new Error(`Invalid --status '${opts.status}'. Use active, paused, or completed.`));
         }
         const page = parseCliListPage(opts);
-        const schedules = listWarmingSchedules(opts.status, page);
+        const schedules = await listWarmingSchedules(opts.status, page);
         if (schedules.length === 0) {
           output([], chalk.dim("No warming schedules found."));
           return;
@@ -949,7 +950,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--yes", "Skip confirmation prompt")
     .action(async (domain: string, opts: { yes?: boolean }) => {
       try {
-        const existing = getWarmingSchedule(domain);
+        const existing = await getWarmingSchedule(domain);
         if (!existing) {
           handleError(new Error(
             `Warming schedule not found for domain: ${domain}. Start one with 'emails domain warm ${domain} --target <n>'.`,
@@ -960,7 +961,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           `Delete the warming schedule for ${domain} (status ${existing.status}, target ${existing.target_daily_volume}/day)?`,
           opts.yes,
         );
-        if (!deleteWarmingSchedule(domain)) {
+        if (!(await deleteWarmingSchedule(domain))) {
           handleError(new Error(`Warming schedule for ${domain} could not be deleted.`));
           return;
         }

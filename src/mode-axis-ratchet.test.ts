@@ -1278,15 +1278,62 @@ const root = join(import.meta.dir, "..");
  * nothing added — the seam already declares this family's repository, so no extension
  * module was needed. Re-measured AFTER this paragraph was written, because this file
  * sits inside the corpus it scans.
+ *
+ * THE `src/db/warming` COLLAPSE (this branch, from f3035cf where all eleven live counts
+ * equalled the ceilings declared above — measured, not assumed). Six counters move, and
+ * every one of the six is the warming family's own measured contribution to the base
+ * tree: the two structural counters 18 -> 17 each (the family's two arm modules are
+ * deleted), the facade counter 10 -> 9 and the dispatch-call counter 151 -> 146 (the
+ * facade's dispatch helper and its five dispatched exports), the tree-wide resource-
+ * bridge reference counter 80 -> 75 (the deleted second arm's import and four calls),
+ * and the client-predicate counter 42 -> 40 (the deleted facade's import and one read
+ * of it). The branch counter holds at 20 — the family's SQLite arm never interrogated
+ * the bridge, which is exactly why its five reads could disagree with its five writes'
+ * sibling — and the four parser/env counters hold at 55/65/16/219: the two
+ * mode-variable spellings in the family's own live CLI suite are its ENV SCRUB list,
+ * which must keep naming the variable for as long as the variable exists anywhere, or
+ * the suite inherits it from the operator's shell. No new module names any counted
+ * identifier: the collapsed implementation resolves its store from storage
+ * configuration and its one import from the module named for the axis is value
+ * coercion only, as the contacts and groups collapses established. Corpus: 649
+ * tracked, 648 scanned, ~10.24M characters — two fewer tracked files than the base
+ * (two arm modules deleted, nothing added). Re-measured AFTER this paragraph was
+ * written, because this file sits inside the corpus it scans.
+ *
+ * THE WARMING COLLAPSE THEN REBASED ACROSS THE TEMPLATES COLLAPSE, AND THE COMPOSING-
+ * REDUCTIONS HAZARD FIRED FOR THE SIXTH TIME, in exactly the shape the groups
+ * paragraph above predicted for the fifth. Each branch had pinned truthfully for ITS
+ * OWN tree (templates 17/17/9/144/15/69/40 on the seven that move, this one
+ * 17/17/9/146/20/75/40), and NEITHER set is right for the merged tree. Git flagged
+ * exactly THREE ceiling lines — the dispatch-call, branch and reference counters,
+ * where the two sides' numbers differ — and let EIGHT merge in silence, including the
+ * structural pair, the facade counter and the predicate counter, where both sides
+ * agreed on 17/17/9/40 and the merged tree measures 16/16/8/38.
+ *
+ * What prevented it is the procedure both collapses already follow: this branch's
+ * eleven were committed as LITERAL ZEROS in their own commit BEFORE the rebase, so
+ * the silently-merged lines could not pass the guard, the merged tree was measured
+ * over the real `git ls-files` corpus, and the numbers below are that measurement.
+ * The composition was then CHECKED rather than admired: base f3035cf
+ * 18/18/10/151/20/80/42, minus the templates family's measured reductions
+ * (1/1/1/7/5/11/2), minus this family's measured reductions (1/1/1/5/0/5/2), equals
+ * 16/16/8/139/15/64/38 on the seven that move — exactly what the merged tree
+ * measures, with no cross-term. The four parser/env counters hold at 55/65/16/219 on
+ * both sides and on the merged tree.
+ *
+ * Corpus of the merged tree: 647 tracked, 646 scanned, ~10.28M characters — both
+ * floors cleared with room; each branch deleted its family's two arm modules and
+ * added nothing. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 17,
-  remoteArmModules: 17,
-  routedFacadeDefinitions: 9,
-  routedCallExpressions: 144,
+  twoArmFamilies: 16,
+  remoteArmModules: 16,
+  routedFacadeDefinitions: 8,
+  routedCallExpressions: 139,
   selfHostedResourceBranches: 15,
-  selfHostedResourceReferences: 69,
-  isSelfHostedModeReferences: 40,
+  selfHostedResourceReferences: 64,
+  isSelfHostedModeReferences: 38,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,
