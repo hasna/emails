@@ -168,6 +168,14 @@ function resolveEmailLinks(providerId: string, remoteEvents: RemoteEvent[], db: 
  * Returns whether a row was actually inserted, which is the only thing the loop
  * below consumes (the pre-computed `existingProviderEventIds` set already answers
  * "which one was it" for skipped rows).
+ *
+ * THE FALLTHROUGH IS LOAD-BEARING, exactly as it was in the deleted arm: `OR IGNORE`
+ * swallows EVERY ignorable constraint failure, not just the unique key — a CHECK
+ * violation (a type outside the declared set) also "ignores". So a swallowed insert
+ * is re-checked against the dedup key, and only a row that genuinely exists is a
+ * skip; anything else re-runs as a PLAIN insert so the real constraint error THROWS
+ * and rolls the surrounding transaction back, instead of a malformed event being
+ * silently dropped and the cursor advancing past it forever.
  */
 function insertEventIfNew(
   d: Database,
@@ -181,24 +189,29 @@ function insertEventIfNew(
     occurred_at: string;
   },
 ): boolean {
-  const conflictPolicy = input.provider_event_id ? "OR IGNORE " : "";
-  const result = d.run(
-    `INSERT ${conflictPolicy}INTO events
-       (id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      uuid(),
-      input.email_id,
-      input.provider_id,
-      input.provider_event_id,
-      input.type,
-      input.recipient,
-      JSON.stringify(input.metadata),
-      input.occurred_at,
-      now(),
-    ],
-  );
-  return result.changes > 0;
+  const columns = `(id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  const bind = () => [
+    uuid(),
+    input.email_id,
+    input.provider_id,
+    input.provider_event_id,
+    input.type,
+    input.recipient,
+    JSON.stringify(input.metadata),
+    input.occurred_at,
+    now(),
+  ];
+  if (input.provider_event_id) {
+    const result = d.run(`INSERT OR IGNORE INTO events ${columns}`, bind());
+    if (result.changes > 0) return true;
+    const existing = d
+      .query("SELECT 1 AS present FROM events WHERE provider_id = ? AND provider_event_id = ?")
+      .get(input.provider_id, input.provider_event_id) as { present: number } | null;
+    if (existing) return false;
+  }
+  d.run(`INSERT INTO events ${columns}`, bind());
+  return true;
 }
 
 function resolveExistingProviderEventIds(providerId: string, remoteEvents: RemoteEvent[], db: Database): Set<string> {

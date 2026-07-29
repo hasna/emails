@@ -1,5 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
 import {
   API_BASE_URL_SETTING,
@@ -16,19 +15,18 @@ import {
   exportEventsJson,
 } from "./export.js";
 
-// THE TWO HALVES OF THIS FILE NOW READ THROUGH DIFFERENT LAYERS, and that is the whole
-// change here.
-//
-//   * THE EVENT EXPORTS still go through `listEvents`, which is a two-arm family, so those
-//     cases still drive the out-of-process `/v1` stub and are untouched.
-//   * THE EMAIL EXPORTS go through `listEmails`, which has COLLAPSED onto the store seam.
-//     `src/test-support/v1-stub.ts` is the wrong fixture for it — its generic list handler
-//     ignores equality filters and the real HTTP store reads `GET /v1/openapi.json` before a
-//     filtered list, which that stub serves only on request — so the email half runs against
-//     a real SQLite store, seeded straight into the `emails` table. `src/db/emails.test.ts`
-//     covers the same reads against BOTH shipped stores; what is asserted here is the
-//     EXPORT's own behaviour: its default and maximum page, its CSV shape and escaping, and
-//     the filters it forwards.
+// BOTH HALVES OF THIS FILE NOW READ THROUGH THE STORE SEAM. The email exports go
+// through `listEmails` and the event exports through `listEvents`, and BOTH families
+// have collapsed onto the seam — the events half used to drive the out-of-process
+// `/v1` stub because its family still had a mode-routed second arm, and that arm is
+// gone. Each half runs against a real SQLite store, seeded straight into its table;
+// `src/db/emails.test.ts` and `src/db/events.test.ts` cover the same reads against
+// BOTH shipped stores. What is asserted here is the EXPORT's own behaviour: its
+// default and maximum page, its CSV shape and escaping, and the filters it forwards.
+// (Every event export is BOUNDED — `normalizeEventFilters` always supplies a limit —
+// and a bounded event read now refuses past the whole-set enumeration budget; at this
+// fixture's sizes the walk always completes, and the budget refusal itself is pinned
+// in src/db/events.test.ts.)
 //
 // AND ONE FILTER IS GONE, WHICH IS WHY MOST OF THESE CASES CHANGED SHAPE. `provider_id` is
 // no longer answerable: no message projection on the store seam carries a provider, so
@@ -36,10 +34,6 @@ import {
 // mail. Every email case that used `provider_id: "p1"` as a convenient narrowing now narrows
 // by sender or by date instead, and the refusal itself gets a case — because an export that
 // silently widened would be a file that looks right and is not.
-
-let stub: V1Stub;
-beforeAll(async () => { stub = await startV1Stub(); });
-afterAll(() => stub.stop());
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
 
@@ -218,41 +212,72 @@ describe("email exports, over the store seam", () => {
   });
 });
 
-describe("event exports, still over the /v1 stub", () => {
-  beforeEach(async () => { await stub.reset(); stub.applyEnv(); });
-  afterEach(() => stub.clearEnv());
+describe("event exports, over the store seam", () => {
+  beforeEach(() => {
+    captureInheritedProcessEnv();
+    configureLocalStoreOnly();
+    resetDatabase();
+    db = getDatabase();
+    // `events.provider_id` and `events.email_id` carry enforced foreign keys.
+    db.run("INSERT INTO providers (id, name, type, active) VALUES ('p1', 'p1', 'ses', 1)");
+    db.run("INSERT INTO providers (id, name, type, active) VALUES ('p2', 'p2', 'ses', 1)");
+    seedLedger("msg", "2026-01-01T00:00:00.000Z");
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    restoreInheritedProcessEnv();
+  });
+
+  function seedEvent(row: {
+    id: string;
+    provider_id?: string;
+    email_id?: string | null;
+    type?: string;
+    recipient?: string;
+    occurred_at: string;
+  }): void {
+    db.run(
+      `INSERT INTO events (id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
+       VALUES (?, ?, ?, NULL, ?, ?, '{}', ?, ?)`,
+      [
+        row.id,
+        row.email_id === undefined ? "msg" : row.email_id,
+        row.provider_id ?? "p1",
+        row.type ?? "delivered",
+        row.recipient ?? "user@example.com",
+        row.occurred_at,
+        row.occurred_at,
+      ],
+    );
+  }
 
   it("defaults direct event exports to a bounded page", async () => {
-    const rows = Array.from({ length: EXPORT_DEFAULT_LIMIT + 1 }, (_, i) => ({
-      id: `default-event-${i}`,
-      email_id: "msg",
-      provider_id: "p1",
-      type: "delivered",
-      recipient: `user-${i}@example.com`,
-      occurred_at: new Date(2026, 0, 1, 0, 0, i).toISOString(),
-      created_at: new Date(2026, 0, 1, 0, 0, i).toISOString(),
-    }));
-    await stub.seed({ events: rows });
+    for (let i = 0; i < EXPORT_DEFAULT_LIMIT + 1; i += 1) {
+      seedEvent({
+        id: `default-event-${i}`,
+        recipient: `user-${i}@example.com`,
+        occurred_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + i * 1000).toISOString(),
+      });
+    }
 
-    const json = JSON.parse(exportEventsJson({ provider_id: "p1" })) as Array<{ id: string }>;
-    const csv = exportEventsCsv({ provider_id: "p1" });
+    const json = JSON.parse(await exportEventsJson({ provider_id: "p1" })) as Array<{ id: string }>;
+    const csv = await exportEventsCsv({ provider_id: "p1" });
 
     expect(json).toHaveLength(EXPORT_DEFAULT_LIMIT);
     expect(csv.split("\n")).toHaveLength(EXPORT_DEFAULT_LIMIT + 1);
   });
 
   it("caps direct event export limits and normalizes bad offsets", async () => {
-    const rows = Array.from({ length: 3 }, (_, i) => ({
-      id: `capped-event-${i}`,
-      email_id: "msg",
-      provider_id: "p1",
-      type: "delivered",
-      recipient: `capped-${i}@example.com`,
-      occurred_at: new Date(2026, 0, 1, 0, 0, i).toISOString(),
-    }));
-    await stub.seed({ events: rows });
+    for (let i = 0; i < 3; i += 1) {
+      seedEvent({
+        id: `capped-event-${i}`,
+        recipient: `capped-${i}@example.com`,
+        occurred_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      });
+    }
 
-    const json = JSON.parse(exportEventsJson({
+    const json = JSON.parse(await exportEventsJson({
       provider_id: "p1",
       limit: EXPORT_MAX_LIMIT + 1,
       offset: -100,
@@ -263,35 +288,27 @@ describe("event exports, still over the /v1 stub", () => {
   });
 
   it("keeps event CSV headers stable and honors provider/type/since filters", async () => {
-    await stub.seed({
-      events: [
-        { id: "kept-evt", email_id: "msg", provider_id: "p1", type: "delivered", recipient: "user@example.com", occurred_at: "2026-02-01T00:00:00.000Z" },
-        { id: "opened-evt", email_id: "msg", provider_id: "p1", type: "opened", recipient: "user@example.com", occurred_at: "2026-02-02T00:00:00.000Z" },
-        { id: "other-evt", provider_id: "p2", type: "delivered", recipient: "other@example.com", occurred_at: "2026-02-03T00:00:00.000Z" },
-      ],
-    });
+    seedEvent({ id: "kept-evt", type: "delivered", recipient: "user@example.com", occurred_at: "2026-02-01T00:00:00.000Z" });
+    seedEvent({ id: "opened-evt", type: "opened", recipient: "user@example.com", occurred_at: "2026-02-02T00:00:00.000Z" });
+    seedEvent({ id: "other-evt", email_id: null, provider_id: "p2", type: "delivered", recipient: "other@example.com", occurred_at: "2026-02-03T00:00:00.000Z" });
 
-    const csv = exportEventsCsv({ provider_id: "p1", type: "delivered", since: "2026-01-15T00:00:00.000Z" });
+    const csv = await exportEventsCsv({ provider_id: "p1", type: "delivered", since: "2026-01-15T00:00:00.000Z" });
     expect(csv.split("\n")[0]).toBe("id,email_id,type,recipient,occurred_at");
     expect(csv).toContain("kept-evt");
     expect(csv).toContain("user@example.com");
     expect(csv).not.toContain("opened");
     expect(csv).not.toContain("other@example.com");
 
-    const json = JSON.parse(exportEventsJson({ provider_id: "p1", type: "delivered", since: "2026-01-15T00:00:00.000Z" })) as Array<{ id: string }>;
+    const json = JSON.parse(await exportEventsJson({ provider_id: "p1", type: "delivered", since: "2026-01-15T00:00:00.000Z" })) as Array<{ id: string }>;
     expect(json.map((event) => event.id)).toEqual(["kept-evt"]);
   });
 
   it("paginates event exports and honors until filters", async () => {
-    await stub.seed({
-      events: [
-        { id: "old-evt", email_id: "msg", provider_id: "p1", type: "delivered", recipient: "old@example.com", occurred_at: "2026-01-01T00:00:00.000Z" },
-        { id: "mid-evt", email_id: "msg", provider_id: "p1", type: "delivered", recipient: "middle@example.com", occurred_at: "2026-02-01T00:00:00.000Z" },
-        { id: "new-evt", email_id: "msg", provider_id: "p1", type: "delivered", recipient: "new@example.com", occurred_at: "2026-03-01T00:00:00.000Z" },
-      ],
-    });
+    seedEvent({ id: "old-evt", recipient: "old@example.com", occurred_at: "2026-01-01T00:00:00.000Z" });
+    seedEvent({ id: "mid-evt", recipient: "middle@example.com", occurred_at: "2026-02-01T00:00:00.000Z" });
+    seedEvent({ id: "new-evt", recipient: "new@example.com", occurred_at: "2026-03-01T00:00:00.000Z" });
 
-    const json = JSON.parse(exportEventsJson({
+    const json = JSON.parse(await exportEventsJson({
       provider_id: "p1",
       since: "2026-01-01T00:00:00.000Z",
       until: "2026-02-15T00:00:00.000Z",
@@ -299,7 +316,7 @@ describe("event exports, still over the /v1 stub", () => {
     })) as Array<{ id: string }>;
     expect(json.map((event) => event.id)).toEqual(["mid-evt"]);
 
-    const csv = exportEventsCsv({ provider_id: "p1", until: "2026-02-15T00:00:00.000Z", limit: 1, offset: 1 });
+    const csv = await exportEventsCsv({ provider_id: "p1", until: "2026-02-15T00:00:00.000Z", limit: 1, offset: 1 });
     expect(csv).toContain("old-evt");
     expect(csv).not.toContain("mid-evt");
     expect(csv).not.toContain("new-evt");
