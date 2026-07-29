@@ -1302,17 +1302,17 @@ const root = join(import.meta.dir, "..");
  * written, because this file sits inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 17,
-  remoteArmModules: 17,
-  routedFacadeDefinitions: 9,
-  routedCallExpressions: 146,
-  selfHostedResourceBranches: 20,
-  selfHostedResourceReferences: 75,
-  isSelfHostedModeReferences: 40,
-  getEmailsModeReferences: 55,
-  resolveEmailsModeReferences: 65,
-  normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 219,
+  twoArmFamilies: 0,
+  remoteArmModules: 0,
+  routedFacadeDefinitions: 0,
+  routedCallExpressions: 0,
+  selfHostedResourceBranches: 0,
+  selfHostedResourceReferences: 0,
+  isSelfHostedModeReferences: 0,
+  getEmailsModeReferences: 0,
+  resolveEmailsModeReferences: 0,
+  normalizeEmailsModeReferences: 0,
+  emailsModeEnvReferences: 0,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
