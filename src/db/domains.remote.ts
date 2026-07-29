@@ -10,6 +10,7 @@ import type {
 import { DomainNotFoundError } from "../types/index.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { selfHostedResource } from "./self-hosted-resource.js";
+import type { SelfHostedResourceStore } from "./self-hosted-store.js";
 import { assertHonestSelfHostedRead, enumerateSelfHostedRows } from "./self-hosted-page.js";
 
 // ============================================================================
@@ -60,8 +61,14 @@ function apiToDomain(e: Record<string, unknown>): Domain {
 // shared pager instead of treating one server-clamped page as the table. A
 // bounded lookup may stop once it has found what it needs; an unbounded read
 // must prove it reached the end, or refuse rather than publish a partial result.
-function readDomains(bound: number | null, keep?: (domain: Domain) => boolean): Domain[] {
-  const enumeration = enumerateSelfHostedRows<Domain>(DOMAIN_RESOURCE, {
+// The caller passes the `/v1/domains` resource store it reads so each lookup
+// site names the resource it walks.
+function readDomains(
+  store: SelfHostedResourceStore,
+  bound: number | null,
+  keep?: (domain: Domain) => boolean,
+): Domain[] {
+  const enumeration = enumerateSelfHostedRows<Domain>(store, {
     ...(bound === null ? {} : { need: bound }),
     select: (row) => {
       const domain = apiToDomain(row);
@@ -91,12 +98,12 @@ export function getDomainByName(_provider_id: string, domain: string): Domain | 
   // This lookup protects `domain adopt` from creating a duplicate, so it may
   // return null only after reaching the end of the table.
   const name = domain.trim().toLowerCase();
-  return readDomains(1, (dm) => dm.domain.toLowerCase() === name)[0] ?? null;
+  return readDomains(selfHostedResource(DOMAIN_RESOURCE), 1, (dm) => dm.domain.toLowerCase() === name)[0] ?? null;
 }
 
 export function findDomainsByName(domain: string): Domain[] {
   const name = domain.trim().toLowerCase();
-  return readDomains(null, (dm) => dm.domain.toLowerCase() === name)
+  return readDomains(selfHostedResource(DOMAIN_RESOURCE), null, (dm) => dm.domain.toLowerCase() === name)
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -112,7 +119,7 @@ export function listDomainsByProviderAndNames(pairs: Iterable<DomainProviderName
       .filter(Boolean),
   );
   if (wanted.size === 0) return [];
-  return readDomains(null, (dm) => wanted.has(dm.domain.toLowerCase()))
+  return readDomains(selfHostedResource(DOMAIN_RESOURCE), null, (dm) => wanted.has(dm.domain.toLowerCase()))
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -145,7 +152,7 @@ export function listDomains(provider_id?: string, opts?: ListDomainOptions): Dom
 export function listDomainsByProviderIds(providerIds: Iterable<string>): Domain[] {
   const ids = new Set([...providerIds].map((id) => id.trim()).filter(Boolean));
   if (ids.size === 0) return [];
-  return readDomains(null, (dm) => ids.has(dm.provider_id))
+  return readDomains(selfHostedResource(DOMAIN_RESOURCE), null, (dm) => ids.has(dm.provider_id))
     .sort((a, b) => a.provider_id.localeCompare(b.provider_id) || (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
@@ -160,13 +167,18 @@ function usableFilter(dm: Domain, opts: UsableDomainOptions): boolean {
 export function listUsableDomains(opts: UsableDomainOptions = {}): Domain[] {
   const lim = safeOptionalLimit(opts.limit);
   const off = safeOffset(opts.offset);
-  const domains = readDomains(null, (dm) => usableFilter(dm, opts))
+  // A limited page is a BOUNDED read: it only needs rows up to the window's far
+  // edge (offset + limit) and may stop there, so a usable page is still served
+  // from a table too large to enumerate. An unlimited caller asks for the whole
+  // set and must still prove it reached the end.
+  const bound = lim === null ? null : off + lim;
+  const domains = readDomains(selfHostedResource(DOMAIN_RESOURCE), bound, (dm) => usableFilter(dm, opts))
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
   return lim === null ? domains : domains.slice(off, off + lim);
 }
 
 export function countUsableDomains(opts: Omit<UsableDomainOptions, "limit" | "offset"> = {}): number {
-  return readDomains(null, (dm) => usableFilter(dm, opts)).length;
+  return readDomains(selfHostedResource(DOMAIN_RESOURCE), null, (dm) => usableFilter(dm, opts)).length;
 }
 
 export function updateDomain(

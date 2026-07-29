@@ -13,6 +13,7 @@
 // numbers as lower bounds, never as totals.
 
 import { selfHostedResource } from "./self-hosted-resource.js";
+import type { SelfHostedResourceStore } from "./self-hosted-store.js";
 
 /**
  * Server-side hard cap on any `/v1` list page. Mirrors clampLimit() in
@@ -189,10 +190,13 @@ function clampNeed(value: number | undefined): number | null {
  * bounded stop, so the two answers can never be mistaken for each other.
  */
 export function enumerateSelfHostedRows<T = Record<string, unknown>>(
-  resource: string,
+  resource: string | SelfHostedResourceStore,
   opts: EnumerateOptions<T> = {},
 ): SelfHostedEnumeration<T> {
-  const store = selfHostedResource(resource);
+  // Accept a resource name OR an already-resolved store. A caller that reads one
+  // resource across several filtered lookups can construct the store once and name
+  // it at each site, rather than re-resolving it from a string inside every call.
+  const store = typeof resource === "string" ? selfHostedResource(resource) : resource;
   const pageSize = clampPageSize(opts.pageSize);
   const need = clampNeed(opts.need);
   const select = opts.select;
