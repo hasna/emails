@@ -881,7 +881,7 @@ no hybrid synchronization mode. Passing an explicit Bun `Database` handle to
 the public library always selects that caller-owned SQLite database, even when
 the process is otherwise configured as a self-hosted client.
 
-The self-hosted schema is additive through migrations 0012–0016:
+The self-hosted schema is additive through migrations 0012–0021:
 
 - 0012 adds tenant/identity/session/membership/API-key binding and tenant-scopes
   existing resources with a default-tenant backfill;
@@ -891,7 +891,13 @@ The self-hosted schema is additive through migrations 0012–0016:
 - 0015 adds multiple verified email identities per user, the singleton primary
   super-admin flag, and an audit-safe bootstrap ledger;
 - 0016 makes inbound-domain ownership atomic and quarantines/removes stale,
-  pending, or unverified legacy routes before new writers run.
+  pending, or unverified legacy routes before new writers run;
+- 0017 records immutable inbound source/object provenance;
+- 0018 adds durable recovery metadata for uncertain provider send outcomes;
+- 0019 adds inbox performance rollups;
+- 0020 adds the tenant-scoped attachment-repair ledger;
+- 0021 adds the IdP-principal-to-Emails-tenant resolution table described by
+  ADR-0001. It remains outside RLS because it is read before a tenant is known.
 
 User sessions, tenant API keys, invitations, memberships, password reset, email
 verification, tenant switching, and multiple login email identities are wired
@@ -908,10 +914,12 @@ email/KID as paired nullable API-only settings and never hardcodes a person or
 accepts the token in Terraform.
 
 Production ordering is a hard gate: drain old API/worker/ingest writers; deploy
-new-code-compatible migration tooling; run migrations through 0016; then start
-only the new API and worker tasks. After 0016, never roll back to an old unscoped
-writer. A rollback may restore the previous new-code-compatible image, but not a
-pre-tenancy writer.
+new-code-compatible migration tooling; run migrations through 0021; then start
+only API and worker tasks whose migration set recognizes every applied row.
+After 0016, never roll back to an old unscoped writer; after 0021, a 0020-only
+image is also invalid because the migration ledger fails closed on an unknown
+applied row. Recovery is a compatible roll-forward, not a pre-tenancy or
+pre-0021 image rollback.
 
 Required release evidence is: full local suite, real PostgreSQL migration +
 multi-tenancy + RLS + message-ID suites, generated SDK sync, public package
