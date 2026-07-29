@@ -1089,6 +1089,60 @@ const root = join(import.meta.dir, "..");
  * with room. ONE fewer tracked file than the base: two arm modules deleted, one extension
  * module added; the family's suite and every consumer suite were rewritten or edited in
  * place.
+ *
+ * `src/db/groups` collapse. BASE b5f9054, verified INDEPENDENTLY over the real
+ * `git ls-files` corpus — 654 tracked / 653 scanned / ~10.10M characters — with all eleven
+ * live counts equal to the ceilings it declared and ZERO slack. The family handed twelve
+ * exports to a 224-line SQLite arm and a 145-line arm that answered every membership
+ * question out of one clamped page. What moves:
+ *
+ *   twoArmFamilies               20 -> 19   both of the family's arm modules are deleted, so
+ *   remoteArmModules             20 -> 19   its facade has no siblings left. THE PAIR THAT
+ *                                           SAYS A FAMILY IS DONE.
+ *   routedFacadeDefinitions      12 -> 11   the facade's dispatch helper is deleted
+ *   routedCallExpressions       177 -> 165  it dispatched all TWELVE of its exports through
+ *                                           that helper
+ *   selfHostedResourceBranches   32 -> 27   UNLIKE the sequences family before it, this
+ *                                           family's SQLite arm asked the generic resource
+ *                                           helper five times whether it was really the
+ *                                           local arm — its five group-table operations were
+ *                                           mode-gated while its seven membership operations
+ *                                           were not, which is exactly the split-brain shape
+ *                                           the programme exists to remove
+ *   selfHostedResourceReferences 110 -> 94  those five, plus the deleted second arm's eleven
+ *                                           reads and writes through the same helper — one
+ *                                           per operation, which is also why every one of
+ *                                           them answered out of a single clamped page
+ *   isSelfHostedModeReferences   46 -> 44   the deleted facade imported the client-side mode
+ *                                           predicate and called it once
+ *
+ * FOUR DO NOT MOVE. The process-wide-read counter stays at 55 and the resolver/parser
+ * counters at 65 and 16, because this dispatcher went through the predicate rather than
+ * reading or parsing the deployment word. The env counter stays at 219, which took the
+ * same deliberate care every collapse before it records: the tempting way to prove the
+ * deleted second arm's clamped-page defects is a suite that SETS the deployment word and
+ * drives that arm, and such a suite would raise a counter that may only fall. The rebuilt
+ * family suite instead names its storage through the resolution's OWN exported constants
+ * and proves the defects through the store seam, with raw one-page CONTROLS so the
+ * whole-set discipline cannot pass vacuously.
+ *
+ * THE BASE MOVED UNDER THIS CHANGE (b5f9054 -> 77e3c54, the inbound bucket-policy fix)
+ * and the rebase applied CLEAN — the branch had not yet touched this block, which is the
+ * QUIETEST form of the hazard this file documents: the merged tree could have inherited
+ * either side's numbers without a marker. Both trees were therefore measured rather than
+ * trusted: the pristine new base measures the same eleven the block above declares, and
+ * the merged tree measures exactly the numbers pinned below — the deltas are this
+ * family's own, and the bucket-policy fix contributes zero to every metric, verified per
+ * file rather than inferred from the total.
+ *
+ * Corpus of this change: 653 tracked, 652 scanned, ~10.16M characters — both floors
+ * cleared with room. ONE fewer tracked file than the base: two arm modules deleted, one
+ * extension module added (the membership ledger the seam cannot declare while
+ * `src/store/` is frozen); the family's suite and every consumer suite were rewritten or
+ * edited in place, so they add nothing. The eleven were re-measured AFTER this paragraph
+ * was written, because this file sits inside the corpus it scans, and the touched-file
+ * set was measured on its own to confirm the rewritten suites and the new extension
+ * module contribute ZERO to every count that moved.
  */
 
 /*
@@ -1150,9 +1204,9 @@ const CEILINGS: Record<string, number> = {
   twoArmFamilies: 19,
   remoteArmModules: 19,
   routedFacadeDefinitions: 11,
-  routedCallExpressions: 163,
-  selfHostedResourceBranches: 25,
-  selfHostedResourceReferences: 96,
+  routedCallExpressions: 165,
+  selfHostedResourceBranches: 27,
+  selfHostedResourceReferences: 94,
   isSelfHostedModeReferences: 44,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,

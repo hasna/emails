@@ -198,6 +198,32 @@ function storeFor(handle: GroupStore | undefined): EmailStore {
 }
 
 /**
+ * True when the caller's argument is a store rather than options.
+ *
+ * Needed because the published surface admits TWO parameter orders for the three
+ * listing exports: the deleted SQLite arm took its optional handle BEFORE the
+ * options, the deleted facade's compat shim exposed options-first, and the facade's
+ * intersection type made both compile for the package's whole 1.x life. Narrowing to
+ * one order would break released consumers, so both stay and the argument's SHAPE
+ * decides — the same structural question `storeFor` asks, never a label.
+ */
+function isStoreArgument(value: unknown): value is GroupStore {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<EmailStore> & Partial<Database>;
+  return typeof candidate.query === "function"
+    || (typeof candidate.messages === "object" && candidate.messages !== null);
+}
+
+/** Split one of the dual-order listing argument pairs into (opts, store). */
+function listingArguments<TOptions>(
+  first: TOptions | GroupStore | undefined,
+  second: GroupStore | TOptions | undefined,
+): { opts: TOptions | undefined; store: GroupStore | undefined } {
+  if (isStoreArgument(first)) return { opts: second as TOptions | undefined, store: first };
+  return { opts: first, store: second as GroupStore | undefined };
+}
+
+/**
  * The membership ledger, or a refusal naming what is missing.
  *
  * Both shipped stores carry it (they serve the join table through the same generic
@@ -442,7 +468,13 @@ export async function getGroupByName(name: string, store?: GroupStore): Promise<
   return match === undefined ? null : toGroup(match);
 }
 
-export async function listGroups(opts?: ListGroupOptions, store?: GroupStore): Promise<Group[]> {
+export async function listGroups(opts?: ListGroupOptions, store?: GroupStore): Promise<Group[]>;
+export async function listGroups(store: GroupStore, opts?: ListGroupOptions): Promise<Group[]>;
+export async function listGroups(
+  first?: ListGroupOptions | GroupStore,
+  second?: GroupStore | ListGroupOptions,
+): Promise<Group[]> {
+  const { opts, store } = listingArguments<ListGroupOptions>(first, second);
   const rows = await readAll(storeFor(store).groups, undefined, "list groups");
   return windowed(rows.sort(byNameRaw), opts).map(toGroup);
 }
@@ -510,7 +542,18 @@ export async function listMembers(
   groupId: string,
   opts?: ListMemberOptions,
   store?: GroupStore,
+): Promise<GroupMember[]>;
+export async function listMembers(
+  groupId: string,
+  store: GroupStore,
+  opts?: ListMemberOptions,
+): Promise<GroupMember[]>;
+export async function listMembers(
+  groupId: string,
+  first?: ListMemberOptions | GroupStore,
+  second?: GroupStore | ListMemberOptions,
 ): Promise<GroupMember[]> {
+  const { opts, store } = listingArguments<ListMemberOptions>(first, second);
   const membership = membershipFor(storeFor(store), "list group members");
   const rows = await readMembersRaw(membership, groupId, `list the members of group ${groupId}`);
   return windowed(rows, opts).map(toMember);
@@ -526,7 +569,18 @@ export async function listMemberSummaries(
   groupId: string,
   opts?: ListMemberOptions,
   store?: GroupStore,
+): Promise<GroupMemberSummary[]>;
+export async function listMemberSummaries(
+  groupId: string,
+  store: GroupStore,
+  opts?: ListMemberOptions,
+): Promise<GroupMemberSummary[]>;
+export async function listMemberSummaries(
+  groupId: string,
+  first?: ListMemberOptions | GroupStore,
+  second?: GroupStore | ListMemberOptions,
 ): Promise<GroupMemberSummary[]> {
+  const { opts, store } = listingArguments<ListMemberOptions>(first, second);
   const membership = membershipFor(storeFor(store), "list group member summaries");
   const rows = await readMembersRaw(membership, groupId, `list the members of group ${groupId}`);
   return windowed(rows, opts).map(toMemberSummary);

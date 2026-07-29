@@ -127,7 +127,7 @@ describe("public package entrypoint", () => {
     }
   });
 
-  it("supports an isolated local SQLite lifecycle through the public root", () => {
+  it("supports an isolated local SQLite lifecycle through the public root", async () => {
     emails.closeDatabase();
     const db = emails.getDatabase(":memory:");
     const savedClientEnv = new Map(
@@ -142,7 +142,7 @@ describe("public package entrypoint", () => {
 
       const provider = emails.runInTransaction(db, () =>
         emails.createProvider({ name: "library-local", type: "sandbox" }, db));
-      const group = emails.createGroup("library-group", undefined, db);
+      const group = await emails.createGroup("library-group", undefined, db);
       const domain = emails.createDomain(provider.id, "library.example.test", db);
       const address = emails.createAddress({ provider_id: provider.id, email: "sender@library.example.test" }, db);
       expect(emails.resolvePartialId(db, "providers", provider.id.slice(0, 12))).toBe(provider.id);
@@ -156,7 +156,9 @@ describe("public package entrypoint", () => {
       emails.resetDatabase();
       emails.getDatabase(":memory:");
       expect(emails.listProviders(db).map((item) => item.id)).toContain(provider.id);
-      expect(emails.listGroups(db).map((item) => item.id)).toContain(group.id);
+      // The DATABASE-FIRST argument order is the one the local arm published for the
+      // package's whole 1.x life; it must keep compiling and keep addressing `db`.
+      expect((await emails.listGroups(db)).map((item) => item.id)).toContain(group.id);
     } finally {
       for (const [key, value] of savedClientEnv) {
         if (value === undefined) delete process.env[key];
