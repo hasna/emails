@@ -44,6 +44,19 @@ import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
  */
 function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
   const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
+  // `/v1/addresses` is hand-coded on the server rather than registry-driven, so its
+  // ORDER BY cannot be read from SELF_HOSTED_RESOURCES: it is `created_at DESC,
+  // id ASC` in src/server/self-hosted/store.ts listAddresses, restated here (the
+  // one hand-coded exception to the read-from-registry rule above) so a client
+  // that windows addresses SERVER-side is tested against the order production
+  // actually returns. Without it the stub served addresses in INSERTION order and
+  // a paging-correct client looked broken. Hand-coded domains keeps insertion
+  // order — no client windows domains server-side today; give it the same
+  // treatment before one does.
+  order["addresses"] = [
+    { column: "created_at", desc: true },
+    { column: "id", desc: false },
+  ];
   for (const spec of SELF_HOSTED_RESOURCES) {
     order[spec.path] = resourceListOrderBy(spec)
       .split(",")
@@ -333,8 +346,9 @@ function rowsFor(resource) {
 // server to order first — could not be tested here at all: the stub would hand back
 // a differently-ordered window and a correct client would look broken. The order
 // terms come from the server's own registry (V1_STUB_LIST_ORDER), so the stub cannot
-// drift from it. Resources with a bespoke handler (messages) and non-registry paths
-// (domains/addresses) have no terms and keep insertion order.
+// drift from it — plus one restated hand-coded exception (addresses; see
+// declaredListOrder). Resources with a bespoke handler (messages) and the remaining
+// non-registry path (domains) have no terms and keep insertion order.
 function sortForList(resource, rows) {
   const terms = listOrder[resource];
   if (!Array.isArray(terms) || terms.length === 0) return rows.slice();
