@@ -2739,6 +2739,89 @@ const EVENTS_TYPE_ENUM_CHECK = defineMigration(
   `,
 );
 
+/**
+ * 0023 — make provider delivery-event ingestion durable and idempotent.
+ *
+ * The webhook receipt is unique per provider, but the event row it acknowledges
+ * also needs its own upstream-identity fence. Collapse rows left by historical
+ * event/receipt split commits, repair receipts that point at a removed duplicate,
+ * then enforce one event per tenant/provider event id. The per-tenant loop is
+ * required because events and webhook_receipts are both under FORCE RLS.
+ */
+const WEBHOOK_EVENT_IDEMPOTENCY = defineMigration(
+  "0023_webhook_event_idempotency",
+  `
+  DO $do$
+  DECLARE
+    tenant record;
+  BEGIN
+    FOR tenant IN SELECT id FROM tenants ORDER BY id LOOP
+      PERFORM set_config('app.current_tenant', tenant.id::text, true);
+
+      -- Prefer an event already named by a receipt; otherwise keep the newest
+      -- row. Point receipts at that survivor before removing duplicate events.
+      WITH ranked AS (
+        SELECT e.id,
+               e.provider_event_id,
+               first_value(e.id) OVER (
+                 PARTITION BY e.provider_event_id
+                 ORDER BY EXISTS (
+                   SELECT 1 FROM webhook_receipts wr
+                    WHERE wr.tenant_id = tenant.id
+                      AND wr.event_id = e.provider_event_id
+                      AND wr.resource_id = e.id
+                 ) DESC,
+                 e.updated_at DESC NULLS LAST,
+                 e.created_at DESC NULLS LAST,
+                 e.id DESC
+               ) AS survivor_id
+          FROM events e
+         WHERE e.tenant_id = tenant.id
+           AND e.provider_event_id IS NOT NULL
+      )
+      UPDATE webhook_receipts wr
+         SET resource_id = ranked.survivor_id,
+             updated_at = now()
+        FROM ranked
+       WHERE wr.tenant_id = tenant.id
+         AND wr.event_id = ranked.provider_event_id
+         AND wr.resource_id = ranked.id
+         AND ranked.id <> ranked.survivor_id;
+
+      WITH ranked AS (
+        SELECT e.id,
+               row_number() OVER (
+                 PARTITION BY e.provider_event_id
+                 ORDER BY EXISTS (
+                   SELECT 1 FROM webhook_receipts wr
+                    WHERE wr.tenant_id = tenant.id
+                      AND wr.event_id = e.provider_event_id
+                      AND wr.resource_id = e.id
+                 ) DESC,
+                 e.updated_at DESC NULLS LAST,
+                 e.created_at DESC NULLS LAST,
+                 e.id DESC
+               ) AS position
+          FROM events e
+         WHERE e.tenant_id = tenant.id
+           AND e.provider_event_id IS NOT NULL
+      )
+      DELETE FROM events e
+       USING ranked
+       WHERE e.tenant_id = tenant.id
+         AND e.id = ranked.id
+         AND ranked.position > 1;
+    END LOOP;
+    PERFORM set_config('app.current_tenant', '', true);
+  END
+  $do$;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS events_tenant_provider_event_uidx
+    ON events (tenant_id, provider_event_id)
+    WHERE provider_event_id IS NOT NULL;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2768,5 +2851,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     ATTACHMENT_REPAIR_LEDGER,
     IDP_PRINCIPAL_TENANTS,
     EVENTS_TYPE_ENUM_CHECK,
+    WEBHOOK_EVENT_IDEMPOTENCY,
   ];
 }

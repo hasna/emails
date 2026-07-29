@@ -527,6 +527,15 @@ export interface MessageInput {
   send_started_at?: string | null;
 }
 
+/** Delivery/engagement event persisted by a provider webhook. */
+export interface WebhookDeliveryEventInput {
+  email_id: string | null;
+  type: string;
+  recipient: string | null;
+  metadata: Record<string, unknown>;
+  occurred_at: string;
+}
+
 /** Columns selected for a message row (explicit so new columns are intentional). */
 const MESSAGE_COLUMNS =
   "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
@@ -1901,6 +1910,58 @@ export class TenantScopedStore {
       // lock namespace. Hash collisions only serialize unrelated operations.
       await tx.execute(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${this.tenantId}:${digest}`]);
       return action(tx, digest);
+    });
+  }
+
+  /**
+   * Commit a provider delivery event and its idempotency receipt together.
+   *
+   * The unique event key is also the recovery path for two concurrent webhook
+   * requests that both miss the receipt pre-check: the loser reuses the event
+   * row selected by (tenant_id, provider_event_id), then ensures the receipt in
+   * the same transaction. A receipt can therefore never acknowledge a missing
+   * event, and a committed event can never be left without its receipt.
+   */
+  async createWebhookDeliveryEvent(
+    provider: string,
+    eventId: string,
+    input: WebhookDeliveryEventInput,
+  ): Promise<{ id: string }> {
+    if (!this.atomicClient) {
+      throw new Error("webhook delivery-event persistence requires a transactional store");
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      const inserted = await tx.get<{ id: string }>(
+        `INSERT INTO events (
+           id, tenant_id, email_id, provider_event_id, type, recipient, metadata, occurred_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+         ON CONFLICT (tenant_id, provider_event_id) WHERE provider_event_id IS NOT NULL
+         DO NOTHING
+         RETURNING id`,
+        [
+          randomUUID(),
+          this.tenantId,
+          input.email_id,
+          eventId,
+          input.type,
+          input.recipient,
+          JSON.stringify(input.metadata),
+          input.occurred_at,
+        ],
+      );
+      const event = inserted ?? await tx.one<{ id: string }>(
+        `SELECT id FROM events WHERE tenant_id = $1 AND provider_event_id = $2`,
+        [this.tenantId, eventId],
+      );
+      await tx.execute(
+        `INSERT INTO webhook_receipts (
+           id, tenant_id, provider, event_id, resource_id
+         ) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, provider, event_id) DO NOTHING`,
+        [randomUUID(), this.tenantId, provider, eventId, event.id],
+      );
+      return event;
     });
   }
 

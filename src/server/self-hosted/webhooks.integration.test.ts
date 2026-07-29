@@ -495,6 +495,25 @@ describe.skipIf(!pgClient)("delivery outcomes land in the operator's Postgres", 
     expect(await count("events", tenantId)).toBe(1);
   });
 
+  it("enforces provider-event uniqueness within a tenant but not across tenants", async () => {
+    const tenantA = await makeRoutedTenant("wh-event-unique-a", "event-unique-a.test");
+    const tenantB = await makeRoutedTenant("wh-event-unique-b", "event-unique-b.test");
+    const providerEventId = `provider-event-${randomUUID()}`;
+    const eventBody = {
+      provider_event_id: providerEventId,
+      type: "delivered",
+      occurred_at: "2026-07-02T11:00:00.000Z",
+    };
+
+    await new EmailsSelfHostedStore(pgClient!).forTenant(tenantA).createResource(EVENTS_SPEC, eventBody);
+    await expect(
+      new EmailsSelfHostedStore(pgClient!).forTenant(tenantA).createResource(EVENTS_SPEC, eventBody),
+    ).rejects.toThrow();
+    await expect(
+      new EmailsSelfHostedStore(pgClient!).forTenant(tenantB).createResource(EVENTS_SPEC, eventBody),
+    ).resolves.toBeDefined();
+  });
+
   it("a Resend delivery event is persisted in the sending tenant's scope", async () => {
     const domain = "bounce-3.test";
     const tenantId = await makeRoutedTenant("wh-bounce-3", domain);
