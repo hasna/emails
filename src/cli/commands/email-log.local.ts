@@ -15,6 +15,7 @@ import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db
 import { getDefaultProviderId } from "../../lib/config.js";
 import { colorStatus } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
+import { registerEmailSendAlias } from "./email-send-alias.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.local.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.local.js";
@@ -236,15 +237,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       } catch (e) { handleError(e); }
     });
 
-  emailCmd
-    .command("send")
-    .description("Send an email (alias of top-level `emails send`)")
-    .option("--from <email>", "Sender")
-    .option("--to <email...>", "Recipient(s)")
-    .option("--subject <subject>", "Subject")
-    .option("--body <text>", "Body")
-    .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
+  // Forwards verbatim to the real `send` command — the previous stub here
+  // accepted a fully-specified send and exited 0 without sending (task
+  // 95f66fd3). The shared helper carries the full rationale.
+  registerEmailSendAlias(emailCmd, output);
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
   program.command("log").description("Show email send log (alias: emails email list)")

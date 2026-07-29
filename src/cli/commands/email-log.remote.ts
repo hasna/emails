@@ -8,6 +8,7 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
+import { registerEmailSendAlias } from "./email-send-alias.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
 import { formatThreadLabel, readableMessageText } from "../tui/format.js";
@@ -476,15 +477,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       } catch (e) { handleError(e); }
     });
 
-  emailCmd
-    .command("send")
-    .description("Send an email (alias of top-level `emails send`)")
-    .option("--from <email>", "Sender")
-    .option("--to <email...>", "Recipient(s)")
-    .option("--subject <subject>", "Subject")
-    .option("--body <text>", "Body")
-    .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
+  // Forwards verbatim to the real `send` command — the previous stub here
+  // accepted a fully-specified send and exited 0 without sending (task
+  // 95f66fd3). The shared helper carries the full rationale.
+  registerEmailSendAlias(emailCmd, output);
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
   program.command("log").description("Show email send log (alias: emails email list)")
