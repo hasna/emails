@@ -154,6 +154,10 @@ describe.each(STORE_VARIANTS)("groups CRUD (%s)", (_label, variant) => {
 
   it("answers null for an unknown id and an unknown name", async () => {
     const store = variant();
+    // A group EXISTS while the unknown name is asked for: an implementation that
+    // dropped the exact-name match would answer with whatever group sorts first
+    // instead of null, and an empty table cannot see that.
+    await createGroup("existing", undefined, store);
     expect(await getGroup("nonexistent", store)).toBeNull();
     expect(await getGroupByName("nonexistent", store)).toBeNull();
   });
@@ -196,7 +200,9 @@ describe.each(STORE_VARIANTS)("membership (%s)", (_label, variant) => {
     expect(bare.email).toBe("alice@example.com");
     expect(bare.name).toBeNull();
     expect(bare.vars).toEqual({});
-    expect(bare.added_at.length).toBeGreaterThan(0);
+    // An ISO instant, explicitly sent (divergence 5) — the local column's DEFAULT
+    // writes a space-separated format whose interleaving would not sort against it.
+    expect(bare.added_at).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
 
     const full = await addMember(group.id, "bob@example.com", "Bob", { company: "Acme" }, store);
     expect(full.name).toBe("Bob");
@@ -274,15 +280,22 @@ describe.each(STORE_VARIANTS)("membership (%s)", (_label, variant) => {
 
     const first = await createGroup("first", undefined, store);
     const second = await createGroup("second", undefined, store);
+    const unrequested = await createGroup("unrequested", undefined, store);
     await addMember(first.id, "a@example.com", undefined, undefined, store);
     await addMember(first.id, "b@example.com", undefined, undefined, store);
     await addMember(second.id, "c@example.com", undefined, undefined, store);
+    await addMember(unrequested.id, "d@example.com", undefined, undefined, store);
     expect(await getMemberCount(first.id, store)).toBe(2);
 
     const counts = await getMemberCounts([first.id, second.id, empty.id], store);
     expect(counts.get(first.id)).toBe(2);
     expect(counts.get(second.id)).toBe(1);
     expect(counts.get(empty.id)).toBe(0);
+    // EXACTLY the requested groups, even though a populated unrequested group is in
+    // the enumerated table — a map that grows keys the caller never named would leak
+    // other group ids through a count.
+    expect(counts.size).toBe(3);
+    expect(counts.has(unrequested.id)).toBe(false);
     expect((await getMemberCounts([], store)).size).toBe(0);
   });
 
