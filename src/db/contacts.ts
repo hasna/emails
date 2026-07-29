@@ -255,11 +255,15 @@ function byNewestUpdateRaw(a: ResourceRow, b: ResourceRow): number {
   );
 }
 
-/** The caller's window, applied AFTER the whole set is sorted. No limit means every row. */
+/**
+ * The caller's window, applied AFTER the whole set is sorted. No limit means every row —
+ * including an ignored `offset`, which is what the deleted SQLite arm's LIMIT-gated
+ * clause did and what the sequences collapse preserved for its own listings.
+ */
 function windowed<T>(rows: T[], opts: { limit?: number; offset?: number } | undefined): T[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  return limit === null ? rows.slice(offset) : rows.slice(offset, offset + limit);
+  return limit === null ? rows : rows.slice(offset, offset + limit);
 }
 
 // ─── Mapping store rows, AFTER filtering and windowing ──────────────────────

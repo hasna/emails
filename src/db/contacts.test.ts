@@ -393,6 +393,15 @@ describe.each(STORE_VARIANTS)("the suppressed set (%s)", (_label, variant) => {
     expect(await getSuppressedEmailSet([], variant())).toEqual(new Set());
     expect(await getSuppressedEmailSet(["   ", ""], variant())).toEqual(new Set());
   });
+
+  it("matches a MALFORMED suppressed entry case-insensitively, as the deleted SQL scan did", async () => {
+    // An import can land junk in the ledger. `canonicalSender` answers null for it, so
+    // the case-folded fallback is the only comparison there is — and the deleted local
+    // arm's lower()-on-both-sides scan matched these entries whatever the case.
+    seedContact({ id: "c-junk", email: "Not An Address", suppressed: true });
+    const suppressed = await getSuppressedEmailSet(["NOT AN ADDRESS"], variant());
+    expect(suppressed.has("Not An Address")).toBe(true);
+  });
 });
 
 describe("contact lookups past one clamped page", () => {
@@ -434,5 +443,108 @@ describe("the store argument", () => {
     await expect(
       listContacts(undefined, { not: "a store" } as unknown as ContactStore),
     ).rejects.toThrow(/EmailStore or a bun:sqlite Database/);
+  });
+});
+
+// ─── Stores the shipped pair does not exhibit, driven through the seam ──────
+//
+// The published surface accepts ANY `EmailStore`, so the two behaviours below are part
+// of the contract even though neither shipped store shows them: a list that ignores an
+// equality filter (an older server behind a proxy, a minimal third-party fixture), and
+// a pager whose window cannot be walked to the end honestly.
+
+/** The real SQLite store with a contacts list that IGNORES the caller's filters. */
+function filterIgnoringStore(): EmailStore {
+  const base = sqliteStore();
+  return {
+    ...base,
+    contacts: {
+      ...base.contacts,
+      list: (opts) => {
+        const { filters: _ignored, ...rest } = opts ?? {};
+        return base.contacts.list(rest);
+      },
+    },
+  };
+}
+
+describe("a store that ignores the pushed-down email filter", () => {
+  it("still answers the EXACT contact, because the probe re-checks every row", async () => {
+    const store = filterIgnoringStore();
+    seedContact({ id: "c-one", email: "one@example.com", updated_at: "2026-01-02T00:00:00.000Z" });
+    seedContact({ id: "c-two", email: "two@example.com", suppressed: true, updated_at: "2026-01-03T00:00:00.000Z" });
+    // Without the client-side re-check the probe would answer the NEWEST row of the
+    // unfiltered table — c-two, a different, suppressed contact — and a suppression
+    // write for one@ would flip two@.
+    expect((await getContact("one@example.com", store))?.id).toBe("c-one");
+    expect(await isContactSuppressed("one@example.com", store)).toBe(false);
+    await suppressContact("one@example.com", store);
+    expect(rowsFor("one@example.com")).toEqual([{ id: "c-one", suppressed: 1 }]);
+    expect(rowsFor("two@example.com")).toEqual([{ id: "c-two", suppressed: 1 }]);
+  });
+});
+
+describe("a store whose own enumeration order is not the listing's", () => {
+  /**
+   * The real SQLite store, contacts served OLDEST-first — a CONSISTENT total order, so
+   * the pager's anchoring still holds: the wrapper materializes the whole reversed set
+   * once per call and applies the caller's window itself.
+   */
+  function reorderingStore(): EmailStore {
+    const base = sqliteStore();
+    return {
+      ...base,
+      contacts: {
+        ...base.contacts,
+        list: async (opts) => {
+          const outcome = await base.contacts.list({ limit: 500 });
+          if (!outcome.ok) return outcome;
+          const reversed = [...outcome.value].reverse();
+          const offset = opts?.offset ?? 0;
+          const limit = opts?.limit ?? 100;
+          return { ...outcome, value: reversed.slice(offset, offset + limit) };
+        },
+      },
+    };
+  }
+
+  it("still lists newest-first with the id tiebreaker — the sort is this module's, not the store's", async () => {
+    // Both shipped stores happen to serve `updated_at DESC, id DESC` themselves, so
+    // against them alone a listing that TRUSTED the store's order would look identical.
+    // The seam promises no order at all; this store serves the exact reverse, and the
+    // windowed page must not move.
+    seedContact({ id: "c-old", email: "old@example.com", updated_at: "2026-01-01T00:00:00.000Z" });
+    seedContact({ id: "c-mid", email: "mid@example.com", updated_at: "2026-01-02T00:00:00.000Z" });
+    seedContact({ id: "c-new", email: "new@example.com", updated_at: "2026-01-03T00:00:00.000Z" });
+    seedContact({ id: "c-tie-a", email: "tie-a@example.com", updated_at: "2026-01-03T00:00:00.000Z" });
+    const store = reorderingStore();
+    expect((await listContacts(undefined, store)).map((c) => c.id)).toEqual([
+      "c-tie-a",
+      "c-new",
+      "c-mid",
+      "c-old",
+    ]);
+    expect((await listContacts({ limit: 2, offset: 1 }, store)).map((c) => c.id)).toEqual([
+      "c-new",
+      "c-mid",
+    ]);
+  });
+});
+
+describe("a store whose pages cannot be read to the end", () => {
+  it("is refused with the lower-bound explanation, never presented as a short answer", async () => {
+    seedContact({ id: "c-x", email: "x@example.com", updated_at: "2026-01-02T00:00:00.000Z" });
+    seedContact({ id: "c-y", email: "y@example.com", updated_at: "2026-01-01T00:00:00.000Z" });
+    const base = sqliteStore();
+    // Every page is the same two rows whatever the offset: the window never moves, so
+    // the enumeration proves duplicates/shift and must refuse rather than answer.
+    const dishonest: EmailStore = {
+      ...base,
+      contacts: {
+        ...base.contacts,
+        list: () => base.contacts.list({ limit: 2, offset: 0 }),
+      },
+    };
+    await expect(listContacts(undefined, dishonest)).rejects.toThrow(/LOWER BOUND/);
   });
 });
