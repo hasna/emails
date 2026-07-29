@@ -84,11 +84,11 @@ export async function recordLocalDeliveryEvent(
 ): Promise<{ id: string } | null> {
   const { getDatabase } = await import("../../db/database.js");
   const { getLatestActiveProviderId } = await import("../../db/providers.local.js");
-  const { createEvent } = await import("../../db/events.local.js");
+  const { createEvent } = await import("../../db/events.js");
   const db = getDatabase();
   const providerId = getLatestActiveProviderId(providerType, db) ?? getLatestActiveProviderId(undefined, db);
   if (!providerId) return null;
-  const stored = createEvent({
+  const stored = await createEvent({
     provider_id: providerId,
     provider_event_id: event.provider_event_id,
     type: event.type,

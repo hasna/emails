@@ -40,18 +40,20 @@
 // Three reasons, the first two citable inside this repository rather than argued from first
 // principles.
 //
-// 1. THE SEAM CANNOT EXPRESS THIS WRITE, and the missing piece is the FENCE rather than the
-//    row. `EmailStore.events` is `EventsRepository`, an alias of the generic
+// 1. THE SEAM ALONE CANNOT EXPRESS THIS WRITE, and the missing piece is the FENCE rather
+//    than the row. `EmailStore.events` is `EventsRepository`, an alias of the generic
 //    `ResourceRepository<ResourceRow>` (`src/store/repositories.ts:358`), whose entire write
 //    surface is `create(input)`, `update(id, patch)` and `remove(id)`. The receiver's write is an UPSERT
 //    whose fence is the partial unique index `idx_events_provider_event` on
 //    `(provider_id, provider_event_id) WHERE provider_event_id IS NOT NULL`
-//    (`src/db/database.ts:1264`, re-ensured at `:2407`), consulted by `INSERT OR IGNORE` and
-//    reported back as `{ created }` (`src/db/events.local.ts`). Providers RETRY, so that
-//    fence is the only thing between a retried callback and a duplicated delivery event; a
-//    bare `create` through the seam would fabricate one row per retry, and a client-side
-//    read-then-create would race its own retries. The widening this needs is DESCRIBED
-//    BELOW AND NOT MADE.
+//    (`src/db/database.ts:1264`, re-ensured at `:2407`). Providers RETRY, so that fence is
+//    the only thing between a retried callback and a duplicated delivery event; a bare
+//    `create` through the seam would fabricate one row per retry. The collapsed events
+//    family (src/db/events.ts) expresses the upsert as find-then-create WITH the fence as
+//    the arbiter: a create that loses the race to a retry is refused `conflict` by that
+//    same index and answered with the winner's row, `{ created: false }` — so the fence,
+//    not the read, is still what deduplicates. A first-class conditional write on the seam
+//    is the widening DESCRIBED THERE AND NOT MADE.
 //
 // 2. THE DURABLE RECEIVER ALREADY EXISTS ON THE OTHER SIDE, and says so in writing.
 //    `src/server/webhooks/receivers.ts:1-19` is "ONE implementation, mounted twice" — the
@@ -188,16 +190,17 @@
 // `serve.remote.ts` has no webhook option, and `email-log.remote.ts:624` refuses
 // `emails webhook listen` through its own server-side guard.
 //
-// ─── WHY THIS WRITES THROUGH `db/events.local.ts` AND NOT THE `db/events` FACADE ───────
+// ─── HOW THIS WRITE NAMES ITS STORE, NOW THAT `src/db/events` HAS COLLAPSED ────────────
 //
-// Deliberate, and it is the gate above that makes it honest: the gate has already
-// established that this installation's mail is in local SQLite, so the local arm is the
-// implementation that matches the established fact. Reaching for the family facade instead
-// would dispatch on the very axis being deleted, and would — in the one configuration where
-// the deployment word and the storage settings disagree — send the event over HTTP to a
-// service that is already receiving the same callback directly. That is a behaviour change
-// dressed as a cleanup. When `src/db/events` collapses, this import follows it and needs no
-// edit here.
+// The paragraph that used to sit here explained why this module wrote through the events
+// family's SQLite arm instead of its mode-routed facade, and ended "when `src/db/events`
+// collapses, this import follows it and needs no edit here." It collapsed, and the import
+// followed. What keeps the write honest is unchanged: the gate above has already
+// established that this installation's mail is in local SQLite, and the upsert is handed
+// `getDatabase()` EXPLICITLY — the collapsed family binds a caller-supplied handle to a
+// SQLite store scoped to exactly that database — so nothing here consults process-wide
+// configuration, and no configuration disagreement can send the event anywhere but the
+// database the gate named.
 //
 // ─── INHERITED DEFECT, NAMED AND NOT FIXED ────────────────────────────────────────────
 //
@@ -448,9 +451,9 @@ export function createWebhookServer(
       try {
         const [{ getDatabase }, { upsertEventWithResult }] = await Promise.all([
           import("../db/database.js"),
-          import("../db/events.local.js"),
+          import("../db/events.js"),
         ]);
-        const result = upsertEventWithResult(
+        const result = await upsertEventWithResult(
           {
             provider_id: pId,
             provider_event_id: event.provider_event_id,

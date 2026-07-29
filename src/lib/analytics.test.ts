@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { createSentEmailLedger } from "./sent-ledger.local.js";
-import { createEvent } from "../db/events.local.js";
+import { createEvent } from "../db/events.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createHttpEmailStore } from "../store-http/index.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -122,19 +122,19 @@ async function seed(): Promise<Fixture> {
   );
   stamp(stale.id, `${OUTSIDE}T01:00:00.000Z`);
 
-  createEvent(
+  await createEvent(
     { email_id: first.id, provider_id: provider.id, type: "delivered", occurred_at: `${DAY_ONE}T09:16:00.000Z` },
     db,
   );
-  createEvent(
+  await createEvent(
     { email_id: second.id, provider_id: provider.id, type: "bounced", occurred_at: `${DAY_ONE}T09:41:00.000Z` },
     db,
   );
   // Column-default timestamp shape, on purpose. See the note above.
-  createEvent({ email_id: third.id, provider_id: provider.id, type: "delivered", occurred_at: `${DAY_TWO} 17:06:00` }, db);
+  await createEvent({ email_id: third.id, provider_id: provider.id, type: "delivered", occurred_at: `${DAY_TWO} 17:06:00` }, db);
   // An event well outside the window; excluded by the client-side window because the
   // events resource has no range filter to push down.
-  createEvent(
+  await createEvent(
     { email_id: stale.id, provider_id: provider.id, type: "delivered", occurred_at: `${OUTSIDE}T01:01:00.000Z` },
     db,
   );

@@ -1325,15 +1325,51 @@ const root = join(import.meta.dir, "..");
  * floors cleared with room; each branch deleted its family's two arm modules and
  * added nothing. Re-measured AFTER this paragraph was written, because this file sits
  * inside the corpus it scans.
+ *
+ * RE-MEASURED AND RE-PINNED AGAIN on the `src/db/events` collapse — the highest
+ * fan-in `src/db/*` family taken so far, and the one the fail-closed routing probe
+ * used to sit on (that probe moved to the domains family, which still routes; the
+ * probe file's own counts do not change, because the moved case swaps one facade
+ * import for another).
+ *
+ * WHAT THIS COLLAPSE ITSELF MOVES, measured on the commit it is based on (8309875,
+ * where all eleven live counts equalled the ceilings above): `twoArmFamilies` and
+ * `remoteArmModules` by one each (the family's two arms are deleted);
+ * `routedFacadeDefinitions` by one and `routedCallExpressions` by SEVEN (its facade
+ * held a dispatch helper and dispatched all seven of its exports through it);
+ * `selfHostedResourceReferences` by three (the deleted second arm reached the
+ * resource store three times; its import line carries no call and never counted);
+ * and `isSelfHostedModeReferences` by two (the deleted facade imported the
+ * client-side predicate and called it once). `selfHostedResourceBranches` does NOT
+ * move — the deleted SQLite arm never interrogated its own mode — and neither do the
+ * three resolver/parser counters or the env counter: no deleted line named the
+ * deployment setting, and the family's new test fixture configures a database path,
+ * never a mode. (The one consumer that kept a synchronous write, the provider-event
+ * sync pipeline, holds a raw SQL statement beside its own `Database` handle — no
+ * counter sees SQL.)
+ *
+ * Base measurement, recorded because it is the half a rebase invalidates: on 8309875
+ * all eleven live counts equalled the declared ceilings, so there was no inherited
+ * slack to reclaim. Six ceilings move and all six are paid for here: 16 -> 15,
+ * 16 -> 15, 8 -> 7, 139 -> 132, 64 -> 61, 38 -> 36. The other five were already
+ * exact and stay put. Corpus of this change: 645 tracked, 644 scanned, ~10.31M
+ * characters — three tracked files fewer than the arms-and-test deletion accounts
+ * for against its own base (the two deleted arms plus the second arm's test file,
+ * superseded by the collapsed family's two-store suite), plus the one file the
+ * rebase brought in: all eleven were ZEROED and re-measured on the merged tree
+ * after rebasing onto the list-ordering-contract merge, and every count came back
+ * IDENTICAL — that change names no counted identifier — so only this corpus note
+ * moved. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 16,
-  remoteArmModules: 16,
-  routedFacadeDefinitions: 8,
-  routedCallExpressions: 139,
+  twoArmFamilies: 15,
+  remoteArmModules: 15,
+  routedFacadeDefinitions: 7,
+  routedCallExpressions: 132,
   selfHostedResourceBranches: 15,
-  selfHostedResourceReferences: 64,
-  isSelfHostedModeReferences: 38,
+  selfHostedResourceReferences: 61,
+  isSelfHostedModeReferences: 36,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

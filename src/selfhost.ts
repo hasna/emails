@@ -831,7 +831,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped events */
-    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
+    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "provider_event_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/events`, {
         body: undefined,
         query,

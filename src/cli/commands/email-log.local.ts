@@ -513,7 +513,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
           result = fmt === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
         } else {
           const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
-          result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
+          result = fmt === "csv" ? await exportEventsCsv(filters) : await exportEventsJson(filters);
         }
 
         if (opts.output) {

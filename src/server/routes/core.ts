@@ -6,7 +6,7 @@ import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
 import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
 import { getDatabase } from '../../db/database.js';
 import { createSqliteEmailStore } from '../../store-sqlite/index.js';
-import { getEvent, listEventSummaries } from '../../db/events.local.js';
+import { getEvent, listEventSummaries } from '../../db/events.js';
 import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
@@ -349,7 +349,7 @@ if (path === "/api/events" && method === "GET") {
       limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
       offset: queryInteger(url, "offset", 0, { min: 0 }),
     };
-    return json(listEventSummaries(filter));
+    return json(await listEventSummaries(filter));
   } catch (e) { return internalError(e); }
 }
 
@@ -359,7 +359,7 @@ if (eventMatch && method === "GET") {
   const id = resolveId("events", eventMatch[1]!);
   if (!id) return notFound("Event not found");
   try {
-    const event = getEvent(id);
+    const event = await getEvent(id);
     if (!event) return notFound("Event not found");
     return json(event);
   } catch (e) { return internalError(e); }

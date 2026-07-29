@@ -6,7 +6,7 @@ import { createSqliteEmailStore } from '../../store-sqlite/index.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
 import { describeWarmingProgress } from '../../lib/warming.js';
 import { updateEmailStatus } from '../../db/emails.js';
-import { upsertEvent } from '../../db/events.local.js';
+import { upsertEvent } from '../../db/events.js';
 import { getDatabase } from '../../db/database.js';
 import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, queryInteger, queryPage } from './helpers.js';
@@ -561,7 +561,7 @@ const trackOpenMatch = path.match(/^\/track\/open\/([^/]+)$/);
 if (trackOpenMatch && method === "GET") {
   const emailId = trackOpenMatch[1]!;
   try {
-    upsertEvent({
+    await upsertEvent({
       email_id: emailId,
       provider_id: "tracking",
       provider_event_id: `open-${emailId}-${Date.now()}`,
@@ -592,7 +592,7 @@ if (trackClickMatch && method === "GET") {
     if (decoded.startsWith("https://") || decoded.startsWith("http://")) {
       originalUrl = decoded;
     }
-    upsertEvent({
+    await upsertEvent({
       email_id: emailId,
       provider_id: "tracking",
       provider_event_id: `click-${emailId}-${encoded}-${Date.now()}`,
