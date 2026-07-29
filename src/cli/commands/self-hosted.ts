@@ -3,6 +3,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { closeSelfHostedPool, getSelfHostedPool, requireSigningSecret } from "../../server/self-hosted/env.js";
 import { issueSelfHostedApiKey, listSelfHostedApiKeys, revokeSelfHostedApiKey, rotateToEmailsApiKey } from "../../server/self-hosted/keys.js";
+import { registerIdpPrincipalCommands } from "./idp-principal.js";
 import { handleError } from "../utils.js";
 
 async function keyStore(): Promise<{ store: ApiKeyStore; signingSecret: string }> {
@@ -14,6 +15,7 @@ async function keyStore(): Promise<{ store: ApiKeyStore; signingSecret: string }
 
 export function registerSelfHostedCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const selfHosted = program.command("self-hosted").description("Operate your self-hosted Emails deployment");
+  registerIdpPrincipalCommands(selfHosted, output);
   const key = selfHosted.command("key").description("Create, list, and revoke self-hosted API keys");
 
   key.command("create")
