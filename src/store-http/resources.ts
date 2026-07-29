@@ -135,6 +135,23 @@ function unknownKeys(input: ResourceInput, allowed: Set<string>): string[] {
   return Object.keys(input).filter((key) => !allowed.has(key));
 }
 
+/**
+ * A BLANK ID IS ABSENCE, DECIDED AT THE SEAM — never a request.
+ *
+ * `encodeURIComponent("")` leaves the path segment empty, the service strips the
+ * trailing slash, and `GET /v1/<resource>/` dispatches the COLLECTION route: a `get`
+ * would present the list envelope as a record, and an `update` or `remove` would land
+ * on a route that is not a by-id write at all. The SQLite arm answers absence
+ * (`WHERE id = ''` matches nothing), so this arm answers the same value RULE 2 of
+ * outcome.ts assigns the operation's declared return type — null for the row shapes,
+ * false for the boolean — before any request is built. A whitespace-only id would at
+ * least stay on the item route (`%20` is a real segment), but no row minted by either
+ * store can carry it, so it is the same absence without the round trip.
+ */
+function isBlankId(id: string): boolean {
+  return id.trim() === "";
+}
+
 function createGateway(
   transport: Transport,
   path: string,
@@ -168,6 +185,7 @@ function createGateway(
     },
 
     async get(id: string): Promise<Outcome<ResourceRow | null>> {
+      if (isBlankId(id)) return ok(null);
       const answer = await transport.request("GET", `/${path}/${encodeURIComponent(id)}`);
       if (answer.status === 404) return ok(null);
       if (answer.status !== 200) return refusalForStatus(answer.status, answer.body, what("get"));
@@ -190,6 +208,9 @@ function createGateway(
     },
 
     async update(id: string, patch: ResourceInput): Promise<Outcome<ResourceRow | null>> {
+      // Before the contract read: absence outranks validation, exactly as the SQLite
+      // arm reads the row before validating the patch.
+      if (isBlankId(id)) return ok(null);
       const contract = await contractFor(path);
       const unknown = unknownKeys(patch, contract.columns);
       if (unknown.length > 0) {
@@ -205,6 +226,7 @@ function createGateway(
     },
 
     async remove(id: string): Promise<Outcome<boolean>> {
+      if (isBlankId(id)) return ok(false);
       const answer = await transport.request("DELETE", `/${path}/${encodeURIComponent(id)}`);
       if (answer.status === 404) return ok(false);
       if (answer.status !== 200) return refusalForStatus(answer.status, answer.body, what("remove"));

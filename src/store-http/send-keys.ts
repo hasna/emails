@@ -74,6 +74,19 @@ export function createSendKeysRepository(transport: Transport): SendKeysReposito
 
     /** NO dedicated route; see the header note on the client-supplied instant. */
     async revokeSendKey(id: string): Promise<Outcome<SendKeyRecord | null>> {
+      // READ BEFORE WRITE, so a repeat revoke is a no-op rather than a rewrite. The
+      // generic PATCH persists whatever `revoked_at` it is sent, so revoking an
+      // already-revoked key would stamp a SECOND, later instant over the first — and
+      // the revocation instant is an audit fact with exactly one true value. The
+      // SQLite arm writes it `WHERE revoked_at IS NULL`; skipping the PATCH is this
+      // arm's equivalent. (Two revokes racing between the read and the write can
+      // still both PATCH — the atomic conditional write this route lacks is part of
+      // the missing-route note in index.ts, beside the clock-skew weakness.)
+      const read = await transport.request("GET", `/send-keys/${encodeURIComponent(id)}`);
+      if (read.status === 404) return ok(null);
+      if (read.status !== 200) return refusalForStatus(read.status, read.body, "revokeSendKey");
+      const current = sendKeyRecord(read.body, "revokeSendKey");
+      if (current.revoked_at !== null) return ok(current);
       const answer = await transport.request("PATCH", `/send-keys/${encodeURIComponent(id)}`, {
         body: { revoked_at: new Date().toISOString() },
       });

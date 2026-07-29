@@ -603,13 +603,10 @@ export async function getGlobalCatchAll(store?: EmailStore): Promise<Alias | nul
  * such alias" is never confused with "I could not look".
  */
 export async function getAlias(id: string, store?: EmailStore): Promise<Alias | null> {
-  // A BLANK ID IS ABSENCE, ANSWERED WITHOUT TOUCHING THE STORE, and that is a divergence this
-  // module would otherwise have introduced. The SQLite arm answered `null` (`WHERE id = ''`
-  // matches nothing); an API store instead requests `GET /v1/aliases/`, the service strips the
-  // trailing slash and dispatches the LIST route, and the envelope that comes back is not a row —
-  // so the mapper faulted where the stronger arm answered. Both `emails alias remove ""` and MCP
-  // `remove_alias {alias_id: ""}` reach this. Adversarial review caught it.
-  if (!id) return null;
+  // A blank id is absence, and that answer now belongs to the SEAM: both stores'
+  // `get` answer null for a blank or whitespace id (the HTTP arm decides it before
+  // building a request, so `GET /v1/aliases/` — the LIST route in disguise — is never
+  // sent). The hand-written guard this module carried is retired for that reason.
   const read = await storeFor(store).aliases.get(id);
   if (!read.ok) throw storeRefusal("read an alias", read);
   if (read.value === null) return null;

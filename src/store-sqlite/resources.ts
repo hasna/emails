@@ -105,6 +105,36 @@ function redactedFor(table: string): readonly string[] {
   return REDACTED_COLUMNS[table] ?? [];
 }
 
+/**
+ * Columns this repository STAMPS ITSELF and therefore refuses in a caller's write.
+ *
+ * The API arm refuses these already: `id`, `created_at` and `updated_at` are not in
+ * any resource's published writable-column contract, so a write naming one 422s
+ * there — while this arm used to honor a smuggled id and timestamps, silently drop an
+ * id inside an update, and stamp over the rest. Accepting on one arm what the other
+ * refuses is the divergence, and refusal is the honest half to keep: these values are
+ * this store's to mint (`uuid()`, `now()`), and a caller-supplied one is either a
+ * no-op lie or an identity/audit rewrite.
+ */
+const SERVER_OWNED_COLUMNS = Object.freeze(["id", "created_at", "updated_at"]);
+
+/**
+ * The published contract's own exceptions: stamped-when-absent columns it declares
+ * CALLER-WRITABLE, which this arm must keep accepting for the same parity reason it
+ * refuses the rest. Two exist (src/server/self-hosted/resources.ts): a sandbox
+ * capture and a sequence step both carry a caller-supplied `created_at`, because it
+ * is an ordering fact of the thing captured rather than of the row's insertion.
+ */
+const CALLER_WRITABLE_STAMPS: Record<string, readonly string[]> = Object.freeze({
+  sandbox_emails: Object.freeze(["created_at"]),
+  sequence_steps: Object.freeze(["created_at"]),
+});
+
+function serverOwnedFor(table: string): readonly string[] {
+  const writable = CALLER_WRITABLE_STAMPS[table] ?? [];
+  return SERVER_OWNED_COLUMNS.filter((column) => !writable.includes(column));
+}
+
 interface ColumnInfo {
   name: string;
   primaryKeyPosition: number;
@@ -189,6 +219,16 @@ function writableColumns(
         `credential column(s) may not be written through the generic resource path: ${secret.sort().join(", ")}`,
     };
   }
+  // Refused, not dropped and not honored: the API arm 422s these (they are outside
+  // every resource's writable-column contract), and this arm minting-or-stamping them
+  // itself is what makes a caller's value a lie in either direction.
+  const owned = keys.filter((key) => serverOwnedFor(table).includes(key));
+  if (owned.length > 0) {
+    return {
+      refusal:
+        `server-owned column(s) may not be written through the generic resource path: ${owned.sort().join(", ")}`,
+    };
+  }
   return { columns: keys.filter((key) => input[key] !== undefined) };
 }
 
@@ -226,6 +266,17 @@ export function createResourceRepository(db: Database, table: string): ResourceR
         const unknown = Object.keys(filters).filter((key) => !shape.columns.includes(key));
         if (unknown.length > 0) {
           return invalidInput(`unknown filter column(s) for this resource: ${unknown.sort().join(", ")}`);
+        }
+        // An equality filter on a redacted column is a VALUE-CONFIRMATION ORACLE: the
+        // column never leaves this store, but `list({filters: {api_key: guess}})`
+        // answering rows-or-none confirms the guess one probe at a time. The API arm
+        // refuses these filters (they are not in the published filter contract), and
+        // redaction that holds for reads but not for predicates is not redaction.
+        const secret = Object.keys(filters).filter((key) => redactedFor(table).includes(key));
+        if (secret.length > 0) {
+          return invalidInput(
+            `credential column(s) may not be filtered through the generic resource path: ${secret.sort().join(", ")}`,
+          );
         }
         const keys = Object.keys(filters);
         const where = keys.length > 0 ? `WHERE ${keys.map((key) => `${key} = ?`).join(" AND ")}` : "";
