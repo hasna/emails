@@ -127,6 +127,6 @@ describe("scheduled --status validates against the enum", () => {
     const env = localEnv();
     const run = runCli(["--json", "scheduled", "list", "--status", "pending"], env);
     expect(run.exitCode, `valid status refused: ${run.stderr}`).toBe(0);
-    expect(JSON.parse(run.stdout)).toEqual([]);
+    expect(JSON.parse(run.stdout)).toEqual({ items: [], limit: 50, offset: 0, truncated: false });
   }, 120_000);
 });

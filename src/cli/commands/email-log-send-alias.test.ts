@@ -80,16 +80,16 @@ function seedProvider(env: NodeJS.ProcessEnv): void {
   expect(created.exitCode, `provider add failed: ${created.stderr}`).toBe(0);
   const listed = runCli(["--json", "provider", "list"], env);
   expect(listed.exitCode, `provider list failed: ${listed.stderr}`).toBe(0);
-  const providers = JSON.parse(listed.stdout) as Array<{ name: string }>;
-  expect(providers.some((row) => row.name === "alias-sandbox"), `seed provider missing from ${listed.stdout}`).toBe(true);
+  const providers = JSON.parse(listed.stdout) as { items: Array<{ name: string }> };
+  expect(providers.items.some((row) => row.name === "alias-sandbox"), `seed provider missing from ${listed.stdout}`).toBe(true);
 }
 
 /** Subjects the ledger currently holds, read back through the CLI itself. */
 function ledgerSubjects(env: NodeJS.ProcessEnv): string[] {
   const logged = runCli(["--json", "email", "list"], env);
   expect(logged.exitCode, `email list failed: ${logged.stderr}`).toBe(0);
-  const rows = JSON.parse(logged.stdout) as Array<{ subject?: string }>;
-  return rows.map((row) => row.subject ?? "");
+  const rows = JSON.parse(logged.stdout) as { items: Array<{ subject?: string }> };
+  return rows.items.map((row) => row.subject ?? "");
 }
 
 afterAll(() => {

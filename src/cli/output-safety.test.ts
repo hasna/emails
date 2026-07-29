@@ -139,8 +139,9 @@ describe("CLI JSON output safety", () => {
     const regularJson = readFileSync(regularPath, "utf8");
     const slowJson = readFileSync(slowPath, "utf8");
     expect(slowJson).toBe(regularJson);
-    const parsed = JSON.parse(slowJson) as Array<Record<string, unknown>>;
-    expect(parsed).toHaveLength(1000);
+    const parsed = JSON.parse(slowJson) as { items: Array<Record<string, unknown>>; limit: number; truncated: boolean };
+    expect(parsed.items).toHaveLength(1000);
+    expect(parsed).toMatchObject({ limit: 1000, truncated: true });
   }, 30_000);
 
   it("exits nonzero without a Bun stack when the JSON pipe closes early", async () => {

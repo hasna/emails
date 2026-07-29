@@ -80,8 +80,8 @@ describe("template/contact/sequence parity", () => {
   it("covers the workflow through the CLI and validates via the library API over /v1", async () => {
     await expectCliOk(runCli(["--json", "provider", "add", "--name", "dev", "--type", "sandbox"]));
     const providersOut = await expectCliOk(runCli(["--json", "provider", "list"]));
-    const providers = JSON.parse(providersOut.out) as Array<{ id: string }>;
-    const providerId = providers[0]!.id;
+    const providers = JSON.parse(providersOut.out) as { items: Array<{ id: string }> };
+    const providerId = providers.items[0]!.id;
 
     await expectCliOk(runCli(["--json", "template", "add", "welcome", "--subject", "Welcome {{name}}", "--text", "Hi {{name}}"]));
     await expectCliOk(runCli(["--json", "contact", "suppress", "user@example.com"]));

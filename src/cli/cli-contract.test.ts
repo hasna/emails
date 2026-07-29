@@ -74,6 +74,28 @@ afterEach(() => {
 });
 
 describe("CLI JSON contracts (self-hosted /v1)", () => {
+  it("marks a server-clamped list page and echoes the effective limit", async () => {
+    await stub.seed({
+      providers: Array.from({ length: 501 }, (_, index) => ({
+        id: `provider-page-${String(index).padStart(3, "0")}`,
+        name: `provider-${index}`,
+        type: "sandbox",
+        active: true,
+        created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      })),
+    });
+
+    const page = expectCliJsonOk<{
+      items: Array<{ id: string }>;
+      limit: number;
+      offset: number;
+      truncated: boolean;
+    }>(runCli(["--json", "provider", "list", "--limit", "5000"], cliEnv()));
+
+    expect(page.items).toHaveLength(500);
+    expect(page).toMatchObject({ limit: 500, offset: 0, truncated: true });
+  }, 20_000);
+
   it("prints valid credential-free JSON for provider CRUD routed to /v1", () => {
     const env = cliEnv();
 
@@ -111,24 +133,30 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
     expect(stderrText(list)).toBe("");
     expect(stdout).not.toContain("AKIA_CLI_SHOULD_NOT_LEAK");
     expect(stdout).not.toContain("CLI_SECRET_SHOULD_NOT_LEAK");
-    const parsed = JSON.parse(stdout) as Array<Record<string, unknown>>;
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]).toMatchObject({ name: "secret-ses" });
-    expect(parsed[0]).not.toHaveProperty("access_key");
-    expect(parsed[0]).not.toHaveProperty("secret_key");
-    expect(parsed[0]).not.toHaveProperty("oauth_refresh_token");
-    const providerId = String(parsed[0]!.id);
+    const parsed = JSON.parse(stdout) as {
+      items: Array<Record<string, unknown>>;
+      limit: number;
+      offset: number;
+      truncated: boolean;
+    };
+    expect(parsed).toMatchObject({ limit: 50, offset: 0, truncated: false });
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]).toMatchObject({ name: "secret-ses" });
+    expect(parsed.items[0]).not.toHaveProperty("access_key");
+    expect(parsed.items[0]).not.toHaveProperty("secret_key");
+    expect(parsed.items[0]).not.toHaveProperty("oauth_refresh_token");
+    const providerId = String(parsed.items[0]!.id);
 
     const update = runCli(["provider", "update", providerId, "--name", "renamed-ses", "--skip-validation"], env);
     expect(update.exitCode, stderrText(update)).toBe(0);
-    const updated = JSON.parse(stdoutText(runCli(["--json", "provider", "list"], env))) as Array<Record<string, unknown>>;
-    expect(updated[0]).toMatchObject({ id: providerId, name: "renamed-ses" });
+    const updated = JSON.parse(stdoutText(runCli(["--json", "provider", "list"], env))) as { items: Array<Record<string, unknown>> };
+    expect(updated.items[0]).toMatchObject({ id: providerId, name: "renamed-ses" });
 
     const remove = runCli(["provider", "remove", providerId, "--yes"], env);
     expect(remove.exitCode, stderrText(remove)).toBe(0);
     const empty = runCli(["--json", "provider", "list"], env);
     expect(empty.exitCode).toBe(0);
-    expect(JSON.parse(stdoutText(empty))).toEqual([]);
+    expect(JSON.parse(stdoutText(empty))).toEqual({ items: [], limit: 50, offset: 0, truncated: false });
   }, 20_000);
 
   it("prints machine-readable MCP Claude install dry-run output", () => {
@@ -226,10 +254,11 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
     });
     const env = cliEnv();
 
-    const list = expectCliJsonOk<Array<{ id: string; subject: string }>>(
+    const list = expectCliJsonOk<{ items: Array<{ id: string; subject: string }>; limit: number; offset: number; truncated: boolean }>(
       runCli(["--json", "inbox", "list", "--search", "contract", "--limit", "1"], env),
     );
-    expect(list).toEqual([expect.objectContaining({ id: "cli-json-inbox", subject: "CLI JSON contract" })]);
+    expect(list).toMatchObject({ limit: 1, offset: 0, truncated: true });
+    expect(list.items).toEqual([expect.objectContaining({ id: "cli-json-inbox", subject: "CLI JSON contract" })]);
 
     const read = expectCliJsonOk<{ id: string; subject: string; text_body?: string }>(
       runCli(["--json", "inbox", "read", "cli-json-inbox", "--keep-unread"], env),
@@ -249,10 +278,11 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
         { id: "dom-2", domain: "two.example.com", provider: "self_hosted", verified: false },
       ],
     });
-    const rows = expectCliJsonOk<Array<{ domain: string }>>(
+    const page = expectCliJsonOk<{ items: Array<{ domain: string }>; limit: number; offset: number; truncated: boolean }>(
       runCli(["--json", "domains", "list", "--limit", "10"], cliEnv()),
     );
-    expect(rows.map((row) => row.domain).sort()).toEqual(["one.example.com", "two.example.com"]);
+    expect(page).toMatchObject({ limit: 10, offset: 0, truncated: false });
+    expect(page.items.map((row) => row.domain).sort()).toEqual(["one.example.com", "two.example.com"]);
   }, 20_000);
 
   it("redacts secrets stored under sensitive keys (last line of defense)", () => {

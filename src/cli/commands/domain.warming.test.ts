@@ -75,6 +75,17 @@ function runJson<T>(args: string[], env: NodeJS.ProcessEnv): T {
   return JSON.parse(result.stdout) as T;
 }
 
+interface CliListPage<T> {
+  items: T[];
+  limit: number;
+  offset: number;
+  truncated: boolean;
+}
+
+function runListJson<T>(args: string[], env: NodeJS.ProcessEnv): CliListPage<T> {
+  return runJson<CliListPage<T>>(args, env);
+}
+
 interface CliError { error: { message: string; code: string; fix_commands: string[] } }
 
 function runJsonError(args: string[], env: NodeJS.ProcessEnv): CliError {
@@ -165,8 +176,8 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     expect(status.today_limit).toBe(created.today_limit);
 
     // 3. warm-list — the schedule shows up, in JSON and in the human table.
-    const listed = runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env);
-    expect(listed.map((row) => row.domain)).toEqual(["ramp.example.com"]);
+    const listed = runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env);
+    expect(listed.items.map((row) => row.domain)).toEqual(["ramp.example.com"]);
 
     const table = runCli(["domain", "warm-list"], env);
     expect(table.exitCode, table.stderr).toBe(0);
@@ -177,17 +188,18 @@ describe("emails domain warm* (live, temp SQLite)", () => {
 
     // A second domain proves listing and --status filtering are not single-row luck.
     runJson(["domain", "warm", "second.example.com", "--target", "300"], env);
-    const both = runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env);
+    const both = runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env);
     // Newest-first, like every other list command.
-    expect(both.map((row) => row.domain)).toEqual(["second.example.com", "ramp.example.com"]);
+    expect(both.items.map((row) => row.domain)).toEqual(["second.example.com", "ramp.example.com"]);
 
     // --limit/--offset must survive the collapsed family's dual argument orders
     // (the published surface admits both (status, opts) and (status, store, opts)),
     // so a dropped options argument here would silently return the whole table.
-    const firstPage = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--limit", "1"], env);
-    expect(firstPage.map((row) => row.domain)).toEqual(["second.example.com"]);
-    const secondPage = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--limit", "1", "--offset", "1"], env);
-    expect(secondPage.map((row) => row.domain)).toEqual(["ramp.example.com"]);
+    const firstPage = runListJson<WarmingSchedulePayload>(["domain", "warm-list", "--limit", "1"], env);
+    expect(firstPage.items.map((row) => row.domain)).toEqual(["second.example.com"]);
+    expect(firstPage).toMatchObject({ limit: 1, offset: 0, truncated: true });
+    const secondPage = runListJson<WarmingSchedulePayload>(["domain", "warm-list", "--limit", "1", "--offset", "1"], env);
+    expect(secondPage.items.map((row) => row.domain)).toEqual(["ramp.example.com"]);
 
     // 4. warm-pause — status transitions and the daily cap disappears.
     const paused = runJson<WarmingSchedulePayload>(["domain", "warm-pause", "ramp.example.com"], env);
@@ -197,10 +209,10 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     // A paused schedule imposes no limit (send.local.ts keys off exactly this).
     expect(pausedStatus.today_limit).toBeNull();
 
-    const pausedOnly = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--status", "paused"], env);
-    expect(pausedOnly.map((row) => row.domain)).toEqual(["ramp.example.com"]);
-    const activeOnly = runJson<WarmingSchedulePayload[]>(["domain", "warm-list", "--status", "active"], env);
-    expect(activeOnly.map((row) => row.domain)).toEqual(["second.example.com"]);
+    const pausedOnly = runListJson<WarmingSchedulePayload>(["domain", "warm-list", "--status", "paused"], env);
+    expect(pausedOnly.items.map((row) => row.domain)).toEqual(["ramp.example.com"]);
+    const activeOnly = runListJson<WarmingSchedulePayload>(["domain", "warm-list", "--status", "active"], env);
+    expect(activeOnly.items.map((row) => row.domain)).toEqual(["second.example.com"]);
 
     // 5. warm-resume — back to active, and the mid-ramp cap comes back.
     const resumed = runJson<WarmingSchedulePayload>(["domain", "warm-resume", "ramp.example.com"], env);
@@ -217,8 +229,8 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     expect(completedStatus.today_limit).toBeNull();
 
     // The state survived every separate process: it is in the SQLite file, not memory.
-    const finalRows = runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env);
-    expect(finalRows.map((row) => [row.domain, row.status]).sort()).toEqual([
+    const finalRows = runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env);
+    expect(finalRows.items.map((row) => [row.domain, row.status]).sort()).toEqual([
       ["ramp.example.com", "completed"],
       ["second.example.com", "active"],
     ]);
@@ -229,7 +241,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
       env,
     );
     expect(deleted).toMatchObject({ deleted: true, schedule: { domain: "ramp.example.com" } });
-    expect(runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env).map((row) => row.domain))
+    expect(runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env).items.map((row) => row.domain))
       .toEqual(["second.example.com"]);
 
     const retargeted = runJson<WarmStatusPayload>(
@@ -257,7 +269,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     // The original schedule is untouched and there is still exactly one.
     const status = runJson<WarmStatusPayload>(["domain", "warm-status", "dup.example.com"], env);
     expect(status.schedule.target_daily_volume).toBe(100);
-    expect(runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env)).toHaveLength(1);
+    expect(runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env).items).toHaveLength(1);
   }, 90_000);
 
   it("fails loud (and truthfully) when the domain has no schedule", () => {
@@ -275,7 +287,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     // An empty store is a valid answer for a list, not an error.
     const empty = runCli(["--json", "domain", "warm-list"], env);
     expect(empty.exitCode, empty.stderr).toBe(0);
-    expect(JSON.parse(empty.stdout)).toEqual([]);
+    expect(JSON.parse(empty.stdout)).toEqual({ items: [], limit: 50, offset: 0, truncated: false });
   }, 90_000);
 
   it("validates --target, --start-date, and --status instead of storing junk", () => {
@@ -297,7 +309,7 @@ describe("emails domain warm* (live, temp SQLite)", () => {
     expect(badStatus.error.message).toContain("Invalid --status");
 
     // None of the rejected inputs created a row.
-    expect(runJson<WarmingSchedulePayload[]>(["domain", "warm-list"], env)).toEqual([]);
+    expect(runListJson<WarmingSchedulePayload>(["domain", "warm-list"], env).items).toEqual([]);
   }, 90_000);
 
   it("advertises the warming commands in --help and never repeats the retired refusal", () => {

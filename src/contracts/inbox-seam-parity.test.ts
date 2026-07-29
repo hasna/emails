@@ -74,7 +74,8 @@ describe("inbox CLI<->MCP parity — self-hosted /v1", () => {
   it("CLI inbox list and MCP list_inbound_emails return equivalent /v1 data", async () => {
     const cli = await runCli(["inbox", "list", "--limit", "25"]);
     expect(cli.code).toBe(0);
-    const cliRows = JSON.parse(cli.out) as Array<{ id: string; subject: string }>;
+    const cliPage = JSON.parse(cli.out) as { items: Array<{ id: string; subject: string }> };
+    const cliRows = cliPage.items;
 
     const mcpRows = await mcpList();
 

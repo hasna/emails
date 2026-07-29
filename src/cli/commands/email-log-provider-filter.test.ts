@@ -85,8 +85,8 @@ function seedProvider(env: NodeJS.ProcessEnv): string {
 
   const listed = runCli(["--json", "provider", "list"], env);
   expect(listed.exitCode, `provider list failed: ${listed.stderr}`).toBe(0);
-  const providers = JSON.parse(listed.stdout) as Array<{ id: string; name: string }>;
-  const provider = providers.find((row) => row.name === "ledger-filter");
+  const providers = JSON.parse(listed.stdout) as { items: Array<{ id: string; name: string }> };
+  const provider = providers.items.find((row) => row.name === "ledger-filter");
   expect(provider, `the seeded provider is not in ${listed.stdout}`).toBeDefined();
   expect((provider as { id: string }).id.length).toBeGreaterThan(0);
   return (provider as { id: string }).id;
@@ -134,7 +134,7 @@ describe("the sent ledger's provider filter, at the CLI", () => {
 
     const listed = runCli(["--json", "email", "list"], env);
     expect(listed.exitCode, `email list failed: ${listed.stderr}`).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual([]);
+    expect(JSON.parse(listed.stdout)).toEqual({ items: [], limit: 20, offset: 0, truncated: false });
 
     const exported = runCli(["--json", "export", "emails"], env);
     expect(exported.exitCode, `export emails failed: ${exported.stderr}`).toBe(0);

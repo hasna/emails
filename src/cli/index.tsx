@@ -74,11 +74,16 @@ async function main(): Promise<void> {
 
   const program = new Command();
   const [{ setLogLevel }, {
+    cliListJsonPage,
     configureCliRuntime,
     drainCliOutput,
     emitJson,
     finalizeCliOutput,
     handleError,
+    MAX_CLI_PAGE_LIMIT,
+    parseCliNonNegativeIntOption,
+    parseCliPositiveIntOption,
+    SEAM_LIST_HARD_CAP,
   }] = await Promise.all([
     import("../lib/logger.js"),
     import("./utils.js"),
@@ -89,6 +94,8 @@ async function main(): Promise<void> {
   configureCliRuntime({ json: jsonRequested, verbose: verboseRequested });
   setLogLevel(quietRequested, verboseRequested);
 
+  let activeCommand: Command | null = null;
+
   program
     .name("emails")
     .description("Emails email management CLI - send, receive, sync, and manage email locally or in your AWS account")
@@ -96,16 +103,46 @@ async function main(): Promise<void> {
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")
     .option("-v, --verbose", "Show debug info")
-    .hook("preAction", async () => {
+    .hook("preAction", async (_thisCommand, actionCommand) => {
+      activeCommand = actionCommand;
       const opts = program.opts();
       configureCliRuntime({ json: !!opts.json, verbose: !!opts.verbose });
       setLogLevel(!!opts.quiet, !!opts.verbose);
     });
 
+  function isListAction(command: Command | null): command is Command {
+    if (!command) return false;
+    const name = command.name();
+    return name === "list" || name.endsWith("-list") || name.startsWith("list-");
+  }
+
+  function listJsonDocument(items: unknown[], command: Command): unknown {
+    const options = command.opts<Record<string, unknown>>();
+    const hasLimitOption = command.options.some((option) => option.long === "--limit");
+    const limit = hasLimitOption
+      ? parseCliPositiveIntOption(
+          options["limit"] as number | string | undefined,
+          50,
+          MAX_CLI_PAGE_LIMIT,
+        )
+      : items.length;
+    const offset = parseCliNonNegativeIntOption(
+      options["offset"] as number | string | undefined,
+      0,
+    );
+    return cliListJsonPage(items, {
+      limit,
+      offset,
+      serverPageLimit: SEAM_LIST_HARD_CAP,
+    });
+  }
+
   function output(data: unknown, formatted: string): void {
     const opts = program.opts();
     if (opts.json) {
-      emitJson(data);
+      emitJson(Array.isArray(data) && isListAction(activeCommand)
+        ? listJsonDocument(data, activeCommand)
+        : data);
     } else {
       console.log(formatted);
     }

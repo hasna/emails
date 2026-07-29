@@ -3,6 +3,7 @@ import { createProvider } from "../db/providers.js";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
   configureCliRuntime,
+  cliListJsonPage,
   MAX_CLI_PAGE_LIMIT,
   parseCliListPage,
   parseCliNonNegativeIntOption,
@@ -28,6 +29,20 @@ beforeEach(async () => {
 afterEach(() => stub.clearEnv());
 
 describe("cli/utils", () => {
+  it("wraps CLI list JSON with effective pagination metadata", () => {
+    expect(cliListJsonPage([{ id: "p1" }], { limit: 50, offset: 4 })).toEqual({
+      items: [{ id: "p1" }],
+      limit: 50,
+      offset: 4,
+      truncated: false,
+    });
+    expect(cliListJsonPage(Array.from({ length: 500 }), {
+      limit: 1000,
+      offset: 0,
+      serverPageLimit: 500,
+    })).toMatchObject({ limit: 500, offset: 0, truncated: true });
+  });
+
   it("parseDuration parses common units", () => {
     expect(parseDuration("30s")).toBe(30000);
     expect(parseDuration("5m")).toBe(300000);

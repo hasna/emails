@@ -29,6 +29,40 @@ export const MAX_CLI_PAGE_LIMIT = 1000;
 export const SEAM_LIST_HARD_CAP = 500;
 export const DEFAULT_COMPACT_CLI_PAGE_LIMIT = 20;
 
+export interface CliListJsonPage<T> {
+  items: T[];
+  limit: number;
+  offset: number;
+  truncated: boolean;
+}
+
+/**
+ * Stable JSON contract for CLI list actions.
+ *
+ * A full page is marked truncated conservatively because the offset-only store
+ * contract has no total/next-page signal.  That is the same boundary used by
+ * the text hint: callers must page once more before treating a full page as the
+ * complete collection.
+ */
+export function cliListJsonPage<T>(
+  items: T[],
+  opts: { limit: number; offset: number; serverPageLimit?: number },
+): CliListJsonPage<T> {
+  const requestedLimit = Math.max(0, Math.trunc(opts.limit));
+  const serverLimit = opts.serverPageLimit === undefined
+    ? requestedLimit
+    : Math.min(requestedLimit, Math.max(1, Math.trunc(opts.serverPageLimit)));
+  // A client-side pager may legitimately assemble more than one server page.
+  // Never publish a limit smaller than the page it actually returned.
+  const effectiveLimit = Math.max(items.length, serverLimit);
+  return {
+    items,
+    limit: effectiveLimit,
+    offset: Math.max(0, Math.trunc(opts.offset)),
+    truncated: effectiveLimit > 0 && items.length >= effectiveLimit,
+  };
+}
+
 function jsonDocument(data: unknown): string {
   return `${JSON.stringify(redactSecrets(data), null, 2)}\n`;
 }
