@@ -18,6 +18,7 @@ export function registerSyncCommands(program: Command, _output: (data: unknown, 
     providerCmd
       .command("sync")
       .description("Sync delivery events from all providers")
+      .option("-j, --json", "Print JSON output", false)
       .option("--provider <id>", "Specific provider ID")
       .action(async () => {
         try { serverOnly("emails provider sync"); } catch (e) { handleError(e); }
@@ -28,6 +29,7 @@ export function registerSyncCommands(program: Command, _output: (data: unknown, 
   program
     .command("pull")
     .description("Sync events from provider(s) (alias: emails provider sync)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID (syncs all if not specified)")
     .option("--watch", "Keep syncing on an interval")
     .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")
@@ -39,6 +41,7 @@ export function registerSyncCommands(program: Command, _output: (data: unknown, 
   program
     .command("stats")
     .description("Show email delivery statistics")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID")
     .option("--period <period>", "Period: 7d, 30d, 90d", "30d")
     .option("--inbox", "Show inbound email stats instead of outbound")
@@ -50,6 +53,7 @@ export function registerSyncCommands(program: Command, _output: (data: unknown, 
   program
     .command("monitor")
     .description("Live monitor with auto-refresh")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID")
     .option("--interval <seconds>", "Refresh interval in seconds", "30")
     .action(async () => {
@@ -60,6 +64,7 @@ export function registerSyncCommands(program: Command, _output: (data: unknown, 
   program
     .command("analytics")
     .description("Show email analytics (daily volume, top recipients, busiest hours, delivery trend)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Filter by provider ID")
     .option("--period <period>", "Time period (e.g. 30d, 7d, 90d)", "30d")
     .action(() => {

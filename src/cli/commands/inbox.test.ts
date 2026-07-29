@@ -21,6 +21,8 @@ import { mergeAttachmentDetails } from "../../lib/attachment-actions.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { filterAttachmentDetails } from "./inbox.remote.js";
 import { registerInboxCommands } from "./inbox.js";
+import { registerInboxCommands as registerLocalInboxCommands } from "./inbox.local.js";
+import { registerInboxCommands as registerRemoteInboxCommands } from "./inbox.remote.js";
 
 let stub: V1Stub;
 let attachmentInventoryServer: ReturnType<typeof Bun.serve>;
@@ -149,6 +151,10 @@ async function runInboxSubprocessExpectingExit(args: string[]) {
   return { exitCode, stdout, stderr };
 }
 
+function allRegisteredCommands(program: Command): Command[] {
+  return program.commands.flatMap((command) => [command, ...allRegisteredCommands(command)]);
+}
+
 beforeAll(async () => {
   stub = await startV1Stub();
   attachmentInventoryServer = Bun.serve({
@@ -245,6 +251,27 @@ describe("inbound repo over /v1", () => {
 // ─── inbox list ──────────────────────────────────────────────────────────────
 
 describe("inbox list", () => {
+  it("prints one parseable JSON document when --json follows the subcommand", async () => {
+    seedEmail({ subject: "Machine readable" });
+
+    const child = Bun.spawn({
+      cmd: [process.execPath, "run", "src/cli/index.tsx", "inbox", "unread-count", "--json"],
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ unread: 1 });
+  });
+
   it("lists inbox mail newest-first", async () => {
     seedEmail({ subject: "A", received_at: "2026-01-01T00:00:00.000Z" });
     seedEmail({ subject: "B", received_at: "2026-01-02T00:00:00.000Z" });
@@ -338,6 +365,25 @@ describe("inbox list", () => {
     expect(data).toEqual([]);
     expect(out).toContain("No mail found");
   });
+});
+
+describe("inbox JSON option registration", () => {
+  for (const [mode, register] of [
+    ["local", registerLocalInboxCommands],
+    ["self_hosted", registerRemoteInboxCommands],
+  ] as const) {
+    it(`registers the exact JSON option on every ${mode} command`, () => {
+      const program = new Command();
+      register(program, () => {});
+
+      for (const command of allRegisteredCommands(program)) {
+        const option = command.options.find((candidate) => candidate.long === "--json");
+        expect(option?.flags, command.name()).toBe("-j, --json");
+        expect(option?.description, command.name()).toBe("Print JSON output");
+        expect(option?.defaultValue, command.name()).toBe(false);
+      }
+    });
+  }
 });
 
 // ─── inbox search ────────────────────────────────────────────────────────────

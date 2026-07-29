@@ -128,6 +128,10 @@ export function isCliVerboseOutput(): boolean {
   return verboseOutput;
 }
 
+export function isCliJsonOutput(): boolean {
+  return jsonOutput;
+}
+
 export function hasCliOption(name: string): boolean {
   const flag = `--${name}`;
   return process.argv.some((arg) => arg === flag || arg.startsWith(`${flag}=`));

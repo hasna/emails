@@ -6,7 +6,7 @@ import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
 import { renderStatusCount } from "../../lib/status-availability.js";
 import { getDatabase } from "../../db/database.js";
-import { handleError, resolveId, parseDuration, padRight } from "../utils.js";
+import { handleError, isCliJsonOutput, resolveId, parseDuration, padRight } from "../utils.js";
 
 export function registerSyncCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── PROVIDER SYNC ────────────────────────────────────────────────────────────
@@ -16,17 +16,18 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     providerCmd
       .command("sync")
       .description("Sync delivery events from all providers")
+      .option("-j, --json", "Print JSON output", false)
       .option("--provider <id>", "Specific provider ID")
       .action(async (opts: { provider?: string }) => {
         try {
           const { syncAll, syncProvider } = await import("../../lib/sync.js");
           if (opts.provider) {
             const id = resolveId("providers", opts.provider);
-            await syncProvider(id);
-            console.log(chalk.green("✓ Provider synced"));
+            const synced = await syncProvider(id);
+            output({ ok: true, provider_id: id, synced }, chalk.green("✓ Provider synced"));
           } else {
-            await syncAll();
-            console.log(chalk.green("✓ All providers synced"));
+            const providers = await syncAll();
+            output({ ok: true, providers }, chalk.green("✓ All providers synced"));
           }
         } catch (e) { handleError(e); }
       });
@@ -36,40 +37,47 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
   program
     .command("pull")
     .description("Sync events from provider(s) (alias: emails provider sync)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID (syncs all if not specified)")
     .option("--watch", "Keep syncing on an interval")
     .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")
     .action(async (opts: { provider?: string; watch?: boolean; interval?: string }) => {
       try {
         const { syncAll, syncProvider } = await import("../../lib/sync.js");
-        const runSync = async () => {
+        const runSync = async (): Promise<{ total: number; providers: Record<string, number> }> => {
           if (opts.provider) {
             const providerId = resolveId("providers", opts.provider);
             const count = await syncProvider(providerId);
-            return count;
+            return { total: count, providers: { [providerId]: count } };
           } else {
             const results = await syncAll();
             let total = 0;
-            for (const [id, count] of Object.entries(results)) {
-              if (!opts.watch) console.log(`  ${id.slice(0, 8)}: ${count} events`);
-              total += count;
-            }
-            return total;
+            for (const count of Object.values(results)) total += count;
+            return { total, providers: results };
           }
         };
 
         if (opts.watch) {
           const interval = parseDuration(opts.interval || "5m");
-          console.log(chalk.blue(`Watching for new events every ${opts.interval || "5m"}...`));
+          output(
+            { ok: true, watching: true, interval: opts.interval || "5m" },
+            chalk.blue(`Watching for new events every ${opts.interval || "5m"}...`),
+          );
           while (true) {
-            const total = await runSync();
-            console.log(chalk.gray(`[${new Date().toLocaleTimeString()}]`) + ` Synced ${total} events`);
+            const result = await runSync();
+            console.log(chalk.gray(`[${new Date().toLocaleTimeString()}]`) + ` Synced ${result.total} events`);
             await new Promise(r => setTimeout(r, interval));
           }
         } else {
-          console.log(chalk.dim(opts.provider ? "Syncing events..." : "Syncing all providers..."));
-          const total = await runSync();
-          console.log(chalk.green(`✓ Synced ${total} events${opts.provider ? "" : " total"}`));
+          const result = await runSync();
+          const lines = [chalk.dim(opts.provider ? "Syncing events..." : "Syncing all providers...")];
+          if (!opts.provider) {
+            for (const [id, count] of Object.entries(result.providers)) {
+              lines.push(`  ${id.slice(0, 8)}: ${count} events`);
+            }
+          }
+          lines.push(chalk.green(`✓ Synced ${result.total} events${opts.provider ? "" : " total"}`));
+          output({ ok: true, ...result }, lines.join("\n"));
         }
       } catch (e) {
         handleError(e);
@@ -80,6 +88,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
   program
     .command("stats")
     .description("Show email delivery statistics")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID")
     .option("--period <period>", "Period: 7d, 30d, 90d", "30d")
     .option("--inbox", "Show inbound email stats instead of outbound")
@@ -135,11 +144,30 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
   program
     .command("monitor")
     .description("Live monitor with auto-refresh")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Provider ID")
     .option("--interval <seconds>", "Refresh interval in seconds", "30")
     .action(async (opts: { provider?: string; interval?: string }) => {
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const intervalSec = parseInt(opts.interval ?? "30", 10);
+
+      if (isCliJsonOutput()) {
+        try {
+          const [stats, emails] = await Promise.all([
+            getLocalStats(providerId, "7d"),
+            listEmails({ limit: 5 }),
+          ]);
+          output({
+            generated_at: new Date().toISOString(),
+            period: "7d",
+            stats,
+            recent_emails: emails,
+          }, "");
+        } catch (e) {
+          handleError(e);
+        }
+        return;
+      }
 
       // A count reached through the store seam may be a LOWER BOUND or may not have been
       // measured at all, so both are rendered as such (`≥N` / `unavailable`) rather than
@@ -194,6 +222,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
   program
     .command("analytics")
     .description("Show email analytics (daily volume, top recipients, busiest hours, delivery trend)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Filter by provider ID")
     .option("--period <period>", "Time period (e.g. 30d, 7d, 90d)", "30d")
     .action(async (opts: { provider?: string; period: string }) => {
