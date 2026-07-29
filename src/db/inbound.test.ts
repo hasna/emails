@@ -26,6 +26,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import {
+  SELF_HOSTED_ENUMERATION_PAGE_BUDGET,
+  SELF_HOSTED_SERVER_PAGE_MAX,
+} from "./self-hosted-page.js";
+import {
   storeInboundEmail,
   getInboundEmail,
   getInboundEmailSummary,
@@ -43,6 +47,7 @@ import {
   getReceivedInboundCount,
   getLatestInboundReceivedAt,
   getLatestReceivedInboundAt,
+  getUnreadCount,
   addInboundLabel,
   removeInboundLabel,
 } from "./inbound.js";
@@ -82,6 +87,23 @@ function store(overrides: Partial<StoreInput> = {}): ReturnType<typeof storeInbo
     received_at: new Date().toISOString(),
     ...overrides,
   } as StoreInput);
+}
+
+function bulkMessages(count: number): Array<Record<string, unknown>> {
+  const newest = Date.parse("2026-07-20T00:00:00.000Z");
+  return Array.from({ length: count }, (_, index) => {
+    const timestamp = new Date(newest - index * 1000).toISOString();
+    return {
+      id: `bulk-${String(index).padStart(5, "0")}`,
+      direction: "inbound",
+      from_addr: "bulk@example.com",
+      to_addrs: ["receiver@example.com"],
+      subject: `bulk ${index}`,
+      is_read: false,
+      received_at: timestamp,
+      created_at: timestamp,
+    };
+  });
 }
 
 describe("storeInboundEmail", () => {
@@ -342,6 +364,31 @@ describe("clearInboundEmails", () => {
     // Neither widened nor silently no-op'd: the mail is still there.
     expect(listInboundEmails({})).toHaveLength(2);
   });
+
+  it("refuses before deleting when the offset window moves", async () => {
+    const rows = bulkMessages(600);
+    await stub.seed({ messages: rows });
+    await stub.setListOrderInstability(7, ["messages"]);
+
+    expect(() => clearInboundEmails()).toThrow(/LOWER BOUND/);
+    expect(await stub.list("messages")).toHaveLength(600);
+  });
+
+  it("refuses before deleting when the mailbox exceeds the enumeration budget", async () => {
+    const scanBudget = SELF_HOSTED_ENUMERATION_PAGE_BUDGET * SELF_HOSTED_SERVER_PAGE_MAX;
+    const rows = bulkMessages(scanBudget + 1);
+    await stub.seed({ messages: rows });
+
+    let refusal: unknown;
+    try {
+      clearInboundEmails();
+    } catch (error) {
+      refusal = error;
+    }
+    expect(String(refusal)).toMatch(/enumeration budget ran out/);
+    expect(String(refusal)).toMatch(/LOWER BOUND/);
+    expect(await stub.list("messages")).toHaveLength(scanBudget + 1);
+  }, 240_000);
 });
 
 describe("getInboundCount", () => {
@@ -358,6 +405,31 @@ describe("getInboundCount", () => {
     expect(getInboundCount()).toBe(2);
     expect(getReceivedInboundCount()).toBe(1);
   });
+
+  it("keeps aggregates, watermarks, search, and replies exact past the former 10,000-row scan cap", async () => {
+    const rows = bulkMessages(10_001);
+    rows[0]!["direction"] = "outbound";
+    rows[0]!["message_id"] = "<bulk-root@example.com>";
+    rows[10_000]!["in_reply_to"] = "<bulk-root@example.com>";
+    rows[10_000]!["subject"] = "needle beyond old scan cap";
+    rows[10_000]!["to_addrs"] = ["deep@example.com"];
+    await stub.seed({ messages: rows });
+
+    expect(getInboundCount()).toBe(10_001);
+    expect(getReceivedInboundCount()).toBe(10_000);
+    expect(getUnreadCount()).toBe(10_000);
+    expect(getLatestInboundReceivedAt()).toBe(rows[0]!["received_at"]);
+    expect(getLatestReceivedInboundAt()).toBe(rows[1]!["received_at"]);
+
+    expect(listInboundEmails({ search: "needle beyond old scan cap", limit: 1 }).map((email) => email.id))
+      .toEqual([rows[10_000]!["id"]]);
+    expect(listInboundSubjectsForRecipient("deep@example.com", { limit: 1 }))
+      .toEqual([{ subject: "needle beyond old scan cap" }]);
+    expect(getReplyCount(String(rows[0]!["id"]))).toBe(1);
+
+    const queries = (await stub.listQueries("messages")).map((query) => new URLSearchParams(query));
+    expect(queries.some((query) => query.get("search") === "needle beyond old scan cap")).toBe(true);
+  }, 240_000);
 });
 
 describe("getLatestInboundReceivedAt", () => {
@@ -491,5 +563,14 @@ describe("getReplyCount", () => {
 
   it("returns 0 for a message with no replies", () => {
     expect(getReplyCount("nonexistent")).toBe(0);
+  });
+
+  it("refuses a moving offset window instead of publishing a reply-count lower bound", async () => {
+    const rows = bulkMessages(600);
+    rows[0]!["message_id"] = "<moving-root@example.com>";
+    await stub.seed({ messages: rows });
+    await stub.setListOrderInstability(7, ["messages"]);
+
+    expect(() => getReplyCount(String(rows[0]!["id"]))).toThrow(/LOWER BOUND/);
   });
 });

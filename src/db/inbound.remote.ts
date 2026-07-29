@@ -9,12 +9,14 @@
 //   (threads are server-derived by normalized subject), and no provider/owner
 //   dimension on a message — those local-only fields map to null/default.
 //
-// Filters/sorts/counts with no direct query surface fetch a bounded page window
-// and are applied in JS. Owner-scoped queries and local attachment-path writes
-// have no `/v1` equivalent and are stubbed per the self-hosted contract (rule 6).
+// Filters/sorts with no direct query surface are applied in JS over an honestly
+// enumerated page window. Scalar mailbox counts and watermarks use the server's
+// aggregate/query endpoints. Owner-scoped queries and local attachment-path
+// writes have no `/v1` equivalent and are stubbed per the self-hosted contract.
 
 import { cappedLimit, safeLimit, safeOffset, safeOptionalLimit } from "./pagination.js";
 import { now, uuid } from "./runtime.js";
+import { assertHonestSelfHostedRead, enumerateSelfHostedRows } from "./self-hosted-page.js";
 import {
   selfHostedResource,
   carray,
@@ -26,15 +28,11 @@ import {
   cstrOrNull,
   ciso,
 } from "./self-hosted-resource.js";
+import { selfHostedApiRequest, SelfHostedHttpError } from "./self-hosted-store.js";
 import { SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED, type AttachmentPath } from "../lib/mail-types.js";
 export type { AttachmentPath } from "../lib/mail-types.js";
 
 const MESSAGE_RESOURCE = "messages";
-
-// Bounded scan window for filters/counts/reply-resolution that have no direct
-// server query. Large enough for a real mailbox without an unbounded walk.
-const INBOUND_SCAN_PAGE = 500;
-const INBOUND_SCAN_CAP = 10000;
 
 export interface AttachmentMeta {
   filename: string;
@@ -81,15 +79,61 @@ function messagesStore() {
   return selfHostedResource(MESSAGE_RESOURCE);
 }
 
-function scanMessages(query: Record<string, string | number | boolean | undefined> = {}): Record<string, unknown>[] {
-  const store = messagesStore();
-  const rows: Record<string, unknown>[] = [];
-  for (let offset = 0; offset < INBOUND_SCAN_CAP; offset += INBOUND_SCAN_PAGE) {
-    const page = store.list({ ...query, limit: INBOUND_SCAN_PAGE, offset });
-    rows.push(...page);
-    if (page.length < INBOUND_SCAN_PAGE) break;
+interface ReadMessageRowsOptions {
+  query?: Record<string, string | number | boolean | undefined>;
+  keep?: (row: Record<string, unknown>) => boolean;
+}
+
+/**
+ * Read a whole message set or enough matching rows to fill a caller's bounded
+ * window. A read that can prove neither refuses instead of returning a quiet
+ * lower bound. The shared pager also de-duplicates and anchors offset pages, so
+ * a moving mailbox window is detected rather than mistaken for a snapshot.
+ */
+function readMessageRows(bound: number | null, opts: ReadMessageRowsOptions = {}): Record<string, unknown>[] {
+  const enumeration = enumerateSelfHostedRows(MESSAGE_RESOURCE, {
+    ...(bound === null ? {} : { need: bound }),
+    query: opts.query,
+    select: (row) => opts.keep && !opts.keep(row) ? null : row,
+  });
+  assertHonestSelfHostedRead(enumeration, bound, {
+    noun: "inbound message",
+    narrowHint: "narrow the server-side message filters or ask for a smaller explicit window.",
+  });
+  return enumeration.rows;
+}
+
+interface ServerMessageCounts {
+  total: number;
+  sent: number;
+  unread: number;
+  latest_received_at: string | null;
+}
+
+/** Exact server-side aggregates; malformed successes refuse rather than become zero. */
+function serverMessageCounts(): ServerMessageCounts {
+  const result = selfHostedApiRequest("GET", "/messages/counts");
+  if (result.status < 200 || result.status >= 300) {
+    throw new SelfHostedHttpError(result.status, "GET", "/messages/counts");
   }
-  return rows;
+  const counts = cobj(cobj(result.json)["counts"]);
+  const integer = (key: "total" | "sent" | "unread"): number => {
+    const value = counts[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Self-hosted GET /messages/counts returned an invalid ${key} count.`);
+    }
+    return value;
+  };
+  const total = integer("total");
+  const sent = integer("sent");
+  if (sent > total) {
+    throw new Error("Self-hosted GET /messages/counts returned sent greater than total.");
+  }
+  const latest = counts["latest_received_at"];
+  if (latest !== null && typeof latest !== "string") {
+    throw new Error("Self-hosted GET /messages/counts returned an invalid latest_received_at watermark.");
+  }
+  return { total, sent, unread: integer("unread"), latest_received_at: latest };
 }
 
 function v1Labels(row: Record<string, unknown>): string[] {
@@ -308,11 +352,16 @@ function repliesToEmail(emailId: string): Record<string, unknown>[] {
   if (!target) return [];
   const targetMsgId = bareId(cstr(target["message_id"]));
   if (!targetMsgId) return [];
-  return scanMessages()
-    .filter((row) => {
+  // Replies are returned oldest-first, the reverse of GET /v1/messages. Even a
+  // bounded reply page therefore has to see the whole matching set before it may
+  // choose its first row; stopping after `need` matches would return the newest
+  // replies while claiming they were the oldest.
+  return readMessageRows(null, {
+    keep: (row) => {
       const irt = bareId(cstr(row["in_reply_to"]));
       return !!irt && irt === targetMsgId;
-    })
+    },
+  })
     .sort((a, b) => v1MsgDate(a).localeCompare(v1MsgDate(b)));
 }
 
@@ -384,8 +433,14 @@ export function listInboundSubjectsForRecipient(
   if (!normalized) return [];
   const limit = cappedLimit(opts?.limit, 100, 10000);
   const since = opts?.since ? Date.parse(opts.since) : null;
-  return scanMessages()
-    .filter((row) => {
+  if (since !== null && !Number.isFinite(since)) return [];
+  return readMessageRows(limit, {
+    query: {
+      direction: "inbound",
+      to: normalized,
+      since: since === null ? undefined : new Date(since).toISOString(),
+    },
+    keep: (row) => {
       if (v1IsOutbound(row) || v1HasLabel(row, "archived")) return false;
       const toAddrs = cstrArray(row["to_addrs"]).map((a) => normalizeEmailAddress(a)).filter((a): a is string => !!a);
       if (!toAddrs.includes(normalized)) return false;
@@ -394,9 +449,9 @@ export function listInboundSubjectsForRecipient(
         if (!(Number.isFinite(t) && t >= since)) return false;
       }
       return true;
-    })
-    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)))
-    .slice(0, limit)
+    },
+  })
+    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)) || cstr(b["id"]).localeCompare(cstr(a["id"])))
     .map((row) => ({ subject: cstr(row["subject"]) }));
 }
 
@@ -433,7 +488,11 @@ export interface ListInboundOpts {
 
 // Note: `provider_id` scoping has no self-hosted equivalent (a message carries no
 // provider dimension over /v1); the filter is ignored rather than emptying views.
-function inboundRowMatches(row: Record<string, unknown>, opts: ListInboundOpts | undefined): boolean {
+function inboundRowMatches(
+  row: Record<string, unknown>,
+  opts: ListInboundOpts | undefined,
+  serverApplied: { search?: boolean } = {},
+): boolean {
   const outbound = v1IsOutbound(row);
   const archived = v1HasLabel(row, "archived");
 
@@ -461,7 +520,7 @@ function inboundRowMatches(row: Record<string, unknown>, opts: ListInboundOpts |
   const subject = opts?.subject?.trim().toLowerCase();
   if (subject && !cstr(row["subject"]).toLowerCase().includes(subject)) return false;
   const search = opts?.search?.trim().toLowerCase();
-  if (search) {
+  if (search && !serverApplied.search) {
     const hay = [
       cstr(row["from_addr"]),
       cstrArray(row["to_addrs"]).join(" "),
@@ -489,12 +548,40 @@ function inboundRowMatches(row: Record<string, unknown>, opts: ListInboundOpts |
   return true;
 }
 
+function inboundServerQuery(opts: ListInboundOpts | undefined): Record<string, string | number | boolean | undefined> {
+  const query: Record<string, string | number | boolean | undefined> = {};
+  if (!opts?.includeSent) query["direction"] = opts?.sent ? "outbound" : "inbound";
+  if (opts?.since) query["since"] = new Date(Date.parse(opts.since)).toISOString();
+  if (opts?.from?.trim()) query["from"] = opts.from.trim();
+  if (opts?.subject?.trim()) query["subject"] = opts.subject.trim();
+  if (opts?.search?.trim()) query["search"] = opts.search.trim();
+
+  // These filters accept one value over the synchronous resource bridge. Keep
+  // multi-value unions client-side because encoding them as comma-separated text
+  // would silently change their meaning.
+  if ((opts?.recipients ?? []).length === 1 && (opts?.recipientDomains ?? []).length === 0) {
+    const recipient = normalizeEmailAddress(opts!.recipients![0]);
+    if (recipient) query["to"] = recipient;
+  }
+  if ((opts?.recipientDomains ?? []).length === 1 && (opts?.recipients ?? []).length === 0) {
+    const domain = opts!.recipientDomains![0]!.trim().toLowerCase();
+    if (domain) query["domain"] = domain;
+  }
+  return query;
+}
+
 function listFilteredInbound(opts?: ListInboundOpts): Record<string, unknown>[] {
   const limit = safeLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  return scanMessages()
-    .filter((row) => inboundRowMatches(row, opts))
-    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)))
+  if (opts?.since && !Number.isFinite(Date.parse(opts.since))) return [];
+  const query = inboundServerQuery(opts);
+  return readMessageRows(offset + limit, {
+    query,
+    // The server's search covers the complete body (which list rows intentionally
+    // omit), so it is the authoritative predicate for that pushed-down field.
+    keep: (row) => inboundRowMatches(row, opts, { search: query["search"] !== undefined }),
+  })
+    .sort((a, b) => v1MsgDate(b).localeCompare(v1MsgDate(a)) || cstr(b["id"]).localeCompare(cstr(a["id"])))
     .slice(offset, offset + limit);
 }
 
@@ -541,7 +628,10 @@ export function deleteInboundEmail(id: string): boolean {
 export function clearInboundEmails(provider_id?: string): number {
   if (provider_id) throw new Error(SELF_HOSTED_PROVIDER_CLEAR_UNSUPPORTED);
   const store = messagesStore();
-  const ids = scanMessages().map((row) => cstr(row["id"])).filter(Boolean);
+  // Enumerate and prove completeness BEFORE the first delete. If the page budget
+  // runs out or the offset window moves, nothing is deleted and the caller gets a
+  // refusal instead of a plausible partial-clear count.
+  const ids = readMessageRows(null).map((row) => cstr(row["id"])).filter(Boolean);
   let count = 0;
   for (const id of ids) {
     if (store.del(id)) count += 1;
@@ -554,37 +644,29 @@ export function clearInboundEmails(provider_id?: string): number {
 // provider_id scoping is ignored (no provider dimension over /v1); counts reflect
 // the whole operator-owned store.
 export function getInboundCount(_provider_id?: string): number {
-  return scanMessages().length;
+  return serverMessageCounts().total;
 }
 
 export function getReceivedInboundCount(_provider_id?: string): number {
-  return scanMessages().filter((row) => !v1IsOutbound(row)).length;
+  const counts = serverMessageCounts();
+  return counts.total - counts.sent;
 }
 
 export function getLatestInboundReceivedAt(): string | null {
-  let latest: string | null = null;
-  for (const row of scanMessages()) {
-    const d = v1MsgDate(row);
-    if (d && (latest === null || d > latest)) latest = d;
-  }
-  return latest;
+  // `/v1/messages` declares newest-first total ordering, so one server-side row
+  // is the all-message watermark regardless of mailbox size.
+  const row = messagesStore().list({ limit: 1 })[0];
+  const latest = row ? v1MsgDate(row) : "";
+  return latest || null;
 }
 
 export function getLatestReceivedInboundAt(): string | null {
-  let latest: string | null = null;
-  for (const row of scanMessages()) {
-    if (v1IsOutbound(row)) continue;
-    const d = v1MsgDate(row);
-    if (d && (latest === null || d > latest)) latest = d;
-  }
-  return latest;
+  return serverMessageCounts().latest_received_at;
 }
 
 /** Count unread, non-archived received mail. */
 export function getUnreadCount(_provider_id?: string): number {
-  return scanMessages().filter((row) =>
-    !v1IsOutbound(row) && !cbool(row["is_read"]) && !v1HasLabel(row, "archived"),
-  ).length;
+  return serverMessageCounts().unread;
 }
 
 // ── read / archive / star flags ────────────────────────────────────────────────
