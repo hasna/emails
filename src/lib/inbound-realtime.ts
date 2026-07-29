@@ -128,6 +128,18 @@ export async function watchInboundOnce(
 }
 
 /**
+ * Adapt a pull outcome that signals failure as `{ ok, reason }` into the watch
+ * sync contract. The watch loop previously read only `pulled` and DISCARDED
+ * `ok`/`reason`, so a pull that failed outright still looked like a clean
+ * zero-item sync and the queue messages were deleted.
+ */
+export function pullOutcomeToWatchSync(
+  r: { pulled: number; ok: boolean; reason?: string },
+): { synced: number; errors: string[] } {
+  return { synced: r.pulled, errors: r.ok ? [] : [r.reason ?? "pull failed"] };
+}
+
+/**
  * Config bookkeeping for one watch poll. A poll whose drain swallowed ingest
  * errors must RECORD them: stamping `inbound_realtime_last_error: null` after
  * such a poll is how a total ingestion freeze once looked healthy in

@@ -101,3 +101,34 @@ describe("watch poll bookkeeping — a failed poll must not stamp a green status
     expect(patch["inbound_realtime_last_messages"]).toBe(0);
   });
 });
+
+describe("pullOutcomeToWatchSync — a failed pull must not read as a clean empty sync", () => {
+  // The `--all-buckets` watch path previously read only `pulled` off the pull
+  // outcome and DISCARDED `ok`/`reason` — a total pull failure was
+  // indistinguishable from "no new mail" and the queue messages were deleted.
+  async function loadHelper(): Promise<(r: { pulled: number; ok: boolean; reason?: string }) => { synced: number; errors: string[] }> {
+    const mod = await import("./inbound-realtime.js") as Record<string, unknown>;
+    const helper = mod["pullOutcomeToWatchSync"];
+    expect(typeof helper).toBe("function");
+    return helper as (r: { pulled: number; ok: boolean; reason?: string }) => { synced: number; errors: string[] };
+  }
+
+  it("carries the failure reason into the sync contract", async () => {
+    const pullOutcomeToWatchSync = await loadHelper();
+    const out = pullOutcomeToWatchSync({ pulled: 0, ok: false, reason: "AccessDenied listing bucket" });
+    expect(out.synced).toBe(0);
+    expect(out.errors).toEqual(["AccessDenied listing bucket"]);
+  });
+
+  it("reports a failure even when the pull gave no reason", async () => {
+    const pullOutcomeToWatchSync = await loadHelper();
+    const out = pullOutcomeToWatchSync({ pulled: 3, ok: false });
+    expect(out.synced).toBe(3);
+    expect(out.errors).toHaveLength(1);
+  });
+
+  it("maps a clean pull to a clean sync", async () => {
+    const pullOutcomeToWatchSync = await loadHelper();
+    expect(pullOutcomeToWatchSync({ pulled: 5, ok: true })).toEqual({ synced: 5, errors: [] });
+  });
+});

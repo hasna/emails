@@ -1181,7 +1181,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set inbound_s3_bucket")); return; }
 
         const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
-        const { watchInboundOnce, watchPollConfigPatch } = await import("../../lib/inbound-realtime.js");
+        const { watchInboundOnce, watchPollConfigPatch, pullOutcomeToWatchSync } = await import("../../lib/inbound-realtime.js");
         const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
         const sqs = makeSqsAdapter({ queueUrl, region });
         const rememberPoll = (patch: Record<string, unknown> = {}) => {
@@ -1197,7 +1197,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           if (opts.allBuckets) {
             const r = await runAutoPull({ s3: true, limit: 1000 });
             if (r.pulled > 0) console.log(chalk.green(`  ✓ ${r.pulled} new email(s) delivered across configured buckets`));
-            return { synced: r.pulled, errors: r.ok ? [] : [r.reason ?? "auto-pull failed"] };
+            return pullOutcomeToWatchSync(r);
           }
           const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
           if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
