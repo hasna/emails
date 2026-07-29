@@ -216,6 +216,23 @@ function syntheticRow(n: number, overrides: Record<string, unknown> = {}): Resou
   };
 }
 
+/**
+ * Seed a stored row by INSERTing it directly into the table, below the seam.
+ *
+ * These fixtures pin ORDERING facts, so they need explicit `id` and `created_at`
+ * values — and the generic resource path now refuses caller-supplied server-owned
+ * columns on BOTH arms (they are the store's to mint; the API arm always 422ed
+ * them). A fixture must not ride a hole in the contract it exists to test, so it
+ * seeds the way a fixture with an opinion about identity has to: with its own SQL
+ * against the same database both store variants read.
+ */
+function seedStoredRow(row: ResourceRow): void {
+  const columns = Object.keys(row);
+  db.query(`INSERT INTO email_digests (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`).run(
+    ...columns.map((column) => (row[column] ?? null) as string | number | null),
+  );
+}
+
 // ---------------------------------------------------------------------------------
 // The two pure exports. PARITY GUARDS, not change-detectors: both deleted arms held
 // identical copies, and these assert the surviving one still answers the same way.
@@ -554,21 +571,17 @@ describe("getLatestEmailDigest", () => {
     });
 
     it(`picks the newest by completed_at, not the store's first row, on the ${name}`, async () => {
-      // THE FIXTURE MAKES THE TWO ORDERINGS DISAGREE. Rows are seeded through the SQLite
-      // store directly — the only one that accepts an explicit `id` and `created_at` — so
-      // the store's own page order is deterministic and the control below is not a coin
+      // THE FIXTURE MAKES THE TWO ORDERINGS DISAGREE. Rows are seeded below the seam —
+      // neither store arm accepts an explicit `id` or `created_at` any more — so the
+      // store's own page order is deterministic and the control below is not a coin
       // flip. Both variants then READ the same three rows.
-      const seed = sqliteStore();
       const rows: Array<[string, string]> = [
         ["oldest-written", "2026-06-20T00:00:00.000Z"],
         ["middle-written", "2026-06-18T00:00:00.000Z"],
         ["newest-written", "2026-06-19T00:00:00.000Z"],
       ];
       for (const [index, [id, completedAt]] of rows.entries()) {
-        const created = await seed.emailDigests.create({
-          ...syntheticRow(index, { id, completed_at: completedAt }),
-        });
-        expect(created.ok).toBe(true);
+        seedStoredRow(syntheticRow(index, { id, completed_at: completedAt }));
       }
       // CONTROL: the store's own first row is NOT the newest by `completed_at`. Without
       // this the assertion below would also pass on an implementation that simply took the
@@ -593,15 +606,13 @@ describe("getLatestEmailDigest", () => {
     // `created_at` therefore made the store's id-descending order produce the asserted answer
     // by itself, and the assertion could not fail. Here the two rows are given DISTINCT
     // `created_at` values ordered OPPOSITE to their ids.
-    const seed = sqliteStore();
     const tie = "2026-06-18T00:00:00.000Z";
     for (const [index, id] of ["digest-zzz", "digest-aaa"].entries()) {
-      const created = await seed.emailDigests.create({ ...syntheticRow(index, { id, completed_at: tie }) });
-      expect(created.ok).toBe(true);
+      seedStoredRow(syntheticRow(index, { id, completed_at: tie }));
     }
     // CONTROL: the store's own order really does put the OTHER row first, so the assertion
     // below is a test of this module's tiebreaker and not of the store's ordering.
-    expect((await storedRows(seed))[0]?.["id"]).toBe("digest-aaa");
+    expect((await storedRows(sqliteStore()))[0]?.["id"]).toBe("digest-aaa");
     expect((await getLatestEmailDigest("today", sqliteStore()))?.id).toBe("digest-zzz");
   });
 
@@ -692,19 +703,17 @@ describe("getLatestEmailDigest", () => {
     // of 1000 rows; both stores clamp a page to 500. Above 500 stored digests it published
     // the newest of an arbitrary 500 as "the newest", with nothing in the answer to say so.
     //
-    // The fixture is seeded through the SQLite store with explicit ids and `created_at`
-    // values, so the store's own page order is deterministic: `created_at DESC` puts the
-    // LAST-written row first, and the row carrying the maximum `completed_at` is written
-    // FIRST — which places it at position 520 of the store's order, outside the clamp.
+    // The fixture is seeded below the seam with explicit ids and `created_at` values
+    // (which no store arm accepts from a caller any more), so the store's own page order
+    // is deterministic: `created_at DESC` puts the LAST-written row first, and the row
+    // carrying the maximum `completed_at` is written FIRST — which places it at position
+    // 520 of the store's order, outside the clamp.
     const seed = sqliteStore();
     const total = 520;
     for (let i = 0; i < total; i += 1) {
       // i = 0 carries the newest `completed_at` and is written first.
       const completedAt = new Date(Date.UTC(2026, 5, 30) - i * 60_000).toISOString();
-      const created = await seed.emailDigests.create({
-        ...syntheticRow(i, { id: `bulk-${String(i).padStart(4, "0")}`, completed_at: completedAt }),
-      });
-      if (!created.ok) throw new Error(`could not seed row ${i}: ${created.message}`);
+      seedStoredRow(syntheticRow(i, { id: `bulk-${String(i).padStart(4, "0")}`, completed_at: completedAt }));
     }
 
     // CONTROL: one page really is clamped to 500, and the newest row really is missing
@@ -728,17 +737,13 @@ describe("getLatestEmailDigest", () => {
 
 describe("listEmailDigests", () => {
   async function seedThree(store: EmailStore): Promise<void> {
-    const seed = sqliteStore();
     const rows: Array<[string, string, string, string]> = [
       ["row-a", "today", "ok", "2026-06-20T00:00:00.000Z"],
       ["row-b", "today", "error", "2026-06-19T00:00:00.000Z"],
       ["row-c", "month", "ok", "2026-06-18T00:00:00.000Z"],
     ];
     for (const [index, [id, period, status, completedAt]] of rows.entries()) {
-      const created = await seed.emailDigests.create({
-        ...syntheticRow(index, { id, period, status, completed_at: completedAt }),
-      });
-      if (!created.ok) throw new Error(`could not seed ${id}: ${created.message}`);
+      seedStoredRow(syntheticRow(index, { id, period, status, completed_at: completedAt }));
     }
     expect(await storedRows(store)).toHaveLength(3);
   }
@@ -786,14 +791,12 @@ describe("listEmailDigests", () => {
     // store's own order is `tie-aaa, tie-bbb, tie-ccc` and only this module's explicit
     // tiebreaker can produce the reverse. A stable sort over a same-`created_at` fixture would
     // have made the assertion unfalsifiable.
-    const seed = sqliteStore();
     const tie = "2026-06-18T00:00:00.000Z";
     for (const [index, id] of ["tie-ccc", "tie-bbb", "tie-aaa"].entries()) {
-      const created = await seed.emailDigests.create({ ...syntheticRow(index, { id, completed_at: tie }) });
-      if (!created.ok) throw new Error(`could not seed ${id}: ${created.message}`);
+      seedStoredRow(syntheticRow(index, { id, completed_at: tie }));
     }
     // CONTROL: the store's own order is the reverse of what is asserted below.
-    expect((await storedRows(seed)).map((row) => row["id"])).toEqual(["tie-aaa", "tie-bbb", "tie-ccc"]);
+    expect((await storedRows(sqliteStore())).map((row) => row["id"])).toEqual(["tie-aaa", "tie-bbb", "tie-ccc"]);
     const store = sqliteStore();
     const first = await listEmailDigests({ limit: 2 }, store);
     const second = await listEmailDigests({ limit: 2, offset: 2 }, store);
