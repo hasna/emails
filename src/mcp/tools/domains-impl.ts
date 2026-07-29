@@ -425,11 +425,11 @@ export function registerDomainTools(server: McpServer): void {
 
   // ─── ADDRESS OWNERSHIP ────────────────────────────────────────────────────────
   // These five tools are NOT local-state tools. `src/lib/address-ownership.ts`
-  // reads and writes through `src/db/owners.ts`, which routes to
-  // `src/db/owners.remote.ts` in self_hosted mode: owners come from `/v1/owners`,
-  // owner_id/administrator_id are patched on `/v1/addresses/<id>`, and the audit
-  // trail is `/v1/address-ownership-events`. So they run in BOTH modes and carry
-  // no self_hosted guard.
+  // reads and writes through `src/db/owners.ts`, which has collapsed onto the store
+  // seam: owner rows go through the `owners` repository, owner_id/administrator_id
+  // through `addresses`/`addressLifecycle`, and the audit trail through the
+  // address-ownership ledger — all against whichever store this installation's
+  // STORAGE configuration names, so they carry no self_hosted guard.
   server.tool(
   "get_address_owner",
   "Show owner and administering agent for an address by email or ID.",
@@ -439,7 +439,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address }) => {
     try {
       const { getAddressOwnershipDetail } = await import('../../lib/address-ownership.js');
-      const detail = getAddressOwnershipDetail(address);
+      const detail = await getAddressOwnershipDetail(address);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address owner ${address} --json`,
@@ -461,7 +461,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, owner, administrator }) => {
     try {
       const { setAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = setAddressOwnerByRef(address, owner, administrator);
+      const detail = await setAddressOwnerByRef(address, owner, administrator);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address set-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --json`,
@@ -485,7 +485,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, owner, administrator, reason, actor }) => {
     try {
       const { transferAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
+      const detail = await transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address transfer-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --reason ${JSON.stringify(reason)} --yes --json`,
@@ -507,7 +507,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, reason, actor }) => {
     try {
       const { unassignAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
+      const detail = await unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address unassign-owner ${address} --reason ${JSON.stringify(reason)} --yes --json`,
@@ -528,7 +528,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, limit }) => {
     try {
       const { getAddressOwnershipHistoryByRef } = await import('../../lib/address-ownership.js');
-      const detail = getAddressOwnershipHistoryByRef(address, limit ?? 20);
+      const detail = await getAddressOwnershipHistoryByRef(address, limit ?? 20);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address owner-history ${address} --limit ${limit ?? 20} --json`,

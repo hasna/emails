@@ -1361,15 +1361,61 @@ const root = join(import.meta.dir, "..");
  * IDENTICAL — that change names no counted identifier — so only this corpus note
  * moved. Re-measured AFTER this paragraph was written, because this file sits
  * inside the corpus it scans.
+ * RE-MEASURED AND RE-PINNED AGAIN on the OWNERS collapse. Base measurement, recorded
+ * because it is the half a rebase invalidates: on 8309875 all eleven live counts
+ * equalled their declared ceilings, so there was no inherited slack to reclaim.
+ *
+ * This collapse moves SEVEN, which is more counters than any sibling family moved,
+ * and the reason is that the deleted facade was the heaviest one left: seventeen
+ * dispatched exports. `twoArmFamilies` and `remoteArmModules` fall by one each (the
+ * family's two arms are deleted); `routedFacadeDefinitions` by one and
+ * `routedCallExpressions` by SEVENTEEN (the facade's dispatch helper and its
+ * seventeen dispatched exports); the branch counter by six — the family's deleted
+ * SQLite arm was the second-heaviest interrogator of the legacy bridge, six of its
+ * owner-row reads asking it whether to route after all — and the tree-wide reference
+ * counter by twenty-five (those six branch sites plus the deleted second arm's
+ * nineteen). The client-side predicate counter falls by two: the deleted facade
+ * imported it and called it once. The four parser/env counters hold at 55/65/16/219:
+ * the collapsed implementation resolves its store from storage configuration, its
+ * one import from the module named for the axis is value coercion only (the
+ * contacts/groups/warming precedent), and the family's rewritten suite drives the
+ * REAL stores over the store-seam `/v1` fixture, so it never sets a deployment word
+ * at all. The split-brain coherence suite re-homed its word-routed exemplar onto the
+ * providers family — still word-routed, and not claimed by any concurrent lane — so
+ * that guard keeps a live subject without adding a counted reference.
+ *
+ * Corpus of this change: 646 tracked, 645 scanned, ~10.33M characters — one fewer
+ * tracked file than the base (two arm modules deleted, one non-seam ledger
+ * declaration added). Re-measured AFTER this paragraph was written, because this
+ * file sits inside the corpus it scans.
+ *
+ * REBASED AS THE SECOND MERGER across the `src/db/events` collapse (#163), and the
+ * composing-reductions hazard is exactly why the numbers below are a MEASUREMENT and
+ * not a per-metric minimum. Both families lower an overlapping set, so the merged
+ * tree sits BELOW either branch: `twoArmFamilies` and `remoteArmModules` are 14, not
+ * the 15 each branch pinned for its own tree — a per-metric minimum would have kept
+ * 15 and shipped a unit of slack on the structural counters, the precise trap the
+ * zero-first procedure exists to defeat. The eleven were committed as literal zeros
+ * before this rebase, the MERGED tree was measured over the real `git ls-files`
+ * corpus, and these are that measurement: base 8309875 16·16·8·139·15·64·38, minus
+ * events' reductions (1·1·1·7·0·3·2), minus owners' reductions (1·1·1·17·6·25·2),
+ * equals 14·14·6·115·9·36·34 on the seven that move — with no cross-term, which the
+ * measurement confirms rather than assumes. The four parser/env counters hold at
+ * 55/65/16/219: neither collapse names the deployment setting. The routing suite's
+ * fail-closed probe (events re-homed it from `listEvents` to `listDomains`) and the
+ * owners case both survive the merge; the split-brain coherence exemplar stays on
+ * providers. Corpus of the merged tree: 644 tracked, 643 scanned, ~10.36M
+ * characters. Re-measured AFTER this paragraph was written, because this file sits
+ * inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 15,
-  remoteArmModules: 15,
-  routedFacadeDefinitions: 7,
-  routedCallExpressions: 132,
-  selfHostedResourceBranches: 15,
-  selfHostedResourceReferences: 61,
-  isSelfHostedModeReferences: 36,
+  twoArmFamilies: 14,
+  remoteArmModules: 14,
+  routedFacadeDefinitions: 6,
+  routedCallExpressions: 115,
+  selfHostedResourceBranches: 9,
+  selfHostedResourceReferences: 36,
+  isSelfHostedModeReferences: 34,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

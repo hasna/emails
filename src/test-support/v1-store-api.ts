@@ -79,6 +79,7 @@ import type {
 } from "../store/records.js";
 import { MESSAGE_FOLDERS } from "../store/records.js";
 import type { ResourceRepository } from "../store/repositories.js";
+import { addressOwnershipLedgerOf } from "../store-address-ownership-ledger.js";
 import { groupMembershipOf } from "../store-group-membership.js";
 import { sequenceSubledgerOf } from "../store-sequence-subledger.js";
 
@@ -265,11 +266,15 @@ function familyFor(store: EmailStore, path: string): ResourceRepository<Record<s
   // what the real service does for an unregistered resource.
   const subledger = sequenceSubledgerOf(store);
   const membership = groupMembershipOf(store);
+  const ownershipLedger = addressOwnershipLedgerOf(store);
   const families: Record<string, ResourceRepository<Record<string, unknown>>> = {
     contacts: store.contacts,
     groups: store.groups,
     ...(membership === null ? {} : { "group-members": membership.groupMembers }),
     owners: store.owners,
+    ...(ownershipLedger === null
+      ? {}
+      : { "address-ownership-events": ownershipLedger.addressOwnershipEvents }),
     providers: store.providers,
     templates: store.templates,
     sequences: store.sequences,

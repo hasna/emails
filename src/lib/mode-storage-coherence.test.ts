@@ -6,8 +6,10 @@
 // their answers contradict: an API base URL plus a credential, with the deployment
 // word unset, sends the seam families to the HTTP API while the word-routed families
 // default to the local SQLite database — two mailboxes in one process, no diagnostic,
-// and single commands straddle both regimes (owners resolved locally, send keys
-// minted through the API). That is the silent wrong-store read this repo classes as
+// and single commands straddle both regimes (the audit that found it caught owner
+// names resolved locally while send keys were minted through the API; the owners
+// family has since collapsed onto the seam, so PROVIDERS is the word-routed exemplar
+// these cases drive now). That is the silent wrong-store read this repo classes as
 // its worst bug. Until the axis deletion collapses the second regime, the defaulting
 // side fails closed on this configuration and names both settings.
 //
@@ -23,7 +25,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase } from "../db/database.js";
-import { listOwners } from "../db/owners.js";
+import { listProviderSummaries } from "../db/providers.js";
 import {
   API_BASE_URL_SETTING,
   API_CREDENTIAL_SETTINGS,
@@ -77,7 +79,7 @@ describe("split-brain storage configuration — the word-routed side fails close
     // different mailbox than its seam-routed neighbours. It must refuse instead.
     let thrown: unknown;
     try {
-      listOwners();
+      listProviderSummaries();
     } catch (error) {
       thrown = error;
     }
@@ -100,8 +102,8 @@ describe("split-brain storage configuration — the word-routed side fails close
 
   it("refuses the session-token flavour of the same configuration", () => {
     only({ [API_BASE_URL_SETTING]: A_URL, [API_CREDENTIAL_SETTINGS[0]]: "emss_coherence_token" });
-    expect(() => listOwners()).toThrow(StoreConfigurationError);
-    expect(() => listOwners()).toThrow(API_BASE_URL_SETTING);
+    expect(() => listProviderSummaries()).toThrow(StoreConfigurationError);
+    expect(() => listProviderSummaries()).toThrow(API_BASE_URL_SETTING);
   });
 
   it("stays out of the way when a database path is configured beside the URL", () => {
@@ -115,7 +117,7 @@ describe("split-brain storage configuration — the word-routed side fails close
       [API_CREDENTIAL_SETTINGS[2]]: A_KEY,
     });
     expect(() => planEmailStore(process.env)).toThrow(StoreConfigurationError);
-    expect(() => listOwners()).not.toThrow();
+    expect(() => listProviderSummaries()).not.toThrow();
   });
 
   it("keys on the configured URL, never on a credential alone", () => {
@@ -123,7 +125,7 @@ describe("split-brain storage configuration — the word-routed side fails close
     // so the word-routed default agrees with the seam and there is nothing to refuse.
     only({ [DATABASE_PATH_SETTINGS[1]]: ":memory:", [API_CREDENTIAL_SETTINGS[2]]: A_KEY });
     expect(planEmailStore(process.env).store).toBe("sqlite");
-    expect(() => listOwners()).not.toThrow();
+    expect(() => listProviderSummaries()).not.toThrow();
   });
 
   it("leaves an incomplete API configuration to the seam's own refusal", () => {
@@ -132,6 +134,6 @@ describe("split-brain storage configuration — the word-routed side fails close
     // a second, different refusal about the deployment word on top.
     only({ [API_BASE_URL_SETTING]: A_URL });
     expect(() => planEmailStore(process.env)).toThrow(StoreConfigurationError);
-    expect(() => listOwners()).not.toThrow();
+    expect(() => listProviderSummaries()).not.toThrow();
   });
 });

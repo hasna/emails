@@ -147,6 +147,9 @@ describe("SqliteEmailStore conformance", () => {
       // src/store-group-membership.ts rather than by the frozen seam.
       ["groupMembers", () => subject.groupMembers.list()],
       ["owners", () => subject.owners.list()],
+      // The address-ownership audit ledger: carried by the store, declared by
+      // src/store-address-ownership-ledger.ts rather than by the frozen seam.
+      ["addressOwnershipEvents", () => subject.addressOwnershipEvents.list()],
       ["providers", () => subject.providers.list()],
       ["templates", () => subject.templates.list()],
       ["sequences", () => subject.sequences.list()],

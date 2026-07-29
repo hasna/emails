@@ -48,6 +48,14 @@ export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
    */
   groupMembers: "group-members",
   owners: "owners",
+  /**
+   * NOT a seam family either. The address-ownership audit ledger
+   * (src/store-address-ownership-ledger.ts) rides the same generic CRUD path over a
+   * resource the service registers beside `owners`; `EmailStore` does not declare it
+   * yet, so — like the sequence sub-ledger below — it is excluded from the family
+   * check.
+   */
+  addressOwnershipEvents: "address-ownership-events",
   providers: "providers",
   templates: "templates",
   sequences: "sequences",
@@ -78,7 +86,13 @@ export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /** Entries in the path map that are NOT repositories on `EmailStore`. */
-const NOT_SEAM_FAMILIES = new Set(["provisioning", "groupMembers", "sequenceSteps", "sequenceEnrollments"]);
+const NOT_SEAM_FAMILIES = new Set([
+  "provisioning",
+  "groupMembers",
+  "sequenceSteps",
+  "sequenceEnrollments",
+  "addressOwnershipEvents",
+]);
 
 /** The families that are `ResourceRepository`s on `EmailStore`. */
 export const RESOURCE_FAMILIES: readonly string[] = Object.freeze(

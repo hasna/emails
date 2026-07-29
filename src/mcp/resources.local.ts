@@ -71,7 +71,7 @@ export async function domainsResourcePayload(db: Database = getDatabase()): Prom
 
 export async function addressesResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
   const { listEnrichedAddresses } = await import("../lib/address-ownership.js");
-  const addressRows = listEnrichedAddresses(undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
+  const addressRows = await listEnrichedAddresses(undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
   const truncated = addressRows.length > ADDRESS_RESOURCE_LIMIT;
   const visibleAddresses = addressRows.slice(0, ADDRESS_RESOURCE_LIMIT);
   const addressProvisioning = await listAddressProvisioningByIds(

@@ -27,10 +27,11 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .option("--label <label>", "A label to identify this key")
     .action(async (owner: string, opts: { label?: string }) => {
       try {
-        const o = getOwnerByName(owner) ?? getOwner(owner);
+        const o = (await getOwnerByName(owner)) ?? (await getOwner(owner));
         if (!o) return handleError(new Error(`Owner not found: ${owner}`));
         const { token, key } = await createSendKey(o.id, opts.label);
-        const scope = listAddressesByOwner(o.id, "owner").concat(listAddressesByOwner(o.id, "administrator"));
+        const scope = (await listAddressesByOwner(o.id, "owner"))
+          .concat(await listAddressesByOwner(o.id, "administrator"));
         const uniq = [...new Set(scope.map((a) => a.email))];
         const text = [
           chalk.green(`✓ Send key issued for ${o.type} '${o.name}'`),
@@ -53,14 +54,14 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
       try {
         let ownerId: string | undefined;
         if (opts.owner) {
-          const o = getOwnerByName(opts.owner) ?? getOwner(opts.owner);
+          const o = (await getOwnerByName(opts.owner)) ?? (await getOwner(opts.owner));
           if (!o) return handleError(new Error(`Owner not found: ${opts.owner}`));
           ownerId = o.id;
         }
         const page = parseCliListPage(opts);
         const keys = await listSendKeySummaries(ownerId, page);
         if (keys.length === 0) { output([], chalk.dim("No send keys.")); return; }
-        const ownerNames = listOwnerNamesByIds(
+        const ownerNames = await listOwnerNamesByIds(
           keys.map((key) => key.owner_id).filter((id): id is string => id !== null),
         );
         const lines = [chalk.bold("\nSend keys:")];
@@ -107,7 +108,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .description("Check whether an owner is allowed to send from an address")
     .action(async (owner: string, from: string) => {
       try {
-        const o = getOwnerByName(owner) ?? getOwner(owner);
+        const o = (await getOwnerByName(owner)) ?? (await getOwner(owner));
         if (!o) return handleError(new Error(`Owner not found: ${owner}`));
         const ok = await canOwnerSendFrom(o.id, from);
         output({ owner: o.name, from, authorized: ok },

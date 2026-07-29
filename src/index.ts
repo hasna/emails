@@ -168,6 +168,27 @@ export {
 } from "./db/groups.js";
 export type { GroupMember, GroupMemberSummary } from "./db/groups.js";
 
+// EVERY OWNERS VALUE BELOW CHANGED SHAPE, and this is a published entry point, so the break is
+// stated here rather than only in the commit that caused it. The owners family collapsed onto
+// the store seam; there are THREE separate breaks and a consumer has to apply all three.
+//
+//  1. EVERY ONE IS ASYNC — they all return promises now, because every operation on the seam
+//     does. This is the half that fails QUIETLY in a consumer that does not await:
+//     `getOwnerByName(x) ?? getOwner(x)` always takes the first branch (a promise is never
+//     null), `if (owner)` is always truthy, and `.get(id)` on a promised Map is `undefined`.
+//  2. THE TRAILING ARGUMENT IS A STORE, NOT ONLY A DATABASE HANDLE. Every export still accepts
+//     the `Database` it always did — the handle now scopes the WHOLE family to that database —
+//     and additionally accepts an `EmailStore`. The three listings keep both published argument
+//     orders (`listOwners(type, opts?, store?)` AND the deleted arm's `(type, db, opts)`),
+//     decided by argument shape.
+//  3. THE ADDRESS ROWS `listAddressesByOwner` RETURNS CARRY NO PROVIDER ASSOCIATION
+//     (`provider_id: ""`): the seam's address record has none, which is what an API-configured
+//     installation already answered.
+//
+// WHAT IS NOT A BREAK, because a reader will look for it: name/external-id/contact-email
+// resolution still answers the OLDEST matching registration; the listings still answer newest
+// first; assign still refuses an address owned by someone else; transfer and unassign still
+// require a reason; and the audit-trail limits (default 20, max 100) are unchanged.
 export {
   createOwner, getOwner, getOwnerByName, listOwners,
   getOwnerByExternalId, getOwnerByContactEmail,

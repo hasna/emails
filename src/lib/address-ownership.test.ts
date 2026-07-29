@@ -16,7 +16,7 @@ import { getAddressOwnershipDetail, listEnrichedAddresses, resolveAddressRef } f
 let stub: V1Stub;
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  stub = await startV1Stub({ openapi: true });
 });
 
 afterAll(() => stub.stop());
@@ -31,14 +31,14 @@ afterEach(() => {
 });
 
 describe("address ownership enrichment", () => {
-  it("hydrates owner and administrator for the address list", () => {
+  it("hydrates owner and administrator for the address list", async () => {
     const provider = createProvider({ name: "included", type: "sandbox" });
-    const human = createOwner({ type: "human", name: "human-user" });
-    const agent = createOwner({ type: "agent", name: "agent-admin" });
+    const human = await createOwner({ type: "human", name: "human-user" });
+    const agent = await createOwner({ type: "agent", name: "agent-admin" });
     const included = createAddress({ provider_id: provider.id, email: "human@example.com" });
-    assignAddressOwner(included.id, human.id, agent.id);
+    await assignAddressOwner(included.id, human.id, agent.id);
 
-    const addresses = listEnrichedAddresses();
+    const addresses = await listEnrichedAddresses();
     const found = addresses.find((a) => a.email === "human@example.com");
 
     expect(found).toBeDefined();
@@ -50,13 +50,13 @@ describe("address ownership enrichment", () => {
     });
   });
 
-  it("returns ownership detail with owner metadata for a single address", () => {
+  it("returns ownership detail with owner metadata for a single address", async () => {
     const provider = createProvider({ name: "ops-provider", type: "sandbox" });
-    const owner = createOwner({ type: "agent", name: "ops-agent" });
+    const owner = await createOwner({ type: "agent", name: "ops-agent" });
     const address = createAddress({ provider_id: provider.id, email: "ops@example.com" });
-    assignAddressOwner(address.id, owner.id);
+    await assignAddressOwner(address.id, owner.id);
 
-    const detail = getAddressOwnershipDetail(address.id);
+    const detail = await getAddressOwnershipDetail(address.id);
 
     expect(detail.address.email).toBe("ops@example.com");
     expect(detail.address.owner?.name).toBe("ops-agent");

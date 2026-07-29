@@ -259,7 +259,7 @@ if (path === "/api/addresses" && method === "GET") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const page = queryPage(url, 100);
-    return json(listEnrichedAddresses(resolvedId, page));
+    return json(await listEnrichedAddresses(resolvedId, page));
   } catch (e) { return internalError(e); }
 }
 

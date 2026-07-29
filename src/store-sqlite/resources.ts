@@ -50,6 +50,13 @@ export const RESOURCE_TABLES = Object.freeze({
   // `rowid`, exactly as it does for `webhook_receipts`.
   groupMembers: "group_members",
   owners: "owners",
+  // The address-ownership audit LEDGER (src/store-address-ownership-ledger.ts). Not a
+  // seam family yet — `EmailStore` declares only `owners` — but the same schema-driven
+  // path serves it, exactly as it serves `group_members` for the membership ledger.
+  // Its TEXT primary key is CLIENT-minted (the ledger writer stamps a monotonic
+  // `created_at` beside it), which this path already honours: an explicit `id` on a
+  // create is written, not replaced.
+  addressOwnershipEvents: "address_ownership_events",
   providers: "providers",
   templates: "templates",
   sequences: "sequences",

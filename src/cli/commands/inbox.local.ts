@@ -562,7 +562,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }));
         const allAddresses = routedRecipients.flatMap((recipient) => recipient.exactAddresses);
         const allDomains = routedRecipients.flatMap((recipient) => recipient.domainRows);
-        const enrichedAddresses = new Map(enrichAddresses(allAddresses).map((address) => [address.id, address]));
+        const enrichedAddresses = new Map((await enrichAddresses(allAddresses)).map((address) => [address.id, address]));
         const addressProvisioning = await listAddressProvisioningByIds(allAddresses.map((address) => address.id), explainStore);
         const domainProvisioning = await listDomainProvisioningByIds(allDomains.map((domain) => domain.id), explainStore);
         const readyAddressCounts = await listReadyAddressCountsByDomains(allDomains.map((domain) => domain.id), explainStore);

@@ -1,9 +1,10 @@
-// Self-hosted-ONLY: the address repo routes every read/write to `/v1/addresses`,
-// so these tests drive the REAL command against an out-of-process /v1 stub (see
-// src/test-support/v1-stub.ts). No local SQLite exists anymore. Ownership routes
-// over /v1 too (`/v1/owners`, owner_id/administrator_id on `/v1/addresses/<id>`,
-// `/v1/address-ownership-events`) and is covered below. Only the local
-// provisioning orchestration is server-owned and still fails loud.
+// Self-hosted-ONLY for the address repo: it routes every read/write to
+// `/v1/addresses`, so these tests drive the REAL command against an out-of-process
+// /v1 stub (see src/test-support/v1-stub.ts). No local SQLite exists anymore.
+// Ownership is served by the COLLAPSED owners family, which resolves the same stub
+// from storage configuration and reaches it through the REAL HTTP store — which
+// reads the service's published contract before any write, hence `openapi: true`.
+// Only the local provisioning orchestration is server-owned and still fails loud.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAddress } from "../../db/addresses.js";
@@ -56,7 +57,7 @@ async function runAddressCommandExpectingExit(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -234,8 +235,8 @@ describe("address server-only lifecycle commands still block", () => {
 describe("address ownership commands over /v1", () => {
   async function seedOwnedAddress() {
     const address = createAddress({ provider_id: "prov-1", email: "svc@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
     return { address, human, agent };
   }
 
@@ -272,7 +273,7 @@ describe("address ownership commands over /v1", () => {
 
   it("transfer-owner records the new owner plus an audit event", async () => {
     await seedOwnedAddress();
-    createOwner({ type: "agent", name: "successor-bot" });
+    await createOwner({ type: "agent", name: "successor-bot" });
     await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
 
     const result = await runAddressCommand([
@@ -334,9 +335,9 @@ describe("address ownership commands over /v1", () => {
 describe("address list reports real ownership", () => {
   it("hydrates owner/administrator in the table and in --json", async () => {
     const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
-    assignAddressOwner(address.id, human.id, agent.id);
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
+    await assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runAddressCommand(["address", "list"]);
 
@@ -348,9 +349,9 @@ describe("address list reports real ownership", () => {
 
   it("--verbose shows owner and administrator instead of ignoring the flag", async () => {
     const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
-    assignAddressOwner(address.id, human.id, agent.id);
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
+    await assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runAddressCommand(["address", "list", "--verbose"]);
 

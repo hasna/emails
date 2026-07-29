@@ -1,7 +1,8 @@
-// Self-hosted-ONLY: owners route to `/v1/owners` and address ownership fields are
-// patched on `/v1/addresses`, so these tests drive the REAL command against an
-// out-of-process /v1 stub (see src/test-support/v1-stub.ts). No local SQLite
-// exists anymore.
+// The `owner` command, over the collapsed owners family. The family resolves its
+// store from STORAGE configuration; `stub.applyEnv()` names the out-of-process /v1
+// stub, so every read and write below reaches it through the REAL HTTP store —
+// which reads the service's published contract before any write, hence
+// `openapi: true`.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAddress } from "../../db/addresses.js";
@@ -25,7 +26,7 @@ async function runOwnerCommand(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -60,10 +61,10 @@ describe("owner commands", () => {
   });
 
   it("lists owned addresses with owner and administrator ids", async () => {
-    const human = createOwner({ type: "human", name: "human-user" });
-    const agent = createOwner({ type: "agent", name: "agent-admin" });
+    const human = await createOwner({ type: "human", name: "human-user" });
+    const agent = await createOwner({ type: "agent", name: "agent-admin" });
     const address = createAddress({ provider_id: "prov-1", email: "human@example.com" });
-    assignAddressOwner(address.id, human.id, agent.id);
+    await assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runOwnerCommand(["owner", "addresses", "human-user"]);
 
