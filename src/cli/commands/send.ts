@@ -41,23 +41,26 @@ const ATTACHMENT_MIME_TYPES: Record<string, string> = {
  * This used to be an unconditional refusal — "--to-group is not available in
  * the self-hosted client without a self-hosted group-members send API" — which
  * was wrong twice: it fired in local mode too, and no send API is needed. Group
- * fan-out is a CLIENT-side recipient lookup. `src/db/groups.ts` is a routed
- * facade whose reads resolve to local SQLite or `/v1`, and `emails group
- * members <name>` has been printing exactly this list in both configurations
- * all along. The pre-febe87e implementation did the same two calls against a
- * local handle; the facade removes the handle, not the capability.
+ * fan-out is a CLIENT-side recipient lookup. `src/db/groups.ts` reads the store
+ * seam resolved from storage configuration, and `emails group members <name>`
+ * has been printing exactly this list against both stores all along. The
+ * pre-febe87e implementation did the same two calls against a local handle.
+ *
+ * The member read now enumerates the WHOLE group or throws — never one clamped
+ * page — because this list becomes the To: header: a partial read here mails a
+ * subset of the group while reporting the group.
  *
  * The group expands into the To: header, which is what `--to a@x b@y` already
  * does — no per-recipient fan-out is invented here.
  */
-function resolveGroupRecipients(groupName: string): string[] {
-  const group = getGroupByName(groupName);
+async function resolveGroupRecipients(groupName: string): Promise<string[]> {
+  const group = await getGroupByName(groupName);
   if (!group) {
     handleError(new Error(
       `Group not found: ${groupName}. List the groups you have with 'emails group list'.`,
     ));
   }
-  const members = listMemberSummaries(group!.id);
+  const members = await listMemberSummaries(group!.id);
   if (members.length === 0) {
     handleError(new Error(
       `Group '${groupName}' has no members. Add some with 'emails group add ${groupName} <email...>'.`,
@@ -164,7 +167,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
               + "so combining them would silently drop the explicit --to addresses.",
             ));
           }
-          toAddresses = resolveGroupRecipients(opts.toGroup);
+          toAddresses = await resolveGroupRecipients(opts.toGroup);
         }
         if (toAddresses.length === 0) handleError(new Error("No recipients specified. Use --to or --to-group"));
 

@@ -24,6 +24,7 @@
 import { getDatabase, type Database } from "../db/database.js";
 import type { StoreCapabilities } from "../store/capabilities.js";
 import type { StoreDescriptor } from "../store/descriptor.js";
+import type { GroupMembership } from "../store-group-membership.js";
 import type { SequenceCapableEmailStore } from "../store-sequence-subledger.js";
 import { createAttachmentRepairRepository, createSendIntentsRepository } from "./ledger.js";
 import {
@@ -108,14 +109,18 @@ export interface SqliteEmailStoreOptions {
 /**
  * Build the store.
  *
- * The return type is `EmailStore` PLUS the sequence sub-ledger, so every repository
- * below is checked against its interface at this assignment. The intersection is a
- * widening, not a variant: every consumer that wants an `EmailStore` still gets one,
- * and the two extra families are the declaration `src/store/` cannot carry while it is
- * frozen (see src/store-sequence-subledger.ts). There is deliberately no partial
- * variant of this function and no way to construct a store with a repository missing.
+ * The return type is `EmailStore` PLUS the sequence sub-ledger PLUS the group
+ * membership ledger, so every repository below is checked against its interface at
+ * this assignment. The intersection is a widening, not a variant: every consumer that
+ * wants an `EmailStore` still gets one, and the three extra families are the
+ * declaration `src/store/` cannot carry while it is frozen (see
+ * src/store-sequence-subledger.ts and src/store-group-membership.ts). There is
+ * deliberately no partial variant of this function and no way to construct a store
+ * with a repository missing.
  */
-export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): SequenceCapableEmailStore {
+export function createSqliteEmailStore(
+  options: SqliteEmailStoreOptions = {},
+): SequenceCapableEmailStore & GroupMembership {
   const db = options.database ?? getDatabase();
   const capabilities = SQLITE_STORE_CAPABILITIES;
   const resource = (family: keyof typeof RESOURCE_TABLES) =>
@@ -142,6 +147,7 @@ export function createSqliteEmailStore(options: SqliteEmailStoreOptions = {}): S
     webhookReceipts: resource("webhookReceipts"),
     contacts: resource("contacts"),
     groups: resource("groups"),
+    groupMembers: resource("groupMembers"),
     sequences: resource("sequences"),
     sequenceSteps: resource("sequenceSteps"),
     sequenceEnrollments: resource("sequenceEnrollments"),
