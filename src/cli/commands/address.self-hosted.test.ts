@@ -50,7 +50,10 @@ async function runAddressCommandExpectingExit(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` because the collapsed owners family serves the `address owner`
+  // detail (its audit-trail read pushes an address_id filter down through the REAL
+  // HTTP store, which reads the service's published contract first).
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
