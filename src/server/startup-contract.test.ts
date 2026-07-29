@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { routeModulesFor } from "./api-routes.js";
+import { RETIRED_SERVER_MODE_SETTINGS } from "./storage-backend.js";
 
 const routesDir = join(import.meta.dir, "routes");
 const apiRoutesFile = join(import.meta.dir, "api-routes.ts");
@@ -126,6 +127,13 @@ describe("server startup contract", () => {
       for (const key of ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_SESSION_TOKEN"]) {
         delete env[key];
       }
+      // THE RETIRED DEPLOYMENT SETTINGS GO TOO, and not as tidiness. The hermetic harness
+      // exports the local-store value for every test, and this child configures PostgreSQL —
+      // which is a contradiction the store resolution refuses by design. Without this the
+      // child would fail on the configuration rather than reaching the operator validation
+      // this case is about, and the failure would look like a regression in the worker.
+      // Deleted by ROLE through the owning module's constant, never by spelling the names.
+      for (const key of RETIRED_SERVER_MODE_SETTINGS) delete env[key];
       Object.assign(env, {
         EMAILS_DATABASE_URL: "postgres://operator.invalid/emails",
       });

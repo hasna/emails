@@ -1422,6 +1422,12 @@ const root = join(import.meta.dir, "..");
  * and the environment counter loses the service, deployment and smoke-test
  * spellings that used to configure the retired selector. The client half still
  * exists and this PR does not claim otherwise.
+ *
+ * The server refuses values that never selected a server store and values that
+ * contradict storage configuration, but tolerates an agreeing inherited client
+ * selector with a warning while the client half remains live. A flat refusal
+ * would break supported one-shell operator and test shapes before the client
+ * families have been collapsed.
  */
 const CEILINGS: Record<string, number> = {
   twoArmFamilies: 14,
@@ -1434,7 +1440,7 @@ const CEILINGS: Record<string, number> = {
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 64,
   normalizeEmailsModeReferences: 16,
-  emailsModeEnvReferences: 209,
+  emailsModeEnvReferences: 206,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
