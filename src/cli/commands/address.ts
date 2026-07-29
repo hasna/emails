@@ -26,11 +26,11 @@ import {
 // work, matching the wording `emails provision *` and the MCP provisioning tools
 // already settled on. It must not name a deployment mode.
 //
-// Address ownership is NOT in this category: `src/db/owners.ts` routes every
-// ownership read/write to `src/db/owners.remote.ts`, which serves them from
-// `/v1/owners`, `/v1/addresses/<id>` (owner_id/administrator_id) and
-// `/v1/address-ownership-events`. Those subcommands run against the API in both
-// modes.
+// Address ownership is NOT in this category: `src/db/owners.ts` has collapsed onto
+// the store seam, so its subcommands read and write whichever store this
+// installation's STORAGE configuration names — owner rows through the `owners`
+// repository, the ownership columns through `addresses`/`addressLifecycle`, and the
+// audit trail through the address-ownership ledger.
 function notImplementedAnywhere(command: string): never {
   throw new Error(
     `${command} is not implemented in this build: there is no address provisioning ` +
@@ -80,13 +80,12 @@ function resolveSelfHostedAddressId(ref: string): string {
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
-  const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+  const listAddressesAction = async (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
       const page = parseCliListPage(opts);
-      // Hydrate owner/administrator/provider_name from the mode-routed repos
-      // instead of hardcoding nulls: an owned address must never be reported as
-      // unowned, in the table or in --json.
-      const addresses = enrichAddresses(listAddresses(opts.provider, page));
+      // Hydrate owner/administrator/provider_name instead of hardcoding nulls: an
+      // owned address must never be reported as unowned, in the table or in --json.
+      const addresses = await enrichAddresses(listAddresses(opts.provider, page));
       if (addresses.length === 0) {
         output([], chalk.dim("No addresses configured."));
         return;
@@ -189,9 +188,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("owner <email-or-id>")
     .description("Show owner and administering agent for an address")
-    .action((ref: string) => {
+    .action(async (ref: string) => {
       try {
-        const detail = getAddressOwnershipDetail(ref);
+        const detail = await getAddressOwnershipDetail(ref);
         const owner = detail.address.owner;
         const administrator = detail.address.administrator;
         const lines = [chalk.bold(`\n${detail.address.email}`)];
@@ -220,9 +219,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Assign address ownership; human owners require an agent administrator")
     .requiredOption("--owner <name-or-id>", "Owner name, ID, or ID prefix")
     .option("--administrator <name-or-id>", "Administering agent name, ID, or ID prefix")
-    .action((ref: string, opts: { owner: string; administrator?: string }) => {
+    .action(async (ref: string, opts: { owner: string; administrator?: string }) => {
       try {
-        const detail = setAddressOwnerByRef(ref, opts.owner, opts.administrator);
+        const detail = await setAddressOwnerByRef(ref, opts.owner, opts.administrator);
         output(detail, chalk.green(`✓ ${detail.address.email} ${describeOwnership(detail)}`));
       } catch (e) {
         handleError(e);
@@ -239,9 +238,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { owner: string; administrator?: string; reason: string; actor?: string; yes?: boolean }) => {
       try {
-        const before = getAddressOwnershipDetail(ref);
+        const before = await getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Transfer owner for ${before.address.email} to ${opts.owner}?`, opts.yes);
-        const detail = transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
+        const detail = await transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
         output(detail, chalk.green(`✓ ${detail.address.email} transferred — ${describeOwnership(detail)}`));
       } catch (e) {
         handleError(e);
@@ -256,9 +255,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { reason: string; actor?: string; yes?: boolean }) => {
       try {
-        const before = getAddressOwnershipDetail(ref);
+        const before = await getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Clear owner/admin assignment for ${before.address.email}?`, opts.yes);
-        const detail = unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
+        const detail = await unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
         output(detail, chalk.green(`✓ ${detail.address.email} is now unowned`));
       } catch (e) {
         handleError(e);
@@ -269,10 +268,10 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("owner-history <email-or-id>")
     .description("Show ownership/admin change history for an address")
     .option("--limit <n>", "Maximum events to show", "20")
-    .action((ref: string, opts: { limit: string }) => {
+    .action(async (ref: string, opts: { limit: string }) => {
       try {
         const limit = Math.max(1, Math.min(MAX_OWNER_HISTORY_LIMIT, Number.parseInt(opts.limit, 10) || 20));
-        const detail = getAddressOwnershipHistoryByRef(ref, limit);
+        const detail = await getAddressOwnershipHistoryByRef(ref, limit);
         const lines = [chalk.bold(`\nOwnership history: ${detail.address.email}`)];
         if (detail.history.length === 0) {
           lines.push(chalk.dim("  No ownership changes recorded."));

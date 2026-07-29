@@ -12,9 +12,9 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .requiredOption("--type <type>", "human | agent")
     .option("--email <email>", "Contact email (humans)")
     .option("--external-id <id>", "External user/agent id")
-    .action((name: string, opts: { type: string; email?: string; externalId?: string }) => {
+    .action(async (name: string, opts: { type: string; email?: string; externalId?: string }) => {
       try {
-        const o = createOwner({ type: opts.type as "human" | "agent", name, contact_email: opts.email, external_id: opts.externalId });
+        const o = await createOwner({ type: opts.type as "human" | "agent", name, contact_email: opts.email, external_id: opts.externalId });
         output(o, chalk.green(`✓ ${o.type} owner '${o.name}' registered (${o.id})`));
       } catch (e) { handleError(e); }
     });
@@ -26,24 +26,26 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Maximum owners to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of owners to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { type?: string; limit?: string; offset?: string; verbose?: boolean }) => {
-      const page = parseCliListPage(opts);
-      const owners = listOwners(opts.type as "human" | "agent" | undefined, page);
-      const text = owners.length
-        ? [
-          ...owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`),
-          "",
-          formatListHint({
-            shown: owners.length,
-            limit: page.limit,
-            offset: page.offset,
-            noun: "owner",
-            detailCommand: "use emails owner addresses <owner> for assigned addresses",
-            verbose: opts.verbose || isCliVerboseOutput(),
-          }),
-        ].join("\n")
-        : "No owners registered.";
-      output(owners, text);
+    .action(async (opts: { type?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+      try {
+        const page = parseCliListPage(opts);
+        const owners = await listOwners(opts.type as "human" | "agent" | undefined, page);
+        const text = owners.length
+          ? [
+            ...owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`),
+            "",
+            formatListHint({
+              shown: owners.length,
+              limit: page.limit,
+              offset: page.offset,
+              noun: "owner",
+              detailCommand: "use emails owner addresses <owner> for assigned addresses",
+              verbose: opts.verbose || isCliVerboseOutput(),
+            }),
+          ].join("\n")
+          : "No owners registered.";
+        output(owners, text);
+      } catch (e) { handleError(e); }
     });
 
   cmd
@@ -53,30 +55,32 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((owner: string, opts: { administered?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
-      const o = getOwnerByName(owner) ?? getOwner(owner);
-      if (!o) return handleError(new Error(`Owner not found: ${owner}`));
-      const role = opts.administered ? "administrator" : "owner";
-      const page = parseCliListPage(opts);
-      const addrs = listAddressesByOwner(o.id, role, page);
-      const text = addrs.length
-        ? [
-          ...addrs.map((a) => {
-          const ownerText = a.owner_id ? `owner=${a.owner_id.slice(0, 8)}` : "owner=none";
-          const adminText = a.administrator_id ? `admin=${a.administrator_id.slice(0, 8)}` : "admin=none";
-          return `  ${a.email}  ${chalk.dim(a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
-        }),
-          "",
-          formatListHint({
-            shown: addrs.length,
-            limit: page.limit,
-            offset: page.offset,
-            noun: "address",
-            detailCommand: "use emails address owner <email-or-id> for one address",
-            verbose: opts.verbose || isCliVerboseOutput(),
+    .action(async (owner: string, opts: { administered?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
+      try {
+        const o = (await getOwnerByName(owner)) ?? (await getOwner(owner));
+        if (!o) return handleError(new Error(`Owner not found: ${owner}`));
+        const role = opts.administered ? "administrator" : "owner";
+        const page = parseCliListPage(opts);
+        const addrs = await listAddressesByOwner(o.id, role, page);
+        const text = addrs.length
+          ? [
+            ...addrs.map((a) => {
+            const ownerText = a.owner_id ? `owner=${a.owner_id.slice(0, 8)}` : "owner=none";
+            const adminText = a.administrator_id ? `admin=${a.administrator_id.slice(0, 8)}` : "admin=none";
+            return `  ${a.email}  ${chalk.dim(a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
           }),
-        ].join("\n")
-        : "(none)";
-      output(addrs, `${o.name} ${role === "administrator" ? "administers" : "owns"}:\n${text}`);
+            "",
+            formatListHint({
+              shown: addrs.length,
+              limit: page.limit,
+              offset: page.offset,
+              noun: "address",
+              detailCommand: "use emails address owner <email-or-id> for one address",
+              verbose: opts.verbose || isCliVerboseOutput(),
+            }),
+          ].join("\n")
+          : "(none)";
+        output(addrs, `${o.name} ${role === "administrator" ? "administers" : "owns"}:\n${text}`);
+      } catch (e) { handleError(e); }
     });
 }

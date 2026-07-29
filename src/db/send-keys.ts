@@ -122,11 +122,11 @@
 //     `assertSendAuthorized` needs the owner behind a verified key. Both deleted arms asked
 //     their own sibling owners arm, so the answer followed whichever module was imported
 //     rather than the configured store. It is read through `EmailStore.owners` here, so the
-//     key and its owner come from ONE dataset. The remaining split is NOT this family's and
-//     is stated rather than hidden: `src/cli/commands/sendkey.ts` still resolves an owner
-//     NAME through `src/db/owners.ts`, which routes on the deployment word, so with an API
-//     configured and no deployment word set that name comes from a different dataset than
-//     the keys. It closes when `src/db/owners` collapses.
+//     key and its owner come from ONE dataset. The remaining split this note used to record —
+//     `src/cli/commands/sendkey.ts` resolving an owner NAME through a deployment-word-routed
+//     `src/db/owners.ts` while the keys came from the configured store — CLOSED when the
+//     owners family collapsed onto the same seam: both now resolve from storage
+//     configuration, so the name and the key cannot come from different datasets.
 //  9. THE ERROR TEXTS DIVERGED AND THE RICHER ONE IS KEPT. On an out-of-scope From the
 //     SQLite arm raised "Send key for '<owner name>' is not authorized to send from <addr>"
 //     and the HTTP arm raised the same sentence without the owner. The named form is kept.

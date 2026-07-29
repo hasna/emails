@@ -22,6 +22,7 @@
 
 import type { StoreCapabilities } from "../store/capabilities.js";
 import type { StoreDescriptor } from "../store/descriptor.js";
+import type { AddressOwnershipLedger } from "../store-address-ownership-ledger.js";
 import type { GroupMembership } from "../store-group-membership.js";
 import type { SequenceCapableEmailStore } from "../store-sequence-subledger.js";
 import { createAttachmentRepairRepository, createSendIntentsRepository } from "./ledger.js";
@@ -265,7 +266,9 @@ function gateway(gateways: Record<string, ResourceGateway>, family: string): Res
   return found;
 }
 
-export function createHttpEmailStore(options: HttpEmailStoreOptions): SequenceCapableEmailStore & GroupMembership {
+export function createHttpEmailStore(
+  options: HttpEmailStoreOptions,
+): SequenceCapableEmailStore & GroupMembership & AddressOwnershipLedger {
   const transport = createTransport({
     baseUrl: options.baseUrl,
     credential: options.credential,
@@ -299,6 +302,7 @@ export function createHttpEmailStore(options: HttpEmailStoreOptions): SequenceCa
     sequenceEnrollments: createResourceRepository(gateway(gateways, "sequenceEnrollments")),
     templates: createResourceRepository(gateway(gateways, "templates")),
     owners: createResourceRepository(gateway(gateways, "owners")),
+    addressOwnershipEvents: createResourceRepository(gateway(gateways, "addressOwnershipEvents")),
     providers: createResourceRepository(gateway(gateways, "providers")),
     sendKeys: createSendKeysRepository(transport),
     aliases: createResourceRepository(gateway(gateways, "aliases")),
