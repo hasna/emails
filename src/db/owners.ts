@@ -293,13 +293,22 @@ function isStoreArgument(value: unknown): value is OwnerStore {
     || (typeof candidate.messages === "object" && candidate.messages !== null);
 }
 
-/** Split one of the dual-order listing argument pairs into (opts, store). */
+/**
+ * Split one of the dual-order listing argument pairs into (opts, store). Either slot
+ * may hold either shape — including the deleted SQLite arm's `(…, undefined, opts)`,
+ * where the options arrive in the SECOND slot with the first one empty — so both are
+ * asked, and only a value that answers the structural store question is a store.
+ */
 function listingArguments<TOptions>(
   first: TOptions | OwnerStore | undefined,
   second: OwnerStore | TOptions | undefined,
 ): { opts: TOptions | undefined; store: OwnerStore | undefined } {
   if (isStoreArgument(first)) return { opts: second as TOptions | undefined, store: first };
-  return { opts: first, store: second as OwnerStore | undefined };
+  if (isStoreArgument(second)) return { opts: first as TOptions | undefined, store: second };
+  return {
+    opts: (first as TOptions | undefined) ?? (second as TOptions | undefined),
+    store: undefined,
+  };
 }
 
 /**

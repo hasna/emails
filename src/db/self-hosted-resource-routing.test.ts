@@ -133,10 +133,30 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
     }
   });
 
-  test("listOwners returns selfHosted rows and filters by type", () => {
-    expect(listOwners().map((o) => o.id)).toEqual(["o1"]);
-    expect(listOwners("agent").map((o) => o.id)).toEqual(["o1"]);
-    expect(listOwners("human")).toEqual([]);
+  // Owners no longer participate in the routing this file measures, and they stopped
+  // the same way contacts and groups did: the family has collapsed to one
+  // implementation over the store seam, so it reaches this same `/v1` service because
+  // STORAGE CONFIGURATION named an Emails API — not because a mode word chose an arm.
+  // The database path is unset for the duration of this case, leaving exactly one
+  // configured store, because the pair is a CONTRADICTION that `planEmailStore`
+  // refuses outright. What it still guards is unchanged: the rows must come from the
+  // service, mapped, and not from a local read — this file leaves the local database
+  // empty precisely so a local read could not masquerade as this row. (The unfiltered
+  // read on purpose: a type-filtered list reads the service's published contract
+  // first, which this stand-in does not serve; the filter behaviour is proven against
+  // the real contract in src/db/owners.test.ts.)
+  test("listOwners reads the configured API store", async () => {
+    const restore = DATABASE_PATH_SETTINGS.map((key) => [key, process.env[key]] as const);
+    for (const [key] of restore) delete process.env[key];
+    try {
+      expect((await listOwners()).map((o) => o.id)).toEqual(["o1"]);
+      expect((await listOwners())[0]!.type).toBe("agent");
+    } finally {
+      for (const [key, value] of restore) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("listProviderSummaries returns selfHosted rows without secrets", () => {

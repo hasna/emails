@@ -1,7 +1,7 @@
 // End-to-end proof that the resource repositories route WRITES to the selfHosted /v1
 // API in selfHosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see self-hosted-resource-routing.test.ts);
-// this covers createOwner, plus
+// what remains here is
 // send-key minting (which POSTs to the bespoke /v1/send-keys/mint endpoint — the
 // token/hash are server-minted and only a hash-free key summary reaches the client).
 //
@@ -12,7 +12,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
-import { createOwner, listOwners } from "./owners.js";
 import { createSendKey } from "./send-keys.js";
 import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 
@@ -160,14 +159,14 @@ afterEach(() => {
 });
 
 describe("resource repos route writes to selfHosted in selfHosted mode", () => {
-  test("createOwner POSTs to /v1/owners and appears in selfHosted listOwners", () => {
-    const o = createOwner({ type: "agent", name: "Writer Agent" });
-    expect(o.id).toStartWith("o");
-    expect(o.name).toBe("Writer Agent");
-    // The registered owner is now visible via the selfHosted read path (not just a
-    // local id that never reaches the selfHosted — the split-brain symptom).
-    expect(listOwners().some((x) => x.id === o.id)).toBe(true);
-  });
+  // The owners case that used to sit here proved the OLD routing bridge sent that
+  // family's createOwner to `/v1` when the deployment word said so. The family has
+  // collapsed onto the store seam and consults no such word, so the premise is gone —
+  // and the questions that survive it (does a create land on the API dataset, does a
+  // name lookup find it past one clamped page, does the duplicate-external_id guard
+  // see the whole table?) are asked by src/db/owners.test.ts against a REAL HTTP
+  // store over the store-seam `/v1` fixture, which also validates writes against the
+  // service's own published contract, something this hand-rolled stub cannot do.
 
   // The groups case that used to sit here proved the OLD routing bridge sent that
   // family's writes to `/v1` when the deployment word said so. The family has collapsed
@@ -204,15 +203,18 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
   // published contract, something this hand-rolled stub cannot do.
 
   test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", async () => {
-    const owner = createOwner({ type: "agent", name: "Key Owner" });
+    // A literal owner id: the stub's mint route binds whatever owner_id it is sent,
+    // and registering one through the collapsed owners family would need the
+    // published write contract this hand-rolled stub does not serve.
+    const ownerId = "o-key-owner";
     // ASYNC AND RESOLVED FROM STORAGE CONFIGURATION. This family has collapsed onto the
     // store seam, so it no longer consults the deployment word at all — it reaches this
     // same stub because the API settings above name it, which is a STRICTLY STRONGER
     // statement than the one this case used to make.
-    const { token, key } = await createSendKey(owner.id, "ci");
+    const { token, key } = await createSendKey(ownerId, "ci");
     // The token is server-minted (it lands on the API, not on a local island).
     expect(token).toStartWith("esk_");
-    expect(key.owner_id).toBe(owner.id);
+    expect(key.owner_id).toBe(ownerId);
     expect(key.label).toBe("ci");
     // The client never receives the secret hash — the field is ABSENT now, where it used
     // to be present holding a fabricated `""` that a caller could compare against.
