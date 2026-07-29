@@ -131,6 +131,8 @@ jobs:
             if (pkg.publishConfig?.registry !== "https://registry.npmjs.org") throw new Error("npm registry must be the public registry");
             if (pkg.repository?.url !== "git+https://github.com/hasna/emails.git") throw new Error("repository provenance must be hasna/emails");
           '
+      - name: Require immutable gates on future release and deployment workflows
+        run: bun run deployment:policy
       - name: Verify generated SDK is committed
         run: |
           bun run scripts/generate-selfhost-sdk.ts
