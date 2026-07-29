@@ -702,6 +702,22 @@ describe("runDiagnostics parity", () => {
     expect(named(checks, "Addresses")).toMatchObject({ status: "warn", message: "0 sender address(es)" });
   });
 
+  it("warns that unverified senders are blocked and names the discovery command", async () => {
+    const store = realStore();
+    await seedProviders(1);
+    const ready = await store.addresses.createAddress({ email: "ready@example.test", verified: true });
+    const blocked = await store.addresses.createAddress({ email: "blocked@example.test", verified: false });
+    if (!ready.ok) throw new Error(ready.message);
+    if (!blocked.ok) throw new Error(blocked.message);
+
+    const check = named(await runDiagnostics({ _store: store }), "Addresses");
+
+    expect(check.status).toBe("warn");
+    expect(check.message).toContain("1/2 sender address(es) verified");
+    expect(check.message).toContain("sender_unverified");
+    expect(check.message).toContain("emails address list --unverified");
+  });
+
   it("counts a suppressed contact as a warning", async () => {
     const checks = await runDiagnostics({
       _store: storeServing("contacts", [
