@@ -430,9 +430,9 @@ describe("emails batch keeps its (already correct) skip-unless-force shape", () 
     resetDatabase();
     try {
       const { batchSend } = await import("../../lib/batch.js");
-      const { createTemplate } = await import("../../db/templates.local.js");
+      const { createTemplate } = await import("../../db/templates.js");
       const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-      createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" });
+      await createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" }, getDatabase());
       await suppressContact("blocked@ext.com", getDatabase());
 
       const sent: string[] = [];

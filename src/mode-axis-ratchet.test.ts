@@ -1229,15 +1229,64 @@ const root = join(import.meta.dir, "..");
  * that branch deleted two arm modules and added nothing; this one deletes two and adds
  * its membership-ledger extension module. Re-measured AFTER this paragraph was written,
  * because this file sits inside the corpus it scans.
+ *
+ * THE TEMPLATES COLLAPSE moved the same seven counters, tightened here from the
+ * f3035cf numbers to EXACTLY what the tree now measures. The family's three modules
+ * contributed 1/1/1/7/5/11/2 on the seven that move — measured per file on the base
+ * tree, and the base minus exactly those seven deltas equals the merged measurement
+ * with no cross-term:
+ *
+ *   twoArmFamilies               18 -> 17   the family's two arm modules are deleted;
+ *   remoteArmModules             18 -> 17   its facade is now the one implementation
+ *                                           over the seam.
+ *   routedFacadeDefinitions      10 -> 9    the facade's dispatch helper is gone,
+ *   routedCallExpressions       151 -> 144  and with it the seven dispatched exports.
+ *   selfHostedResourceBranches   20 -> 15   the deleted SQLite arm asked the legacy
+ *                                           bridge whether to route to `/v1` in four of
+ *                                           its five store operations plus the listing
+ *                                           summariser — but never in
+ *                                           `getTemplateByName`, which is the split the
+ *                                           collapsed module's header records: one
+ *                                           configuration could create a template on a
+ *                                           server while the batch send's name
+ *                                           resolution consulted a local island that
+ *                                           had never heard of it.
+ *   selfHostedResourceReferences 80 -> 69   those five, plus the six calls the deleted
+ *                                           second arm made through the generic
+ *                                           resource helper — every name lookup among
+ *                                           them answering out of a single clamped
+ *                                           page, which is why a template past row 500
+ *                                           was "not found" to show, remove, and every
+ *                                           send-flow resolution that names one.
+ *   isSelfHostedModeReferences   42 -> 40   the deleted facade imported the client-side
+ *                                           deployment predicate and called it once.
+ *
+ * FOUR DO NOT MOVE, for the reasons the blocks above already record: this dispatcher
+ * went through the predicate rather than the process-wide read (55), and neither arm
+ * resolved or parsed the setting (65, 16). The env counter stayed at 219 under the same
+ * discipline as every collapse before it: the rebuilt suite names its storage through
+ * the resolution's own exported constants and proves the clamp through the store seam,
+ * with a one-page control asserting a 1000-row request really answers 500 of 521.
+ *
+ * The collapsed family and its rewritten suite contribute ZERO to every counter here,
+ * verified per file. Among the files this change EDITS, only the send command and the
+ * two suites that pre-date it carry counts at all, and their diffs against base contain
+ * none of the counted tokens.
+ *
+ * Corpus of this change: 649 tracked, 648 scanned, ~10.22M characters — both floors
+ * cleared with room. TWO fewer tracked files than the base: two arm modules deleted,
+ * nothing added — the seam already declares this family's repository, so no extension
+ * module was needed. Re-measured AFTER this paragraph was written, because this file
+ * sits inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 18,
-  remoteArmModules: 18,
-  routedFacadeDefinitions: 10,
-  routedCallExpressions: 151,
-  selfHostedResourceBranches: 20,
-  selfHostedResourceReferences: 80,
-  isSelfHostedModeReferences: 42,
+  twoArmFamilies: 17,
+  remoteArmModules: 17,
+  routedFacadeDefinitions: 9,
+  routedCallExpressions: 144,
+  selfHostedResourceBranches: 15,
+  selfHostedResourceReferences: 69,
+  isSelfHostedModeReferences: 40,
   getEmailsModeReferences: 55,
   resolveEmailsModeReferences: 65,
   normalizeEmailsModeReferences: 16,

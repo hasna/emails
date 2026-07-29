@@ -227,7 +227,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         let textBody = !opts.html ? body : undefined;
 
         if (opts.template) {
-          const tpl = getTemplate(opts.template);
+          // Async and resolved from storage configuration; the whole-library name
+          // lookup means a template past one API page still resolves here.
+          const tpl = await getTemplate(opts.template);
           if (!tpl) handleError(new Error(`Template not found: ${opts.template}`));
           const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
           subject = renderTemplate(tpl!.subject_template, vars);

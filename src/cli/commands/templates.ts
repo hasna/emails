@@ -19,7 +19,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--text <text>", "Inline text template")
     .option("--html-file <path>", "Read HTML template from file")
     .option("--text-file <path>", "Read text template from file")
-    .action((name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
+    .action(async (name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
       try {
         let htmlTemplate = opts.html;
         let textTemplate = opts.text;
@@ -31,7 +31,9 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           textTemplate = readFileSync(opts.textFile, "utf-8");
         }
 
-        const template = createTemplate({
+        // The collapsed templates family is async and resolves its store from
+        // storage configuration; a duplicate name is the store's own refusal.
+        const template = await createTemplate({
           name,
           subject_template: opts.subject,
           html_template: htmlTemplate,
@@ -49,10 +51,13 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--limit <n>", "Maximum templates to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of templates to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const templates = listTemplateSummaries(page);
+        // Enumerates the whole library and windows locally, so the page shown is the
+        // page that exists — a listing it could not finish is a refusal, not a short
+        // answer.
+        const templates = await listTemplateSummaries(page);
         if (templates.length === 0) {
           output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
           return;
@@ -81,9 +86,9 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("show <name>")
     .description("Show template details")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const template = getTemplate(name);
+        const template = await getTemplate(name);
         if (!template) handleError(new Error(`Template not found: ${name}`));
         console.log(chalk.bold(`\nTemplate: ${template!.name}`));
         console.log(`  ID:      ${template!.id}`);
@@ -104,9 +109,9 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("remove <name>")
     .description("Remove a template")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const deleted = deleteTemplate(name);
+        const deleted = await deleteTemplate(name);
         if (!deleted) handleError(new Error(`Template not found: ${name}`));
         console.log(chalk.green(`✓ Template removed: ${name}`));
       } catch (e) {
@@ -115,12 +120,19 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     });
 
   // ─── PREVIEW ─────────────────────────────────────────────────────────────────
-  program.command("preview <template-name>").description("Preview a template with sample variables")
+  // The description is EXACT about placeholders: a `{{var}}` with no value in
+  // `--vars` stays raw in the preview rather than being replaced with an invented
+  // sample. That passthrough is pinned contract (src/db/templates.ts, divergence 6) —
+  // the raw placeholder shows the operator which variables the template still needs,
+  // where a fabricated sample would hide them. The command used to claim "sample
+  // variables" it never supplied; the claim was fixed, not the behaviour.
+  program.command("preview <template-name>")
+    .description("Preview a template, rendering {{var}} placeholders from --vars (a placeholder without a value stays as {{var}})")
     .option("--vars <json>", "Template variables as JSON string")
     .option("--open", "Open rendered HTML in browser")
-    .action((templateName: string, opts: { vars?: string; open?: boolean }) => {
+    .action(async (templateName: string, opts: { vars?: string; open?: boolean }) => {
       try {
-        const template = getTemplate(templateName);
+        const template = await getTemplate(templateName);
         if (!template) handleError(new Error(`Template not found: ${templateName}`));
         const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
 

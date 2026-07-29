@@ -2,10 +2,14 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import type { Database } from "../../db/database.js";
 import type { Provider, SendEmailOptions } from "../../types/index.js";
-import type { Template } from "../../db/templates.local.js";
+import type { Template } from "../../db/templates.js";
 import { listScheduledEmailSummaries, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.js";
 import { getActiveProvider, getLatestActiveProviderId, getProvider } from "../../db/providers.local.js";
-import { getTemplate, renderTemplate } from "../../db/templates.local.js";
+// The templates family reads the store seam now: async, and the trailing `cache.db`
+// argument means what it says — a SQLite store bound to that exact handle — so this
+// LOCAL scheduler keeps rendering from the local database whatever storage the
+// environment resolves to, exactly as it always has.
+import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
@@ -77,9 +81,9 @@ function getCachedDefaultProvider(cache: SchedulerTickCache): Provider | null {
   return cache.defaultProvider;
 }
 
-function getCachedTemplate(cache: SchedulerTickCache, name: string): Template | null {
+async function getCachedTemplate(cache: SchedulerTickCache, name: string): Promise<Template | null> {
   if (!cache.templates.has(name)) {
-    cache.templates.set(name, getTemplate(name, cache.db));
+    cache.templates.set(name, await getTemplate(name, cache.db));
   }
   return cache.templates.get(name) ?? null;
 }
@@ -167,7 +171,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
         continue;
       }
 
-      const template = getCachedTemplate(cache, step.template_name);
+      const template = await getCachedTemplate(cache, step.template_name);
       if (!template) {
         log(chalk.yellow(`⚠ Template not found for sequence step: ${step.template_name}`));
         await advanceEnrollment(enrollment.id, cache.db);
