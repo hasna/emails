@@ -7,13 +7,10 @@ describe("inbox sync-s3 configuration hint", () => {
   it("points a missing bucket at configuration mechanisms that exist", async () => {
     const tempHome = mkdtempSync(join(tmpdir(), "emails-inbox-sync-s3-home-"));
     const env = {
-      ...process.env,
       HOME: tempHome,
-      EMAILS_MODE: "local",
       EMAILS_DB_PATH: ":memory:",
       NO_COLOR: "1",
     };
-    delete env.EMAILS_INBOUND_S3_BUCKET;
 
     try {
       const child = Bun.spawn({
