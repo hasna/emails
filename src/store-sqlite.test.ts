@@ -174,6 +174,43 @@ describe("SqliteEmailStore conformance", () => {
     }
   });
 
+  it("coerces boolean and integer equality filters from their wire strings", async () => {
+    const subject = store();
+    const suppressed = await subject.contacts.create({
+      email: `suppressed-${uuid()}@example.test`,
+      suppressed: true,
+    });
+    const active = await subject.contacts.create({
+      email: `active-${uuid()}@example.test`,
+      suppressed: false,
+    });
+    expect(suppressed.ok && active.ok).toBe(true);
+    if (!suppressed.ok || !active.ok) return;
+
+    for (const [filter, expected] of [
+      ["true", suppressed.value["id"]],
+      ["1", suppressed.value["id"]],
+      ["false", active.value["id"]],
+      ["0", active.value["id"]],
+    ] as const) {
+      const listed = await subject.contacts.list({ filters: { suppressed: filter } });
+      expect(listed.ok).toBe(true);
+      if (listed.ok) expect(listed.value.map((row) => row["id"]), filter).toEqual([expected]);
+    }
+
+    const warming = await subject.warming.create({
+      domain: `${uuid()}.example.test`,
+      target_daily_volume: 50,
+      start_date: "2026-01-01",
+      status: "active",
+    });
+    expect(warming.ok).toBe(true);
+    if (!warming.ok) return;
+    const listed = await subject.warming.list({ filters: { target_daily_volume: "50.9" } });
+    expect(listed.ok).toBe(true);
+    if (listed.ok) expect(listed.value.map((row) => row["id"])).toEqual([warming.value["id"]]);
+  });
+
   it("round-trips a row through the family whose table has no single-column key", async () => {
     // `webhook_receipts` is keyed on (provider, event_id), so the generic path
     // addresses it by rowid. That is the one non-derivable choice in resources.ts and

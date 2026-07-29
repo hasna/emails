@@ -1249,7 +1249,7 @@ function buildConformanceCases(): ConformanceCase[] {
       async exercise(store: EmailStore): Promise<unknown> {
         const email = `contact-${token("c")}@example.test`;
         const created = asObject(
-          await must(store.contacts.create({ email, name: "Original" }), "contacts.create"),
+          await must(store.contacts.create({ email, name: "Original", suppressed: true }), "contacts.create"),
           "created contact",
         );
         const id = String(created["id"]);
@@ -1257,10 +1257,13 @@ function buildConformanceCases(): ConformanceCase[] {
         same(read["email"], email, "the created email reads back");
         same(read["name"], "Original", "the created name reads back");
         const filtered = asArray(
-          await must(store.contacts.list({ limit: 500, filters: { email } }), "contacts.list"),
+          await must(
+            store.contacts.list({ limit: 500, filters: { email, suppressed: "true" } }),
+            "contacts.list",
+          ),
           "filtered contacts",
         );
-        same(filtered.length, 1, "an equality filter finds exactly the created row");
+        same(filtered.length, 1, "text and typed boolean equality filters find exactly the created row");
         // An unknown column is REFUSED rather than silently ignored: a dropped field is
         // a write the caller believes happened.
         refusal(await store.contacts.create({ nonsense_column: 1 }), "invalid_input", 422, "an unknown column");

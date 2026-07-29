@@ -31,10 +31,10 @@
 //     and every non-empty query-param string — including "false" and "0" — is truthy:
 //     a pushed-down `suppressed=false` answers the SUPPRESSED rows, and the client-side
 //     re-check then filters all of them out and presents an empty listing as the
-//     installation's active contacts. The SQLite store compares SQL equality against an
-//     INTEGER column, where "true" matches nothing. No single spelling is right on both
-//     sides, so `listContacts` enumerates everything and filters here, where the
-//     comparison is exact.
+//     installation's active contacts. The SQLite store accepts conventional boolean
+//     spellings through its schema-typed equality filter, but the service still has no
+//     reliable spelling for false. So `listContacts` enumerates everything and filters
+//     here, where the comparison is exact.
 //  3. WHO ENFORCES CANONICAL MATCHING. The local arm compared `lower(email)` on both
 //     sides in SQL; the second arm canonicalized in the client but only over the rows
 //     its one clamped page happened to hold. The seam's generic path has no

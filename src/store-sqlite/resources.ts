@@ -107,12 +107,15 @@ function redactedFor(table: string): readonly string[] {
 
 interface ColumnInfo {
   name: string;
+  declaredType: string;
   primaryKeyPosition: number;
 }
 
 interface TableShape {
   /** Every column the table physically has. */
   columns: string[];
+  /** SQLite declared type for each physical column, from the same schema query. */
+  columnTypes: ReadonlyMap<string, string>;
   /**
    * The column rows are addressed by.
    *
@@ -135,6 +138,7 @@ function describeTable(db: Database, table: string): TableShape {
   const info = db.query(`PRAGMA table_info(${table})`).all() as Array<Record<string, unknown>>;
   const columns: ColumnInfo[] = info.map((row) => ({
     name: String(row["name"]),
+    declaredType: String(row["type"] ?? ""),
     primaryKeyPosition: Number(row["pk"] ?? 0),
   }));
   if (columns.length === 0) throw new Error(`table ${table} has no columns; the schema is not migrated`);
@@ -149,6 +153,7 @@ function describeTable(db: Database, table: string): TableShape {
   const timeOrder = hasUpdatedAt ? "updated_at DESC" : hasCreatedAt ? "created_at DESC" : null;
   return {
     columns: names,
+    columnTypes: new Map(columns.map((column) => [column.name, column.declaredType])),
     idColumn,
     idIsRowid: single === null,
     mintsId: single === "id",
@@ -165,6 +170,32 @@ function bindable(value: unknown): SQLQueryBindings {
   if (typeof value === "number" || typeof value === "string") return value;
   if (value instanceof Date) return value.toISOString();
   return JSON.stringify(value);
+}
+
+/**
+ * Interpret equality-filter strings using the column's declared SQLite type.
+ *
+ * Filter values cross the store seam as strings. Letting bun:sqlite bind those
+ * strings unchanged works for TEXT, but not for boolean spellings against an
+ * INTEGER column, and it differs from the typed self-hosted resource encoder for
+ * fractional integer and non-finite numeric input. Keep this schema-driven: the
+ * declared type comes from the same PRAGMA that supplies the trusted column name.
+ */
+function filterBinding(declaredType: string, value: unknown): SQLQueryBindings {
+  if (typeof value !== "string") return bindable(value);
+  const type = declaredType.toUpperCase();
+  if (type.includes("INT")) {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return 1;
+    if (normalized === "false") return 0;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.trunc(numeric) : 0;
+  }
+  if (type.includes("REAL") || type.includes("FLOA") || type.includes("DOUB") || type.includes("NUM")) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+  return value;
 }
 
 /** Reject unknown keys instead of dropping them; a dropped field is a silent lie. */
@@ -235,7 +266,7 @@ export function createResourceRepository(db: Database, table: string): ResourceR
               ORDER BY ${shape.orderBy} LIMIT ? OFFSET ?`,
           )
           .all(
-            ...keys.map((key) => bindable(filters[key])),
+            ...keys.map((key) => filterBinding(shape.columnTypes.get(key) ?? "", filters[key])),
             cappedLimit(opts?.limit, DEFAULT_PAGE, MAX_PAGE),
             safeOffset(opts?.offset),
           ) as ResourceRow[];
