@@ -147,7 +147,10 @@ export async function sendWithFailover(
         // `provider_message_id` can be legitimately NULL on a ledger row; an empty
         // messageId is "the first send recorded no provider id", never a fabricated one.
         messageId: existing.provider_message_id ?? "",
-        providerId: existing.provider_id,
+        // The row type declares `provider_id` nullable even though every write path
+        // sets it; the caller's primary id is the only honest stand-in for a row
+        // that somehow lacks one.
+        providerId: existing.provider_id ?? primaryProviderId,
         usedFailover: false,
       };
     }
