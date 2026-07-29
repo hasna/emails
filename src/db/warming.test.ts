@@ -262,6 +262,14 @@ describe.each(STORE_VARIANTS)("warming CRUD (%s)", (_label, variant) => {
       "warm-2.example.com",
       "warm-1.example.com",
     ]);
+    // And a WINDOWED read after the jump: a window cut from the store's raw order
+    // and sorted afterwards would present [warm-3, warm-1] here — the divergence is
+    // only visible to a page, which is why the no-window assertion above cannot
+    // carry this alone (a mutation run proved it: the window-before-sort mutant
+    // survived every unwindowed case).
+    expect(
+      (await listWarmingSchedules(undefined, { limit: 2 }, store)).map((schedule) => schedule.domain),
+    ).toEqual(["warm-3.example.com", "warm-2.example.com"]);
   });
 
   it("transitions status through the lifecycle and refreshes updated_at", async () => {
@@ -534,8 +542,24 @@ describe("defences a well-behaved fixture cannot exercise", () => {
     expect(schedule?.start_date).toBe("");
     expect(schedule?.status).toBe("active");
     // But the raw-text status filter does NOT match the coerced value — exactly what
-    // the server's own pushed-down filter answers for this row.
+    // the server's own pushed-down filter answers for this row. Asserted through a
+    // filter-IGNORING wrapper, because a store that honours the pushed-down filter
+    // hides the client-side comparison entirely (a mutation run proved it: the
+    // compare-the-coerced-value mutant survived the honest stub).
     expect(await listWarmingSchedules("active", store)).toEqual([]);
+    const raw = store.warming;
+    const filterIgnoring = {
+      ...store,
+      warming: {
+        ...raw,
+        list: (opts?: { limit?: number; offset?: number }) =>
+          raw.list({
+            ...(opts?.limit === undefined ? {} : { limit: opts.limit }),
+            ...(opts?.offset === undefined ? {} : { offset: opts.offset }),
+          }),
+      },
+    } as unknown as EmailStore;
+    expect(await listWarmingSchedules("active", filterIgnoring)).toEqual([]);
   });
 
   it("faults a status outside the declared set, naming the row and the value", async () => {
@@ -566,6 +590,53 @@ describe("defences a well-behaved fixture cannot exercise", () => {
     await expect(updateWarmingStatus("unaddressable.example.com", "paused", store)).rejects.toThrow(
       /no id and no rowid/,
     );
+  });
+
+  it("answers false when every found row vanished before the remove, as the deleted arms' change count did", async () => {
+    const { store } = stubStore([stubRow({ id: "warm-1", domain: "vanishing.example.com" })]);
+    const raw = store.warming;
+    const vanishing = {
+      ...store,
+      warming: { ...raw, remove: async () => ({ ok: true, value: false }) },
+    } as unknown as EmailStore;
+    // The row was FOUND, but the store's own remove answered "no such row" — the
+    // honest aggregate is false, not "I found something earlier".
+    expect(await deleteWarmingSchedule("vanishing.example.com", vanishing)).toBe(false);
+  });
+
+  it("declares the born status explicitly rather than leaning on a column default", async () => {
+    // Both shipped stores default the column, so only a store WITHOUT the default
+    // can see the difference: a create that stopped sending `status` would leave a
+    // row the raw-text `active` filter cannot match. The stub stamps the NOT NULL
+    // timestamps like any real store; it just declares no status default.
+    const { store } = stubStore([]);
+    const raw = store.warming;
+    const stamping = {
+      ...store,
+      warming: {
+        ...raw,
+        create: (input: ResourceInput) =>
+          raw.create({ created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:00.000Z", ...input }),
+      },
+    } as unknown as EmailStore;
+    await createWarmingSchedule({ domain: "born.example.com", target_daily_volume: 100 }, stamping);
+    expect((await listWarmingSchedules("active", stamping)).map((schedule) => schedule.domain)).toEqual([
+      "born.example.com",
+    ]);
+  });
+
+  it("breaks a created_at tie by row identity, so a window is the same window everywhere", async () => {
+    // Two rows tied on created_at, handed back in ASCENDING id order — the reverse
+    // of the tiebreaker's answer. A comparator without the identity term leaves a
+    // tied pair in whatever order the store enumerated, and a one-row window then
+    // presents a different schedule per store.
+    const { store } = stubStore([
+      stubRow({ id: "warm-alpha", domain: "alpha.example.com" }),
+      stubRow({ id: "warm-omega", domain: "omega.example.com" }),
+    ]);
+    expect((await listWarmingSchedules(undefined, { limit: 1 }, store)).map((schedule) => schedule.id)).toEqual([
+      "warm-omega",
+    ]);
   });
 
   it("resolves duplicated domains deterministically: reads answer the newest, writes touch every row", async () => {
