@@ -1199,19 +1199,49 @@ const root = join(import.meta.dir, "..");
  * real `git ls-files` corpus (652 tracked / 651 scanned / 10,146,546 characters), and
  * it measures exactly the numbers pinned below — verified rather than assumed, because
  * two earlier rebases in this programme are the proof that a clean apply can be wrong.
+ *
+ * THE GROUPS COLLAPSE REBASED ACROSS THE CONTACTS COLLAPSE, AND THE COMPOSING-REDUCTIONS
+ * HAZARD FIRED FOR THE FIFTH TIME — this block's own paragraphs predicted the shape
+ * exactly. Each branch had pinned truthfully for ITS OWN tree (the contacts collapse
+ * 19/19/11/163/25/96/44 on the seven that move, this one 19/19/11/165/27/94/44), and
+ * NEITHER set is right for the merged tree, because the two collapses finish DIFFERENT
+ * families and disjoint reductions compose. Git flagged exactly THREE ceiling lines —
+ * the dispatch-call, branch and reference counters, where the two sides' numbers differ
+ * — and let EIGHT merge in silence, including the structural pair and the facade
+ * counter, where both sides agreed on 19/19/11 and the merged tree measures 18/18/10.
+ * Taking either side, or a per-metric minimum, would have shipped SEVEN counters wide
+ * for THIRTY-SIX units of slack: one each on the two arm counters and the facade
+ * counter, twelve on the dispatch-call counter, five on the branch counter, fourteen on
+ * the reference counter and two on the predicate counter.
+ *
+ * What prevented it is the procedure both collapses already follow: this branch's
+ * eleven were committed as LITERAL ZEROS in their own commit BEFORE the rebase, so the
+ * silently-merged lines could not pass the guard, the merged tree was measured over the
+ * real `git ls-files` corpus, and the numbers below are that measurement. The
+ * composition was then CHECKED rather than admired: base 20/20/12/177/32/110/46, minus
+ * the contacts family's measured reductions, minus this family's measured reductions,
+ * equals 18/18/10/151/20/80/42 on the seven that move — exactly what the merged tree
+ * measures, with no cross-term. The four parser/env counters hold at 55/65/16/219 on
+ * both sides and on the merged tree.
+ *
+ * Corpus of the merged tree: 651 tracked, 650 scanned, ~10.20M characters — both floors
+ * cleared with room. One fewer tracked file than the contacts collapse's own corpus:
+ * that branch deleted two arm modules and added nothing; this one deletes two and adds
+ * its membership-ledger extension module. Re-measured AFTER this paragraph was written,
+ * because this file sits inside the corpus it scans.
  */
 const CEILINGS: Record<string, number> = {
-  twoArmFamilies: 0,
-  remoteArmModules: 0,
-  routedFacadeDefinitions: 0,
-  routedCallExpressions: 0,
-  selfHostedResourceBranches: 0,
-  selfHostedResourceReferences: 0,
-  isSelfHostedModeReferences: 0,
-  getEmailsModeReferences: 0,
-  resolveEmailsModeReferences: 0,
-  normalizeEmailsModeReferences: 0,
-  emailsModeEnvReferences: 0,
+  twoArmFamilies: 18,
+  remoteArmModules: 18,
+  routedFacadeDefinitions: 10,
+  routedCallExpressions: 151,
+  selfHostedResourceBranches: 20,
+  selfHostedResourceReferences: 80,
+  isSelfHostedModeReferences: 42,
+  getEmailsModeReferences: 55,
+  resolveEmailsModeReferences: 65,
+  normalizeEmailsModeReferences: 16,
+  emailsModeEnvReferences: 219,
 };
 
 // 649 files are tracked and 648 scanned today, totalling ~9.7M characters. (The figures in
