@@ -1046,6 +1046,51 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** List this tenant's IdP-principal federation grants (revoked included); tenant operator required */
+    async listIdpPrincipals(init?: RequestInit): Promise<{ "idp_principals": Array<{ "sub": string; "tenant_id": string; "idp_tid": string | null; "principal_type": "user" | "service"; "note"?: string | null; "created_at"?: string; "revoked_at": string | null }> }> {
+      return this.request("GET", `/v1/idp-principals`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Grant an IdP principal (sub) access to the caller's tenant; a re-grant never un-revokes */
+    async grantIdpPrincipal(body: { "sub": string; "idp_tid"?: string | null; "principal_type"?: "user" | "service"; "note"?: string | null }, init?: RequestInit): Promise<{ "grant": { "sub": string; "tenant_id": string; "idp_tid": string | null; "principal_type": "user" | "service"; "note"?: string | null; "created_at"?: string; "revoked_at": string | null }; "warning"?: string }> {
+      return this.request("POST", `/v1/idp-principals`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Throw the emails-side kill switch on a federation grant; tenant operator required */
+    async revokeIdpPrincipal(sub: string, init?: RequestInit): Promise<{ "revoked": true; "sub": string }> {
+      return this.request("DELETE", `/v1/idp-principals/${encodeURIComponent(String(sub))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Deliberately lift the kill switch on one federation grant; tenant operator required */
+    async restoreIdpPrincipal(sub: string, init?: RequestInit): Promise<{ "restored": true; "sub": string }> {
+      return this.request("POST", `/v1/idp-principals/${encodeURIComponent(String(sub))}/restore`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Compatibility verb for revoking a federation grant */
+    async revokeIdpPrincipalByPost(sub: string, init?: RequestInit): Promise<{ "revoked": true; "sub": string }> {
+      return this.request("POST", `/v1/idp-principals/${encodeURIComponent(String(sub))}/revoke`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Accept an invitation and create a tenant-bound session */
     async acceptInvite(body: { "token": string; "password"?: string | null; "name"?: string | null }, init?: RequestInit): Promise<{ "session_token": string; "expires_at": string; "user": User; "tenant": Tenant | null; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/invites/accept`, {
