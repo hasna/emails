@@ -10,7 +10,7 @@ import type { Subprocess } from "bun";
 import { SelfHostedHttpError, resetSelfHostedConfigCache } from "./self-hosted-store.js";
 import { DATABASE_PATH_SETTINGS, StoreConfigurationError } from "../store-resolution.js";
 import { listContacts } from "./contacts.js";
-import { listEvents } from "./events.js";
+import { listDomains } from "./domains.js";
 import { listGroups } from "./groups.js";
 import { listOwners } from "./owners.js";
 import { listProviderSummaries } from "./providers.js";
@@ -236,10 +236,15 @@ describe("resource repos route reads to selfHosted in selfHosted mode", () => {
   // `/v1` service because STORAGE CONFIGURATION named an Emails API — not because a
   // mode word chose an arm. Its reads are proven against a REAL HTTP store by
   // src/db/templates.test.ts. This case therefore probes a family still ON the old
-  // routing: the stand-in service serves no `/v1/events` route, and a mode-routed read
-  // must surface that as the transport's own error — never fall back to the empty
-  // local island and answer [].
+  // routing. It sat on the EVENTS family until that family collapsed too (its reads
+  // are now proven against a real HTTP store by src/db/events.test.ts), so the probe
+  // moved to DOMAINS, which still dispatches on the mode word: the stand-in service
+  // serves no `/v1/domains` route, and a mode-routed read must surface that as the
+  // transport's own error — never fall back to the empty local island and answer [].
+  // When the domains family collapses in its turn, move this probe to a family that
+  // still routes on the mode word (inbound, addresses, providers as of this change),
+  // or retire it together with the last routed facade.
   test("missing endpoint FAILS CLOSED (no silent local read)", () => {
-    expect(() => listEvents()).toThrow(SelfHostedHttpError);
+    expect(() => listDomains()).toThrow(SelfHostedHttpError);
   });
 });

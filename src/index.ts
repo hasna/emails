@@ -102,6 +102,16 @@ export {
   deleteEmail,
 } from "./db/emails.js";
 
+// ALL SIX OF THESE ARE ASYNC NOW, and this is a published entry point, so the break is
+// stated here rather than only in the commit that caused it. The events family reads and
+// writes through the store seam and every seam operation is a promise. The dangerous
+// consumer is one that does not await: `listEvents(...).length` on a promise is
+// `undefined` and `if (getEvent(id))` is always truthy — the fabricated-value failure
+// mode this refactor exists to remove, so it must not go unannounced. Two behavioural
+// changes ride along, both toward honesty: an unfiltered listing REFUSES (throws) when
+// the table cannot be fully enumerated instead of returning a short set that looks
+// complete, and `createEvent` returns the row the store actually holds instead of an
+// echo of its input (see src/db/events.ts for both).
 export {
   createEvent,
   getEvent,

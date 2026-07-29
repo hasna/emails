@@ -4,7 +4,7 @@ import { suppressContact, upsertContact } from "../../db/contacts.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
-import { createEvent } from "../../db/events.local.js";
+import { createEvent } from "../../db/events.js";
 import { addMember, createGroup } from "../../db/groups.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
@@ -208,13 +208,13 @@ describe("emails serve REST parity smoke", () => {
       subject: "REST smoke",
       text: "hello",
     }, "rest-msg");
-    createEvent({
+    await createEvent({
       email_id: email.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "user@example.com",
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
+    }, getDatabase());
     const inboundEmail = storeInboundEmail({
       provider_id: provider.id,
       message_id: "<inbound@example.com>",
@@ -380,20 +380,20 @@ describe("emails serve REST parity smoke", () => {
     });
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", older.id]);
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-02-01T00:00:00.000Z", newer.id]);
-    const oldEvent = createEvent({
+    const oldEvent = await createEvent({
       email_id: older.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "older@example.com",
       occurred_at: "2026-01-01T00:00:00.000Z",
-    });
-    const newEvent = createEvent({
+    }, getDatabase());
+    const newEvent = await createEvent({
       email_id: newer.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "newer@example.com",
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
+    }, getDatabase());
 
     // Paged WITHOUT a provider filter, which the sent ledger can no longer answer — see the
     // note on `/api/emails?provider_id=` above. The pagination is what this case is about and
@@ -408,25 +408,25 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates REST event history with offset and until filters", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const oldest = createEvent({
+    const oldest = await createEvent({
       provider_id: provider.id,
       type: "delivered",
       recipient: "oldest@example.com",
       occurred_at: "2026-01-01T00:00:00.000Z",
-    });
-    const middle = createEvent({
+    }, getDatabase());
+    const middle = await createEvent({
       provider_id: provider.id,
       type: "opened",
       recipient: "middle@example.com",
       metadata: { user_agent: "REST hidden event metadata ".repeat(100) },
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
-    const newest = createEvent({
+    }, getDatabase());
+    const newest = await createEvent({
       provider_id: provider.id,
       type: "clicked",
       recipient: "newest@example.com",
       occurred_at: "2026-03-01T00:00:00.000Z",
-    });
+    }, getDatabase());
 
     const page = await json<Array<Record<string, unknown>>>(`/api/events?provider_id=${provider.id}&limit=1&offset=1`);
     expect(page.map((item) => item.id)).toEqual([middle.id]);

@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
 import { createSentEmailLedger } from "./sent-ledger.local.js";
-import { createEvent } from "../db/events.local.js";
+import { createEvent } from "../db/events.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createHttpEmailStore } from "../store-http/index.js";
 import { startV1StoreApi, type V1StoreApi } from "../test-support/v1-store-api.js";
@@ -102,7 +102,7 @@ async function seed(): Promise<{ alpha: string; beta: string }> {
     [beta, "bounced", 90 * DAY],
   ];
   for (const [provider, type, age] of events) {
-    createEvent({ provider_id: provider, type, recipient: "r@y.test", occurred_at: isoAgo(age) }, db);
+    await createEvent({ provider_id: provider, type, recipient: "r@y.test", occurred_at: isoAgo(age) }, db);
   }
   return { alpha, beta };
 }

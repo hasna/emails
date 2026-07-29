@@ -448,9 +448,9 @@ export function createWebhookServer(
       try {
         const [{ getDatabase }, { upsertEventWithResult }] = await Promise.all([
           import("../db/database.js"),
-          import("../db/events.local.js"),
+          import("../db/events.js"),
         ]);
-        const result = upsertEventWithResult(
+        const result = await upsertEventWithResult(
           {
             provider_id: pId,
             provider_event_id: event.provider_event_id,

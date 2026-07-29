@@ -310,11 +310,11 @@ if (path === "/api/export/events" && method === "GET") {
     const offset = queryInteger(url, "offset", 0, { min: 0 });
     const filters = { provider_id: providerId, since, until, limit, offset };
     if (format === "csv") {
-      return new Response(exportEventsCsv(filters), {
+      return new Response(await exportEventsCsv(filters), {
         headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
-    return new Response(exportEventsJson(filters), {
+    return new Response(await exportEventsJson(filters), {
       headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }

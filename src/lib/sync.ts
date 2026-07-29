@@ -45,17 +45,26 @@
 // upsert). `src/store/` is byte-identical after this change, so those stay here,
 // beside the handle that can answer them.
 //
-// The local-arm imports below (`providers.local`, `events.local`) are the same shape
-// `src/lib/forwarding.ts` uses for the same reason: every one of them takes the
-// explicit `Database` this pipeline threads, and this pipeline is only reachable on an
-// installation whose store IS that database. The contacts family has collapsed onto
-// the store seam; its calls below hand it the same `Database`, which it binds to a
-// SQLite store scoped to exactly these rows.
+// The local-arm import below (`providers.local`) is the same shape
+// `src/lib/forwarding.ts` uses for the same reason: it takes the explicit `Database`
+// this pipeline threads, and this pipeline is only reachable on an installation whose
+// store IS that database. The contacts family has collapsed onto the store seam; its
+// calls below hand it the same `Database`, which it binds to a SQLite store scoped to
+// exactly these rows.
+//
+// THE EVENTS FAMILY HAS COLLAPSED TOO, and its idempotent upsert is now async (it
+// reads and writes through the seam), so this transaction cannot call it: an `await`
+// inside the callback commits the SAVEPOINT around nothing (the header's ruling).
+// This is exactly the outcome the header already names — "the idempotent event upsert
+// keyed on provider + provider_event_id (the generic `create` is not an upsert) …
+// stay[s] here, beside the handle that can answer them" — so the upsert this
+// transaction performs is `insertEventIfNew` below: the deleted SQLite arm's own
+// `INSERT OR IGNORE` riding the same partial unique index, byte-equivalent dedup
+// semantics, scoped to this pipeline.
 
-import { getDatabase, runInTransaction } from "../db/database.js";
+import { getDatabase, runInTransaction, now, uuid } from "../db/database.js";
 import { withExplicitDatabaseRoute } from "../db/database-routing.js";
 import { getProvider, listActiveProviderSummaries } from "../db/providers.local.js";
-import { upsertEventWithResult } from "../db/events.local.js";
 import { incrementBounceCounts, incrementComplaintCounts } from "../db/contacts.js";
 import { getAdapter } from "../providers/index.js";
 import { getLocalStats } from "./stats.js";
@@ -143,6 +152,53 @@ function resolveEmailLinks(providerId: string, remoteEvents: RemoteEvent[], db: 
   }
 
   return links;
+}
+
+/**
+ * The idempotent event insert this pipeline's TRANSACTION performs — synchronous, on
+ * the explicit handle, because the collapsed events family (src/db/events.ts) is
+ * async and an `await` inside `runInTransaction` commits the SAVEPOINT around
+ * nothing. This is the deleted SQLite arm's own upsert, kept byte-equivalent in its
+ * dedup semantics: one `INSERT OR IGNORE` riding the partial unique index
+ * `idx_events_provider_event (provider_id, provider_event_id)`, so a duplicate
+ * delivery is skipped by the SCHEMA and never by a read that could go stale between
+ * batches. An event with no `provider_event_id` has no identity to deduplicate on
+ * and is a plain insert — the same behaviour the deleted arm had.
+ *
+ * Returns whether a row was actually inserted, which is the only thing the loop
+ * below consumes (the pre-computed `existingProviderEventIds` set already answers
+ * "which one was it" for skipped rows).
+ */
+function insertEventIfNew(
+  d: Database,
+  input: {
+    email_id: string | null;
+    provider_id: string;
+    provider_event_id: string | null;
+    type: RemoteEvent["type"];
+    recipient: string | null;
+    metadata: Record<string, unknown>;
+    occurred_at: string;
+  },
+): boolean {
+  const conflictPolicy = input.provider_event_id ? "OR IGNORE " : "";
+  const result = d.run(
+    `INSERT ${conflictPolicy}INTO events
+       (id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      uuid(),
+      input.email_id,
+      input.provider_id,
+      input.provider_event_id,
+      input.type,
+      input.recipient,
+      JSON.stringify(input.metadata),
+      input.occurred_at,
+      now(),
+    ],
+  );
+  return result.changes > 0;
 }
 
 function resolveExistingProviderEventIds(providerId: string, remoteEvents: RemoteEvent[], db: Database): Set<string> {
@@ -305,19 +361,16 @@ export async function syncProvider(providerId: string, db?: Database, adapterOve
 
       const emailLink = remoteEvent.provider_message_id ? emailLinks.get(remoteEvent.provider_message_id) : undefined;
 
-      const upserted = upsertEventWithResult(
-        {
-          email_id: emailLink?.id ?? null,
-          provider_id: providerId,
-          provider_event_id: remoteEvent.provider_event_id,
-          type: remoteEvent.type,
-          recipient: remoteEvent.recipient ?? null,
-          metadata: remoteEvent.metadata ?? {},
-          occurred_at: remoteEvent.occurred_at,
-        },
-        d,
-      );
-      if (!upserted.created) continue;
+      const created = insertEventIfNew(d, {
+        email_id: emailLink?.id ?? null,
+        provider_id: providerId,
+        provider_event_id: remoteEvent.provider_event_id ?? null,
+        type: remoteEvent.type,
+        recipient: remoteEvent.recipient ?? null,
+        metadata: remoteEvent.metadata ?? {},
+        occurred_at: remoteEvent.occurred_at,
+      });
+      if (!created) continue;
       if (remoteEvent.provider_event_id) existingProviderEventIds.add(remoteEvent.provider_event_id);
       inserted++;
 
