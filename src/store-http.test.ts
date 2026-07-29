@@ -226,14 +226,16 @@ describe("HttpEmailStore conformance", () => {
       const answer = (await read()) as { ok: boolean };
       expect(answer.ok, `${family} could not be listed`).toBe(true);
     }
-    // The sequence sub-ledger rides the same generic path over two resources the
-    // service registers beside `sequences`. It is deliberately NOT in the family list
-    // above — `EmailStore` does not declare it (src/store-sequence-subledger.ts says
-    // why) — so its wiring is proved here, against the same live fixture.
+    // The sequence sub-ledger and the group membership ledger ride the same generic
+    // path over resources the service registers beside `sequences` and `groups`. They
+    // are deliberately NOT in the family list above — `EmailStore` does not declare
+    // them (src/store-sequence-subledger.ts and src/store-group-membership.ts say
+    // why) — so their wiring is proved here, against the same live fixture.
     const extended = createHttpEmailStore({ baseUrl: api.baseUrl, credential: api.apiKey });
     for (const [family, read] of [
       ["sequenceSteps", () => extended.sequenceSteps.list()],
       ["sequenceEnrollments", () => extended.sequenceEnrollments.list()],
+      ["groupMembers", () => extended.groupMembers.list()],
     ] as const) {
       const answer = (await read()) as { ok: boolean };
       expect(answer.ok, `${family} could not be listed`).toBe(true);

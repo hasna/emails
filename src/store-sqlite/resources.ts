@@ -44,6 +44,11 @@ const MAX_PAGE = 500;
 export const RESOURCE_TABLES = Object.freeze({
   contacts: "contacts",
   groups: "groups",
+  // The group MEMBERSHIP ledger (src/store-group-membership.ts). Not a seam family yet —
+  // `EmailStore` declares only `groups` — but the same schema-driven path serves it. Its
+  // composite natural key (group_id, email) means this path addresses its rows by
+  // `rowid`, exactly as it does for `webhook_receipts`.
+  groupMembers: "group_members",
   owners: "owners",
   providers: "providers",
   templates: "templates",

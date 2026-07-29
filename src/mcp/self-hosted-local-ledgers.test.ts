@@ -59,14 +59,26 @@ afterEach(() => {
 });
 
 describe("MCP self_hosted repository-backed tools", () => {
-  it("lists groups through the self_hosted API without computing local member counts", async () => {
+  it("lists groups through the self_hosted API with exact member counts", async () => {
+    // This case used to assert `member_count` was ABSENT here: the API-backed variant
+    // omitted it because its counts came from one clamped page. The collapsed family
+    // counts the whole membership table (or refuses), so the tool is UNIFORM in every
+    // configuration — the field is present, computed from the API's own rows.
+    // `stub.seed` REPLACES the whole dataset, so the baseline rows ride along.
+    await stub.seed({
+      groups: [{ ...SEEDED_GROUP }],
+      sequences: [{ ...SEEDED_SEQUENCE }],
+      "group-members": [
+        { id: "gm-1", group_id: SEEDED_GROUP.id, email: "a@example.com", name: null, vars: "{}", added_at: "2026-01-01T00:00:00.000Z" },
+        { id: "gm-2", group_id: SEEDED_GROUP.id, email: "b@example.com", name: null, vars: "{}", added_at: "2026-01-02T00:00:00.000Z" },
+      ],
+    });
     const result = await callTool("list_groups", {});
 
     expect(result.isError).not.toBe(true);
     const payload = JSON.parse(resultText(result)) as { items?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
     const groups = Array.isArray(payload) ? payload : payload.items ?? [];
-    expect(groups).toEqual([{ ...SEEDED_GROUP }]);
-    expect(groups[0]).not.toHaveProperty("member_count");
+    expect(groups).toEqual([{ ...SEEDED_GROUP, member_count: 2 }]);
   });
 
   it("runs the warming tools through the self_hosted API instead of refusing", async () => {

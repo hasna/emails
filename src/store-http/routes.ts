@@ -40,6 +40,13 @@ export interface RouteUse {
 export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
   contacts: "contacts",
   groups: "groups",
+  /**
+   * NOT a seam family either. The group membership ledger
+   * (src/store-group-membership.ts) rides the same generic CRUD path over a resource
+   * the service registers beside `groups`; `EmailStore` does not declare it yet, so —
+   * like the sequence sub-ledger below — it is excluded from the family check.
+   */
+  groupMembers: "group-members",
   owners: "owners",
   providers: "providers",
   templates: "templates",
@@ -71,7 +78,7 @@ export const RESOURCE_PATHS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /** Entries in the path map that are NOT repositories on `EmailStore`. */
-const NOT_SEAM_FAMILIES = new Set(["provisioning", "sequenceSteps", "sequenceEnrollments"]);
+const NOT_SEAM_FAMILIES = new Set(["provisioning", "groupMembers", "sequenceSteps", "sequenceEnrollments"]);
 
 /** The families that are `ResourceRepository`s on `EmailStore`. */
 export const RESOURCE_FAMILIES: readonly string[] = Object.freeze(

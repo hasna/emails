@@ -83,7 +83,7 @@ async function runSend(args: string[]): Promise<RunResult> {
 describe("emails send --to-group (local)", () => {
   let providerId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captureInheritedProcessEnv();
     // Local is the DEFAULT resolution (src/lib/mode.ts), and the hermetic runner
     // selects it explicitly, so this arm only has to make sure no self-hosted
@@ -101,9 +101,9 @@ describe("emails send --to-group (local)", () => {
     resetDatabase();
     resetMailDataSource();
     providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
-    const group = createGroup("team");
-    addMember(group.id, "one@ext.com", "One");
-    addMember(group.id, "two@ext.com", "Two");
+    const group = await createGroup("team");
+    await addMember(group.id, "one@ext.com", "One");
+    await addMember(group.id, "two@ext.com", "Two");
   });
 
   afterEach(() => {
@@ -144,9 +144,9 @@ describe("emails send --to-group (local)", () => {
   });
 
   it("collapses a member listed twice under different casing", async () => {
-    const group = createGroup("dupes");
-    addMember(group.id, "Same@ext.com");
-    addMember(group.id, "same@ext.com");
+    const group = await createGroup("dupes");
+    await addMember(group.id, "Same@ext.com");
+    await addMember(group.id, "same@ext.com");
 
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to-group", "dupes", "--subject", "Hi", "--body", "x",
@@ -172,7 +172,7 @@ describe("emails send --to-group (local)", () => {
   });
 
   it("refuses an empty group and names the command that fills it", async () => {
-    createGroup("empty");
+    await createGroup("empty");
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to-group", "empty", "--subject", "Hi", "--body", "x",
       "--provider", providerId,
@@ -201,7 +201,10 @@ describe("emails send --to-group (local)", () => {
 describe("emails send --to-group (self-hosted)", () => {
   let stub: V1Stub;
 
-  beforeAll(async () => { stub = await startV1Stub(); });
+  // `openapi: true` because the collapsed family pushes its membership filters down,
+  // and the REAL HTTP store reads the service's published contract before accepting a
+  // filter or a write — a missing document is deliberately a fault there.
+  beforeAll(async () => { stub = await startV1Stub({ openapi: true }); });
   afterAll(() => stub.stop());
 
   beforeEach(async () => {
@@ -209,11 +212,12 @@ describe("emails send --to-group (self-hosted)", () => {
     await stub.reset();
     stub.applyEnv();
     resetMailDataSource();
-    // Written through the SAME routed facade the command reads, so the test
-    // proves the /v1 round trip rather than a hand-shaped stub payload.
-    const group = createGroup("team");
-    addMember(group.id, "one@ext.com", "One");
-    addMember(group.id, "two@ext.com", "Two");
+    // Written through the SAME collapsed family the command reads — over the real
+    // HTTP store — so the test proves the /v1 round trip rather than a hand-shaped
+    // stub payload.
+    const group = await createGroup("team");
+    await addMember(group.id, "one@ext.com", "One");
+    await addMember(group.id, "two@ext.com", "Two");
   });
 
   afterEach(() => {

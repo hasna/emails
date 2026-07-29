@@ -3,7 +3,7 @@ import { listContacts, suppressContact, unsuppressContact } from '../../db/conta
 import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
 import { createSqliteEmailStore } from '../../store-sqlite/index.js';
 import { getDatabase } from '../../db/database.js';
-import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
+import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.js';
 import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
 import { getEmailContent } from '../../db/email-content.js';
 import { getAnalytics } from '../../lib/analytics.js';
@@ -14,25 +14,30 @@ const EXPORT_DEFAULT_LIMIT = 1000;
 const EXPORT_MAX_LIMIT = 5000;
 
 /**
- * The store the `/api/contacts` routes read and write through.
+ * The stores the `/api/contacts` and `/api/groups` routes read and write through.
  *
  * This is the LOCAL DASHBOARD (`emails serve`), and the neighbouring imports in this
- * file are still local-SQLite modules reading the process-wide connection. When
- * `src/db/contacts` collapsed onto the store seam its exports stopped requiring a
+ * file are still local-SQLite modules reading the process-wide connection. When each
+ * of these two families collapsed onto the store seam its exports stopped requiring a
  * `Database` and started resolving the CONFIGURED store when given nothing — so passing
  * nothing here would have silently repointed these routes at an operator's API on any
  * installation configured for one. They therefore name the SQLite store bound to that
  * same connection, exactly as the `/api/sequences` routes do
  * (src/server/routes/inbound-sequences.ts). Built per request: the repositories are
- * thin wrappers over the memoised connection.
+ * thin wrappers over the memoised connection. One binding per family, so each set of
+ * routes names its own store and neither collapse leans on the other's local alias.
  */
 function localContactStore() {
   return createSqliteEmailStore({ database: getDatabase() });
 }
 
-function resolveGroupRef(raw: string): { id: string } | null {
+function localGroupStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+async function resolveGroupRef(raw: string): Promise<{ id: string } | null> {
   const ref = decodeURIComponent(raw);
-  const group = getGroupByName(ref);
+  const group = await getGroupByName(ref, localGroupStore());
   if (group) return group;
   const id = resolveId("groups", ref);
   return id ? { id } : null;
@@ -122,7 +127,9 @@ if (templateMatch && method === "DELETE") {
 // GET /api/groups
 if (path === "/api/groups" && method === "GET") {
   try {
-    return json(listGroups(undefined, queryPage(url, 100)));
+    // Reads the store seam (async). A group list it could not enumerate to the end
+    // raises, and lands on `internalError` below rather than being served short.
+    return json(await listGroups(queryPage(url, 100), localGroupStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -131,7 +138,7 @@ if (path === "/api/groups" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
-    const group = createGroup(String(body.name), body.description as string | undefined);
+    const group = await createGroup(String(body.name), body.description as string | undefined, localGroupStore());
     return json(group, 201);
   } catch (e) { return internalError(e); }
 }
@@ -140,20 +147,20 @@ if (path === "/api/groups" && method === "POST") {
 const groupMembersMatch = path.match(/^\/api\/groups\/([^/]+)\/members$/);
 if (groupMembersMatch && method === "GET") {
   try {
-    const group = resolveGroupRef(groupMembersMatch[1]!);
+    const group = await resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
-    return json(listMemberSummaries(group.id, undefined, queryPage(url, 100)));
+    return json(await listMemberSummaries(group.id, queryPage(url, 100), localGroupStore()));
   } catch (e) { return internalError(e); }
 }
 
 // POST /api/groups/:id/members
 if (groupMembersMatch && method === "POST") {
   try {
-    const group = resolveGroupRef(groupMembersMatch[1]!);
+    const group = await resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.email) return badRequest("email is required");
-    const member = addMember(group.id, String(body.email), body.name as string | undefined);
+    const member = await addMember(group.id, String(body.email), body.name as string | undefined, undefined, localGroupStore());
     return json(member, 201);
   } catch (e) { return internalError(e); }
 }
@@ -162,9 +169,9 @@ if (groupMembersMatch && method === "POST") {
 const groupMemberDeleteMatch = path.match(/^\/api\/groups\/([^/]+)\/members\/([^/]+)$/);
 if (groupMemberDeleteMatch && method === "GET") {
   try {
-    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
+    const group = await resolveGroupRef(groupMemberDeleteMatch[1]!);
     if (!group) return notFound("Group not found");
-    const member = getMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
+    const member = await getMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!), localGroupStore());
     if (!member) return notFound("Member not found");
     return json(member);
   } catch (e) { return internalError(e); }
@@ -172,9 +179,9 @@ if (groupMemberDeleteMatch && method === "GET") {
 
 if (groupMemberDeleteMatch && method === "DELETE") {
   try {
-    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
+    const group = await resolveGroupRef(groupMemberDeleteMatch[1]!);
     if (!group) return notFound("Group not found");
-    const removed = removeMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
+    const removed = await removeMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!), localGroupStore());
     if (!removed) return notFound("Member not found");
     return json({ ok: true });
   } catch (e) { return internalError(e); }
@@ -184,9 +191,9 @@ if (groupMemberDeleteMatch && method === "DELETE") {
 const groupMatch = path.match(/^\/api\/groups\/([^/]+)$/);
 if (groupMatch && method === "DELETE") {
   try {
-    const group = resolveGroupRef(groupMatch[1]!);
+    const group = await resolveGroupRef(groupMatch[1]!);
     if (!group) return notFound("Group not found");
-    deleteGroup(group.id);
+    await deleteGroup(group.id, localGroupStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }

@@ -11,9 +11,9 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .command("create <name>")
     .description("Create a recipient group")
     .option("--description <text>", "Group description")
-    .action((name: string, opts: { description?: string }) => {
+    .action(async (name: string, opts: { description?: string }) => {
       try {
-        const group = createGroup(name, opts.description);
+        const group = await createGroup(name, opts.description);
         console.log(chalk.green(`✓ Group created: ${group.name} (${group.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
@@ -26,15 +26,15 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Maximum groups to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of groups to skip", "0")
     .option("--verbose", "Show group descriptions inline")
-    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const groups = listGroups(page);
+        const groups = await listGroups(page);
         if (groups.length === 0) {
           output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
           return;
         }
-        const counts = getMemberCounts(groups.map((group) => group.id));
+        const counts = await getMemberCounts(groups.map((group) => group.id));
         const result = groups.map((group) => ({
           ...group,
           member_count: counts.get(group.id) ?? 0,
@@ -66,13 +66,13 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .description("Show group details and members")
     .option("--limit <n>", "Maximum members to show", "50")
     .option("--offset <n>", "Number of members to skip", "0")
-    .action((name: string, opts: { limit?: string; offset?: string }) => {
+    .action(async (name: string, opts: { limit?: string; offset?: string }) => {
       try {
-        const group = getGroupByName(name);
+        const group = await getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliPage(opts);
-        const members = listMemberSummaries(group!.id, page);
-        const memberCount = getMemberCount(group!.id);
+        const members = await listMemberSummaries(group!.id, page);
+        const memberCount = await getMemberCount(group!.id);
         const lines: string[] = [chalk.bold(`\nGroup: ${group!.name}`)];
         if (group!.description) lines.push(chalk.dim(`  ${group!.description}`));
         lines.push(`  Members (${members.length} shown / ${memberCount} total):`);
@@ -97,12 +97,12 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Maximum members to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of members to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((name: string, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (name: string, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const group = getGroupByName(name);
+        const group = await getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliListPage(opts);
-        const members = listMemberSummaries(group!.id, page);
+        const members = await listMemberSummaries(group!.id, page);
         if (members.length === 0) {
           output([], chalk.dim("No members."));
           return;
@@ -131,12 +131,12 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .command("add <name> <emails...>")
     .description("Add members to a group")
     .option("--name <displayName>", "Display name for the member(s)")
-    .action((name: string, emails: string[], opts: { name?: string }) => {
+    .action(async (name: string, emails: string[], opts: { name?: string }) => {
       try {
-        const group = getGroupByName(name);
+        const group = await getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         for (const email of emails) {
-          addMember(group!.id, email, opts.name);
+          await addMember(group!.id, email, opts.name);
         }
         console.log(chalk.green(`✓ Added ${emails.length} member(s) to group '${name}'`));
       } catch (e) {
@@ -147,11 +147,11 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("remove-member <name> <email>")
     .description("Remove a member from a group")
-    .action((name: string, email: string) => {
+    .action(async (name: string, email: string) => {
       try {
-        const group = getGroupByName(name);
+        const group = await getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
-        const removed = removeMember(group!.id, email);
+        const removed = await removeMember(group!.id, email);
         if (!removed) handleError(new Error(`Member not found: ${email}`));
         console.log(chalk.green(`✓ Removed ${email} from group '${name}'`));
       } catch (e) {
@@ -165,10 +165,10 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--yes", "Skip confirmation prompt")
     .action(async (name: string, opts: { yes?: boolean }) => {
       try {
-        const group = getGroupByName(name);
+        const group = await getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         await confirmDestructiveAction(`Delete group ${name}?`, opts.yes);
-        deleteGroup(group.id);
+        await deleteGroup(group!.id);
         console.log(chalk.green(`✓ Group deleted: ${name}`));
       } catch (e) {
         handleError(e);
