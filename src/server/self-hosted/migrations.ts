@@ -2822,6 +2822,28 @@ const WEBHOOK_EVENT_IDEMPOTENCY = defineMigration(
   `,
 );
 
+/**
+ * 0024 — key idp_principal_tenants on (sub, tenant_id) (additive only).
+ *
+ * The 0021 shape (`sub text PRIMARY KEY`) meant one principal could hold
+ * exactly one tenant grant, so granting tenant B silently re-pointed — i.e.
+ * revoked — an existing tenant-A grant, with no history and no signal. The
+ * composite key lets one principal hold several tenant grants, each with its
+ * own independent revoked_at kill switch. No rows are dropped or rewritten;
+ * the unique composite index is created BEFORE the sub-only primary key is
+ * dropped so uniqueness never lapses mid-migration, and a plain index on sub
+ * keeps the resolution lookup indexed.
+ */
+const IDP_PRINCIPAL_TENANTS_MULTI_GRANT = defineMigration(
+  "0024_idp_principal_tenants_multi_grant",
+  `
+  CREATE UNIQUE INDEX IF NOT EXISTS idp_principal_tenants_sub_tenant_key
+    ON idp_principal_tenants (sub, tenant_id);
+  ALTER TABLE idp_principal_tenants DROP CONSTRAINT IF EXISTS idp_principal_tenants_pkey;
+  CREATE INDEX IF NOT EXISTS idp_principal_tenants_sub_idx ON idp_principal_tenants (sub);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2852,5 +2874,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     IDP_PRINCIPAL_TENANTS,
     EVENTS_TYPE_ENUM_CHECK,
     WEBHOOK_EVENT_IDEMPOTENCY,
+    IDP_PRINCIPAL_TENANTS_MULTI_GRANT,
   ];
 }
