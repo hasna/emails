@@ -3,17 +3,16 @@
 // WHY THIS SUITE NO LONGER DRIVES THE `/v1` STUB. It used to, because the family's second arm
 // talked to `/v1` through a `curl` bridge and the command reached it by setting the deployment
 // word. `src/db/send-keys.ts` has collapsed onto the store seam and resolves its store from
-// STORAGE CONFIGURATION, while `src/db/owners.ts` — which this command also uses, to turn a
-// name into an id and ids back into names — has NOT collapsed and still routes on the
-// deployment word. Those two are different provenances, and a suite that configured an API
-// while leaving the owners family on its local arm would be asserting against a split dataset
-// rather than against the command.
+// STORAGE CONFIGURATION — and so, now, does `src/db/owners.ts`, which this command also uses
+// to turn a name into an id and ids back into names. The owner-name provenance split this
+// header used to record (divergence 8 in src/db/send-keys.ts) is CLOSED: both families
+// resolve the same configured store, so a name and a key cannot come from different datasets
+// in any configuration.
 //
-// So this suite configures exactly ONE store, the local SQLite file, which is the
-// configuration in which both provenances name the SAME database. That split is recorded in
-// `src/db/send-keys.ts` (divergence 8) and closes when the owners family collapses; it is
-// named here rather than papered over, because a green run in this file is NOT evidence about
-// an API-configured installation's owner names.
+// This suite still configures exactly ONE store, the local SQLite file, because what is left
+// for it is the COMMAND — formatting, paging arguments, discarded answers — and the owners
+// family's own both-store suite (src/db/owners.test.ts) is where the storage routing is
+// proven against a real HTTP store.
 //
 // The send-key operations themselves are covered against BOTH shipped stores in
 // `src/db/send-keys.test.ts`. What is left for this file is the COMMAND: its formatting, its

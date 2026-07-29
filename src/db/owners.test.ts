@@ -361,6 +361,10 @@ describe.each(STORE_VARIANTS)("address ownership audit trail (%s)", (_label, var
 
     const events = await listAddressOwnershipEvents("addr-audit", 20, store);
     expect(events.map((event) => event.action)).toEqual(["unassign", "transfer", "assign"]);
+    // STRICTLY monotonic instants: three writes land inside one millisecond, and
+    // presenting them in write order is the client-minted clock's whole job.
+    expect(events[0]!.created_at > events[1]!.created_at).toBe(true);
+    expect(events[1]!.created_at > events[2]!.created_at).toBe(true);
     expect(events[0]!.previous_owner_id).toBe(second.id);
     expect(events[0]!.reason).toBe("retired");
     expect(events[1]!.previous_owner_id).toBe(first.id);
@@ -403,13 +407,17 @@ describe.each(STORE_VARIANTS)("address ownership audit trail (%s)", (_label, var
     const store = variant();
     const agent = await createOwner({ type: "agent", name: "Busy" }, store);
     seedAddress({ id: "addr-busy", email: "busy@x.com" });
-    for (let i = 0; i < 25; i++) {
+    // 102 events, so the 100-row CAP actually bites — 100 or fewer would let a
+    // deleted cap answer the same length and pass.
+    for (let i = 0; i < 51; i++) {
       await assignAddressOwner("addr-busy", agent.id, undefined, store);
       await unassignAddressOwner("addr-busy", { reason: `cycle ${i}` }, store);
     }
-    expect(await listAddressOwnershipEvents("addr-busy", 9999, store)).toHaveLength(50);
+    expect(await listAddressOwnershipEvents("addr-busy", 9999, store)).toHaveLength(100);
     expect(await listAddressOwnershipEvents("addr-busy", undefined as unknown as number, store)).toHaveLength(20);
-  });
+    // 102 writes through a real HTTP round trip per operation outrun the default
+    // 5s case budget on a loaded machine; the bound is generous, not load-bearing.
+  }, 60000);
 });
 
 describe("the owner past one clamped page", () => {
@@ -718,5 +726,23 @@ describe("defences a well-behaved fixture cannot exercise", () => {
       stubOwnerRow({ id: "owner-omega", name: "Omega" }),
     ]);
     expect((await listOwners(undefined, { limit: 1 }, store)).map((o) => o.id)).toEqual(["owner-omega"]);
+  });
+
+  it("narrows an out-of-set address status to active instead of casting it (divergence 6)", async () => {
+    // Neither schema CHECK-constrains address status, so "pending" is a reachable
+    // stored value — and the published shape declares the binary. The deleted SQLite
+    // arm CAST the raw column behind the type (the #137 class); the narrowing keeps
+    // "suspended" and presents everything else as "active". A mutation run proved no
+    // other case could see this mapping.
+    seedOwner({ id: "owner-status", name: "Status" });
+    seedAddress({ id: "addr-pending", email: "pending@x.com", created_at: "2026-01-02T00:00:00.000Z" });
+    seedAddress({ id: "addr-suspended", email: "suspended@x.com", created_at: "2026-01-01T00:00:00.000Z" });
+    db.run("UPDATE addresses SET owner_id = 'owner-status', status = 'pending' WHERE id = 'addr-pending'");
+    db.run("UPDATE addresses SET owner_id = 'owner-status', status = 'suspended' WHERE id = 'addr-suspended'");
+    const listed = await listAddressesByOwner("owner-status", "owner", undefined, sqliteStore());
+    expect(listed.map((address) => [address.id, address.status])).toEqual([
+      ["addr-pending", "active"],
+      ["addr-suspended", "suspended"],
+    ]);
   });
 });
