@@ -81,7 +81,7 @@ function configureLocalStore(): void {
 function configureApiStore(): void {
   clearStoreSettings();
   process.env[API_BASE_URL_SETTING] = api.baseUrl;
-  process.env[API_CREDENTIAL_SETTINGS[1] as string] = api.apiKey;
+  process.env[API_CREDENTIAL_SETTINGS[2] as string] = api.apiKey;
 }
 
 async function runAliasCommand(args: string[]): Promise<{ data: unknown; out: string }> {

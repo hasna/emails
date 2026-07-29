@@ -73,7 +73,7 @@ function pointTheEnvironmentAt(store: EmailStore): V1StoreApi {
   const service = startV1StoreApi({ store });
   for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
   process.env[API_BASE_URL_SETTING] = service.baseUrl;
-  process.env[API_CREDENTIAL_SETTINGS[1] as string] = service.apiKey;
+  process.env[API_CREDENTIAL_SETTINGS[2] as string] = service.apiKey;
   return service;
 }
 

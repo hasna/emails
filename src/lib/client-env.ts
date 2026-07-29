@@ -5,6 +5,15 @@ export const EMAILS_CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 /** The bearer credential a user session persists (see multi-tenancy design §7). */
 export const EMAILS_SESSION_TOKEN_ENV = "EMAILS_SESSION_TOKEN";
 
+/**
+ * The caller's own identity token, minted by the `@hasna/tenants` identity
+ * authority and verified by the server as a first-class principal
+ * (src/server/self-hosted/auth/idp-token.ts). The same env key the legacy
+ * client reads (src/db/self-hosted-store.ts), exported so the seam's
+ * credential resolution and that client cannot drift apart on its name.
+ */
+export const EMAILS_IDP_TOKEN_ENV = "EMAILS_IDP_TOKEN";
+
 // Structural keys the vault entry MUST carry (endpoint + mode). A credential is
 // required too, but a session token OR the API key satisfies it — see
 // CLIENT_ENV_CREDENTIAL_KEYS — so neither credential is individually mandatory.
@@ -13,12 +22,15 @@ const CLIENT_ENV_REQUIRED_KEYS = [
   "EMAILS_SELF_HOSTED_URL",
 ] as const;
 
-// At least one of these must be present. A session token (emss_…) is preferred
-// over the operator API key by resolveSelfHostedConfig; an operator with only
-// the API key keeps working unchanged.
+// At least one of these must be present — ANY one is a complete credential: a
+// user session token, the caller's own identity token, or the operator API key.
+// Which one WINS when several are set is not decided here; both resolvers pick
+// session first, then identity, then key (see src/store-resolution.ts and the
+// legacy client). An operator with only the API key keeps working unchanged.
 const CLIENT_ENV_CREDENTIAL_KEYS = [
   "EMAILS_SELF_HOSTED_API_KEY",
   EMAILS_SESSION_TOKEN_ENV,
+  EMAILS_IDP_TOKEN_ENV,
 ] as const;
 
 // Every key the vault entry may carry (loaded into env whenever present).

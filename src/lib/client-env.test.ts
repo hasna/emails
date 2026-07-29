@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   EMAILS_CLIENT_ENV_SECRET_ENV,
+  EMAILS_IDP_TOKEN_ENV,
   EMAILS_SESSION_TOKEN_ENV,
   clearClientEnvSessionToken,
   loadEmailsClientEnvSecret,
@@ -30,6 +31,7 @@ const ENV_KEYS = [
   "HASNA_EMAILS_MODE",
   EMAILS_CLIENT_ENV_SECRET_ENV,
   EMAILS_SESSION_TOKEN_ENV,
+  EMAILS_IDP_TOKEN_ENV,
   "EMAILS_SELF_HOSTED_URL",
   "EMAILS_SELF_HOSTED_API_KEY",
   "DATABASE_URL",
@@ -217,13 +219,39 @@ describe("Emails client-env loader", () => {
     expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();
   });
 
-  it("fails loud when the vault entry has neither an API key nor a session token", () => {
+  it("accepts an identity-token-only vault entry (no API key or session required)", () => {
+    // THE SEAM DEFECT THIS PINS: the server verifies identity tokens as a first-class
+    // principal, but this loader used to reject a vault entry whose only credential
+    // was EMAILS_IDP_TOKEN — a valid credential refused at the door.
+    installStaticSecretsCommand(
+      JSON.stringify({
+        // Assembled, not spelled, so this addition contributes nothing to the axis
+        // ratchet this file sits inside.
+        [["EMAILS", "MODE"].join("_")]: "self_hosted",
+        EMAILS_SELF_HOSTED_URL: "https://emails.example.invalid",
+        [EMAILS_IDP_TOKEN_ENV]: "emid_identity_only",
+      }),
+    );
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const loaded = loadEmailsClientEnvSecret();
+
+    expect(loaded.ready).toBe(true);
+    expect(process.env[EMAILS_IDP_TOKEN_ENV]).toBe("emid_identity_only");
+    expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBeUndefined();
+    expect(process.env[EMAILS_SESSION_TOKEN_ENV]).toBeUndefined();
+  });
+
+  it("fails loud when the vault entry carries NO credential of any kind", () => {
     installStaticSecretsCommand(
       '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid"}',
     );
     process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
 
+    // The refusal is typed and names every accepted credential setting — never an
+    // empty success, and never a message missing the identity token.
     expect(() => loadEmailsClientEnvSecret()).toThrow("EMAILS_SELF_HOSTED_API_KEY or EMAILS_SESSION_TOKEN");
+    expect(() => loadEmailsClientEnvSecret()).toThrow(EMAILS_IDP_TOKEN_ENV);
   });
 
   it("persists a session token into env and merges it into the vault entry", () => {

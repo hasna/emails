@@ -355,7 +355,7 @@ describe("webhook listen command", () => {
     // happens to unset the first, which is a dependency on the runner rather than on this file.
     for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
     process.env[API_BASE_URL_SETTING] = "https://mail.example.test";
-    process.env[API_CREDENTIAL_SETTINGS[1]] = "not-a-real-credential";
+    process.env[API_CREDENTIAL_SETTINGS[2]] = "not-a-real-credential";
     const errors = await runExpectingError(["webhook", "listen", "--port", "0"]);
     expect(errors).toContain("durable provider webhook receiver runs where the mail is stored");
     expect(errors).toContain(API_BASE_URL_SETTING);

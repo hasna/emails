@@ -1020,7 +1020,7 @@ describe("send keys — the configured store", () => {
 
   it("refuses to resolve a store when a database path AND an API are both configured", async () => {
     process.env[API_BASE_URL_SETTING] = service().baseUrl;
-    process.env[API_CREDENTIAL_SETTINGS[1]] = service().apiKey;
+    process.env[API_CREDENTIAL_SETTINGS[2]] = service().apiKey;
 
     const error = await rejection(listSendKeys("agent-1"));
 

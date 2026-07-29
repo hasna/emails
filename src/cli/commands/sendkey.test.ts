@@ -198,7 +198,7 @@ describe("sendkey list command", () => {
       process.env[DATABASE_PATH_SETTINGS[1]] = "";
       delete process.env[DATABASE_PATH_SETTINGS[1]];
       process.env[API_BASE_URL_SETTING] = service.baseUrl;
-      process.env[API_CREDENTIAL_SETTINGS[1]] = "test-credential";
+      process.env[API_CREDENTIAL_SETTINGS[2]] = "test-credential";
 
       const result = await runSendKeyCommand(["sendkey", "list"]);
 
