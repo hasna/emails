@@ -79,7 +79,8 @@ export function registerIdpPrincipalCommands(
     .option("--type <type>", "Principal type: user or service", "service")
     .option("--note <note>", "Operator note recorded on the grant")
     .action(async (sub: string, opts: { tenant: string; idpTid?: string; type: string; note?: string }) => {
-      if (opts.type !== "user" && opts.type !== "service") {
+      const principalType = opts.type;
+      if (principalType !== "user" && principalType !== "service") {
         throw new Error("--type must be 'user' or 'service'");
       }
       const grant = await withStore((store) =>
@@ -87,7 +88,7 @@ export function registerIdpPrincipalCommands(
           sub,
           tenantId: opts.tenant,
           idpTid: opts.idpTid ?? null,
-          principalType: opts.type,
+          principalType,
           note: opts.note ?? null,
         }),
       );
