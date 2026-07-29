@@ -44,16 +44,20 @@ import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
  */
 function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
   const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
-  // `/v1/addresses` is hand-coded on the server rather than registry-driven, so its
-  // ORDER BY cannot be read from SELF_HOSTED_RESOURCES: it is `created_at DESC,
-  // id ASC` in src/server/self-hosted/store.ts listAddresses, restated here (the
-  // one hand-coded exception to the read-from-registry rule above) so a client
-  // that windows addresses SERVER-side is tested against the order production
-  // actually returns. Without it the stub served addresses in INSERTION order and
-  // a paging-correct client looked broken. Hand-coded domains keeps insertion
-  // order — no client windows domains server-side today; give it the same
-  // treatment before one does.
+  // `/v1/addresses` and `/v1/domains` are hand-coded on the server rather than
+  // registry-driven, so their ORDER BY cannot be read from SELF_HOSTED_RESOURCES:
+  // both are `created_at DESC, id ASC` in src/server/self-hosted/store.ts
+  // (listAddresses / listDomains), restated here (the two hand-coded exceptions to
+  // the read-from-registry rule above) so a client that windows either resource
+  // SERVER-side is tested against the order production actually returns. Without it
+  // the stub served these in INSERTION order and a paging-correct client looked
+  // broken. `listUsableDomains` now windows domains server-side on a bounded page,
+  // so domains gets the same treatment addresses already had.
   order["addresses"] = [
+    { column: "created_at", desc: true },
+    { column: "id", desc: false },
+  ];
+  order["domains"] = [
     { column: "created_at", desc: true },
     { column: "id", desc: false },
   ];
