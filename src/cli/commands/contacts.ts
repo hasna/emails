@@ -72,7 +72,7 @@ export function registerContactCommands(program: Command, output: (data: unknown
       .action(async (email: string) => {
         try {
           await suppressContact(email);
-          console.log(chalk.green(`✓ Suppressed: ${email}`));
+          output({ suppressed: true, email }, chalk.green(`✓ Suppressed: ${email}`));
         } catch (e) { handleError(e); }
       });
 
@@ -82,7 +82,7 @@ export function registerContactCommands(program: Command, output: (data: unknown
       .action(async (email: string) => {
         try {
           await unsuppressContact(email);
-          console.log(chalk.green(`✓ Unsuppressed: ${email}`));
+          output({ suppressed: false, email }, chalk.green(`✓ Unsuppressed: ${email}`));
         } catch (e) { handleError(e); }
       });
   }

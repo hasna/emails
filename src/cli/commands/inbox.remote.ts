@@ -554,7 +554,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           offset,
         });
         if (rows.length === 0) {
-          console.log(chalk.dim(`No results for "${query}".`));
+          // output([]) rather than console.log: under --json the prose was
+          // wrapped as {"output":[...]} while any hit returned a bare array —
+          // the same command, two shapes, flipping exactly on "none" (task
+          // 7f2b4b6e).
+          output([], chalk.dim(`No results for "${query}".`));
           return;
         }
         output(rows, formatMailboxMessages(rows, `Search ${folder}: "${query}"`));
@@ -725,8 +729,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // scan followed by two separate row fetches.
         const detailSource = await ds.getMessageWithBody(id);
         if (!detailSource) {
-          console.error(chalk.red(`Email not found: ${id}`));
-          process.exit(1);
+          handleError(new Error(`Email not found: ${id}`));
         }
         const { msg, body } = detailSource;
         // Opening an email marks it read unless --keep-unread is set.
@@ -769,7 +772,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   async function requireMessage(ds: MailDataSource, id: string): Promise<TuiMessage> {
     const msg = await ds.getMessage(await resolveMailId(ds, id));
-    if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+    if (!msg) handleError(new Error(`Email not found: ${id}`));
     return msg;
   }
 
@@ -926,8 +929,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const fullId = await resolveMailId(ds, id);
         const existing = await ds.getMessage(fullId);
         if (!existing) {
-          console.error(chalk.red(`Email not found: ${id}`));
-          process.exit(1);
+          handleError(new Error(`Email not found: ${id}`));
         }
         await ds.deleteMessage(fullId);
         console.log(chalk.green(`✓ Deleted email ${fullId.slice(0, 8)}`));

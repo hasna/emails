@@ -604,7 +604,13 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         if (opts.output) {
           const { writeFileSync } = await import("node:fs");
           writeFileSync(opts.output, result, "utf-8");
-          console.log(chalk.green("✓ Exported " + type + " to " + opts.output));
+          output({ exported: type, format: fmt, output: opts.output }, chalk.green("✓ Exported " + type + " to " + opts.output));
+        } else if (fmt === "json") {
+          // output(parsed, raw) rather than console.log(raw): the export is
+          // already a JSON string, and under --json the console wrapper
+          // re-encoded it as {"output":["<entire export as one string>"]}
+          // (task 15908bba).
+          output(JSON.parse(result), result);
         } else {
           console.log(result);
         }
