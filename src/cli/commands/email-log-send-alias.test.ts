@@ -21,8 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Anything that could point the process at a real endpoint, account or second
-// store. Scrubbed BY PREFIX rather than by an enumerated key list: the fleet
-// shell exports this package's whole client configuration (endpoint, credential,
+// store. Scrubbed BY PREFIX rather than by an enumerated key list: an operator
+// shell may export this package's whole client configuration (endpoint, credential,
 // and the deployment variable this repo is deleting), and an enumerated list
 // that named each one would both go stale and re-introduce the very identifiers
 // the mode-axis ratchet counts.
