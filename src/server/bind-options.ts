@@ -1,16 +1,15 @@
 import type { ServerStorageBackend } from "./storage-backend.js";
 
-/**
- * The bind defaults follow the server's INTERNAL STORE, not a deployment mode.
- *
- * That is not a rename: the two defaults encode a security property that belongs to the
- * store rather than to any product variant. A PostgreSQL server is reachable by other
- * hosts by construction (its database is), so it binds 0.0.0.0:8080 behind the operator's
- * own load balancer; a SQLite server holds one operator's private mailbox in a file under
- * their home directory and binds loopback only, so nothing on the network can read it
- * without an explicit `--host` and `EMAILS_ALLOW_REMOTE=1`.
- */
-export type ServerMode = ServerStorageBackend;
+// THE BIND DEFAULTS FOLLOW THE SERVER'S INTERNAL STORE, and the type that used to name a
+// deployment mode here is deleted rather than aliased — an unused alias would keep the
+// vocabulary reachable for the next module that imports it.
+//
+// That the defaults follow the store is not a rename: they encode a security property that
+// belongs to the store rather than to any product variant. A PostgreSQL server is reachable
+// by other hosts by construction (its database is), so it binds 0.0.0.0:8080 behind the
+// operator's own load balancer. A SQLite server holds one operator's private mailbox in a
+// file under their home directory, so it binds loopback only, and nothing on the network
+// can read it without an explicit `--host` and `EMAILS_ALLOW_REMOTE=1`.
 
 export interface ServerBindOptions {
   host: string;
