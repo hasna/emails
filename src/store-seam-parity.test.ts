@@ -472,4 +472,31 @@ describe("store seam parity: a revocation instant is written once", () => {
     },
     SUITE_TIMEOUT_MS,
   );
+
+  it(
+    "the fixture persists a client-written revoked_at verbatim, as the real service does",
+    async () => {
+      // Drives the fixture over RAW HTTP, not through the client under test. This is
+      // the positive control that keeps the repeat-revoke probe above meaningful: if
+      // the fixture quietly went back to stamping its own clock (its old divergence
+      // note 2), that probe would stay green even for a client that re-PATCHes on
+      // every revoke — certifying an idempotence the client does not have.
+      const store = createSqliteEmailStore({ database: db, detail: "raw fixture probe" });
+      const owner = must(await store.owners.create({ type: "human", name: token("owner") }), "owners.create");
+      const minted = must(await store.sendKeys.mintSendKey({ owner_id: String(owner["id"]) }), "mintSendKey");
+      const instant = "2020-03-03T03:03:03.000Z";
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${api.apiKey}` };
+      const patched = await fetch(`${api.baseUrl}/v1/send-keys/${minted.key.id}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ revoked_at: instant }),
+      });
+      expect(patched.status).toBe(200);
+      expect(((await patched.json()) as { revoked_at?: unknown })["revoked_at"]).toBe(instant);
+      const read = await fetch(`${api.baseUrl}/v1/send-keys/${minted.key.id}`, { headers });
+      expect(read.status).toBe(200);
+      expect(((await read.json()) as { revoked_at?: unknown })["revoked_at"]).toBe(instant);
+    },
+    SUITE_TIMEOUT_MS,
+  );
 });
