@@ -54,6 +54,8 @@ export interface IdpTokenClaims {
   scope: string[];
   iat: number;
   exp: number;
+  /** Optional not-before, epoch seconds; enforced when present. */
+  nbf?: number;
   /** Token id (audit join key between IdP and emails). */
   jti: string;
 }
@@ -70,6 +72,7 @@ export interface IdpJwk {
 export type IdpVerifyFailureReason =
   | "malformed"
   | "unsupported_alg"
+  | "unsupported_typ"
   | "missing_kid"
   | "unknown_kid"
   | "bad_signature"
@@ -93,7 +96,12 @@ export function looksLikeIdpToken(token: string): boolean {
   if (parts.length !== 3) return false;
   try {
     const header = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
-    return header?.typ === IDP_TOKEN_TYPE || header?.alg === IDP_TOKEN_ALG;
+    // The declared token TYPE decides the class, not the signature algorithm:
+    // matching on `alg` alone routed every EdDSA JWS the IdP key ever signs —
+    // refresh tokens, id tokens, anything future — into the access-token
+    // verifier, which then had to be trusted to notice. The wire contract pins
+    // typ "at+jwt"; anything else is not this credential class.
+    return header?.typ === IDP_TOKEN_TYPE;
   } catch {
     return false;
   }
@@ -160,8 +168,12 @@ export function verifyIdpToken(token: string, options: VerifyIdpTokenOptions): I
   // The signing keys are shared by the IdP's token families, so signature,
   // issuer and audience alone do not prove this is an access token. Pin the
   // wire type from ADR-0001 to prevent a different, correctly signed JWS from
-  // being accepted at the bearer-token boundary.
-  if (header.typ !== IDP_TOKEN_TYPE) return { ok: false, reason: "malformed" };
+  // being accepted at the bearer-token boundary — enforced HERE, not only in
+  // the dispatcher's structural sniff, so a direct verify call cannot accept
+  // an id/refresh token the same key happens to sign. The refusal is TYPED
+  // (`unsupported_typ`, mirroring `unsupported_alg`), not folded into
+  // `malformed`: the token parses fine, it is the declared type that is wrong.
+  if (header.typ !== IDP_TOKEN_TYPE) return { ok: false, reason: "unsupported_typ" };
   if (!header.kid) return { ok: false, reason: "missing_kid" };
   const jwk = options.jwks.find((k) => k.kid === header.kid);
   if (!jwk) return { ok: false, reason: "unknown_kid" };
@@ -181,6 +193,7 @@ export function verifyIdpToken(token: string, options: VerifyIdpTokenOptions): I
   const leeway = options.leewaySeconds ?? 0;
   if (typeof claims.exp !== "number" || nowSec > claims.exp + leeway) return { ok: false, reason: "expired" };
   if (typeof claims.iat === "number" && claims.iat - leeway > nowSec) return { ok: false, reason: "not_yet_valid" };
+  if (typeof claims.nbf === "number" && claims.nbf - leeway > nowSec) return { ok: false, reason: "not_yet_valid" };
   if (!validClaims(claims)) return { ok: false, reason: "invalid_claims" };
   return { ok: true, claims, kid: header.kid };
 }

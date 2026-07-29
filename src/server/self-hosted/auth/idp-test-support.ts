@@ -47,6 +47,8 @@ export interface TestIdpTokenInput {
   ttlSeconds?: number;
   nowMs?: number;
   jti?: string;
+  /** Optional not-before, epoch seconds (the IdP may emit it; emails must read it). */
+  nbf?: number;
   /** Override the JWS header (bad-alg / missing-kid fixtures). */
   header?: Record<string, unknown>;
 }
@@ -67,6 +69,7 @@ export function signTestIdpToken(key: TestIdpKey, input: TestIdpTokenInput = {})
     iat: nowSec,
     exp: nowSec + (input.ttlSeconds ?? 3600),
     jti: input.jti ?? "jti-test-1",
+    ...(input.nbf !== undefined ? { nbf: input.nbf } : {}),
   };
   const header = input.header ?? { alg: IDP_TOKEN_ALG, kid: key.kid, typ: IDP_TOKEN_TYPE };
   const signingInput = `${b64urlJson(header)}.${b64urlJson(claims)}`;

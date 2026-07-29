@@ -1122,10 +1122,14 @@ export async function handleSelfHostedRequest(
           providerMessageId: providerMessageId || null,
           evidence,
           // Who asserted the outcome — an opaque principal reference, never a
-          // credential. `kid` is the API key id, not the key material.
+          // credential. `kid` is the API key id, not the key material; `sub`
+          // is the IdP principal id. Naming the actual class matters: the
+          // fallthrough used to file IdP principals as 'apikey:unknown'.
           resolvedBy: auth.ctx.principalType === "user"
             ? `user:${auth.ctx.userId ?? "unknown"}`
-            : `apikey:${auth.ctx.kid ?? "unknown"}`,
+            : auth.ctx.principalType === "idp"
+              ? `idp:${auth.ctx.sub ?? "unknown"}`
+              : `apikey:${auth.ctx.kid ?? "unknown"}`,
         });
       } catch (error) {
         return json(400, { error: error instanceof Error ? error.message : "reconciliation rejected" });
