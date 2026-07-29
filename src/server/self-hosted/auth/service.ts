@@ -419,7 +419,8 @@ export async function handleAuthRoutes(
     path === "/v1/tenants" || path.startsWith("/v1/tenants/") ||
     path.startsWith("/v1/memberships/") ||
     path === "/v1/invites/accept" ||
-    path === "/v1/keys" || path.startsWith("/v1/keys/");
+    path === "/v1/keys" || path.startsWith("/v1/keys/") ||
+    path === "/v1/idp-principals" || path.startsWith("/v1/idp-principals/");
   if (!isAuthPath) return null;
 
   try {
@@ -514,6 +515,30 @@ export async function handleAuthRoutes(
     const keyMatch = path.match(/^\/v1\/keys\/([^/]+)$/);
     if (keyMatch) {
       if (method === "DELETE") return await handleRevokeKey(deps, req, url, decodeURIComponent(keyMatch[1]!));
+      return json(405, { error: "method not allowed" });
+    }
+
+    // IdP-principal federation grants (ADR-0001/0002 operator surface).
+    if (path === "/v1/idp-principals") {
+      if (method === "GET") return await handleListIdpPrincipals(deps, req, url);
+      if (method === "POST") return await handleGrantIdpPrincipal(deps, req, url);
+      return json(405, { error: "method not allowed" });
+    }
+    // Matched BEFORE the bare `/v1/idp-principals/{sub}` matcher so the verbs
+    // are never read as a sub.
+    const idpRevokeMatch = path.match(/^\/v1\/idp-principals\/([^/]+)\/revoke$/);
+    if (idpRevokeMatch) {
+      if (method === "POST") return await handleRevokeIdpPrincipal(deps, req, url, decodeURIComponent(idpRevokeMatch[1]!));
+      return json(405, { error: "method not allowed" });
+    }
+    const idpRestoreMatch = path.match(/^\/v1\/idp-principals\/([^/]+)\/restore$/);
+    if (idpRestoreMatch) {
+      if (method === "POST") return await handleRestoreIdpPrincipal(deps, req, url, decodeURIComponent(idpRestoreMatch[1]!));
+      return json(405, { error: "method not allowed" });
+    }
+    const idpPrincipalMatch = path.match(/^\/v1\/idp-principals\/([^/]+)$/);
+    if (idpPrincipalMatch) {
+      if (method === "DELETE") return await handleRevokeIdpPrincipal(deps, req, url, decodeURIComponent(idpPrincipalMatch[1]!));
       return json(405, { error: "method not allowed" });
     }
 
@@ -1278,6 +1303,108 @@ async function handleRevokeKey(deps: AuthServiceDeps, req: Request, url: URL, ki
   }
   const done = await revokeSelfHostedApiKey(deps.keyStore, kid, "revoked by tenant admin");
   return done ? json(200, { revoked: true, kid }) : json(404, { error: "key not found" });
+}
+
+// ---- handlers: IdP-principal federation grants (ADR-0001/0002) ---------------
+
+/**
+ * Resolve + operator-gate an /v1/idp-principals request. Granting, revoking, or
+ * restoring a federation mapping changes WHO may act inside the tenant — the
+ * same privilege boundary as send-key minting — so bare `emails:write` is never
+ * sufficient: interactive callers need owner/admin, automation the wildcard.
+ * The tenant is ALWAYS the caller's resolved tenant, never a parameter.
+ */
+async function requireIdpPrincipalOperator(
+  deps: AuthServiceDeps,
+  req: Request,
+  url: URL,
+  write: boolean,
+): Promise<ResolveResult> {
+  const resolved = await resolveRequestContext(deps, req, url, [write ? "emails:write" : "emails:read"]);
+  if (!resolved.ok) return resolved;
+  if (!isTenantOperator(resolved.ctx)) {
+    return {
+      ok: false,
+      response: json(403, {
+        error: "managing idp principals requires a tenant owner, admin, or operator API key",
+        reason: "operator_required",
+      }),
+    };
+  }
+  return resolved;
+}
+
+async function handleListIdpPrincipals(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+  const resolved = await requireIdpPrincipalOperator(deps, req, url, false);
+  if (!resolved.ok) return resolved.response;
+  const grants = await deps.authStore.listIdpPrincipalTenants(resolved.ctx.tenantId);
+  return json(200, {
+    idp_principals: grants.map((grant) => ({
+      sub: grant.sub,
+      tenant_id: grant.tenantId,
+      idp_tid: grant.idpTid,
+      principal_type: grant.principalType,
+      note: grant.note,
+      created_at: grant.createdAt,
+      revoked_at: grant.revokedAt,
+    })),
+  });
+}
+
+async function handleGrantIdpPrincipal(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+  const resolved = await requireIdpPrincipalOperator(deps, req, url, true);
+  if (!resolved.ok) return resolved.response;
+  const body = await readJsonBody(req);
+  const sub = str(body.sub);
+  if (!sub || sub.length > 200) {
+    return json(400, { error: "sub is required (the IdP principal id, at most 200 characters)" });
+  }
+  const principalTypeRaw = str(body.principal_type) || "service";
+  if (principalTypeRaw !== "user" && principalTypeRaw !== "service") {
+    return json(400, { error: "principal_type must be 'user' or 'service'" });
+  }
+  const idpTid = str(body.idp_tid) || null;
+  const note = str(body.note) || null;
+  const grant = await deps.authStore.upsertIdpPrincipalTenant({
+    sub,
+    tenantId: resolved.ctx.tenantId,
+    idpTid,
+    principalType: principalTypeRaw,
+    note,
+    createdByUserId: resolved.ctx.userId ?? null,
+  });
+  if (!grant) return json(500, { error: "the grant could not be persisted" });
+  return json(201, {
+    grant: {
+      sub: grant.sub,
+      tenant_id: grant.tenantId,
+      idp_tid: grant.idpTid,
+      principal_type: grant.principalType,
+      revoked_at: grant.revokedAt,
+    },
+    // A re-grant NEVER lifts the kill switch; say so instead of implying access.
+    ...(grant.revokedAt
+      ? { warning: "this grant is revoked; POST /v1/idp-principals/{sub}/restore to deliberately lift the kill switch" }
+      : {}),
+  });
+}
+
+async function handleRevokeIdpPrincipal(deps: AuthServiceDeps, req: Request, url: URL, sub: string): Promise<Response> {
+  const resolved = await requireIdpPrincipalOperator(deps, req, url, true);
+  if (!resolved.ok) return resolved.response;
+  const revoked = await deps.authStore.revokeIdpPrincipalTenant(sub, resolved.ctx.tenantId);
+  return revoked
+    ? json(200, { revoked: true, sub })
+    : json(404, { error: "no live idp principal grant for that sub in this organization", reason: "not_found" });
+}
+
+async function handleRestoreIdpPrincipal(deps: AuthServiceDeps, req: Request, url: URL, sub: string): Promise<Response> {
+  const resolved = await requireIdpPrincipalOperator(deps, req, url, true);
+  if (!resolved.ok) return resolved.response;
+  const restored = await deps.authStore.restoreIdpPrincipalTenant(sub, resolved.ctx.tenantId);
+  return restored
+    ? json(200, { restored: true, sub })
+    : json(404, { error: "no revoked idp principal grant for that sub in this organization", reason: "not_found" });
 }
 
 function retryLater(seconds: number): Response {
