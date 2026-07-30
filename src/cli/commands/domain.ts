@@ -333,18 +333,31 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     }
   };
 
-  const addDomainAction = (
+  const addDomainAction = async (
     domain: string,
-    opts: { provider: string; dryRun?: boolean; domainType?: string },
+    opts: { provider: string; dryRun?: boolean; domainType?: string; sendOnly?: boolean; bucket?: string; region?: string },
     commandPrefix: "domain" | "domains",
   ) => {
     try {
-      // The domain is created directly on the /v1/domains API. Providers are a
-      // label carried through, so we do NOT resolve a local provider row or call
-      // a provider adapter.
+      // The domain row is created directly on the /v1/domains API. Providers are
+      // a label carried through, so we do NOT resolve a local provider row or
+      // call a provider adapter. But a row alone is NOT an added domain: mail is
+      // received only when the SES receipt rule (S3 action into the inbound
+      // bucket) exists too, so by default this command provisions BOTH, refuses
+      // up front when the SES leg cannot be provisioned from this context, and
+      // reserves the row-only shape for an explicit `--send-only`. The one way
+      // to get a domain without inbound is to ask for it. (The incident class
+      // this ends: an operator ran `domain add`, skipped the separate
+      // setup-inbound step nothing enforced, and SES 550-bounced every message
+      // for a domain that looked "added".)
       const existing = getDomainByName(opts.provider, domain);
       const mode = resolveEmailsMode();
       const domainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
+      const { getInboundConfig } = await import("../../lib/config.js");
+      const inboundConfig = getInboundConfig();
+      const bucket = opts.bucket ?? inboundConfig.bucket;
+      const region = opts.region ?? inboundConfig.region;
+      const mxRecord = `10 inbound-smtp.${region}.amazonaws.com`;
       if (opts.dryRun) {
         output({
           dry_run: true,
@@ -361,18 +374,115 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           existing: existing ? { id: existing.id, domain: existing.domain } : null,
           would_create_domain: !existing,
           would_call_provider: false,
-          cli_equivalent: `emails ${commandPrefix} add ${domain} --provider ${opts.provider}`,
+          // The whole chain the real run creates (or deliberately skips), so the
+          // plan is honest about receiving, not only about the row.
+          inbound_chain: opts.sendOnly
+            ? {
+              planned: false,
+              reason: "--send-only: the SES receipt rule is deliberately skipped; mail to this domain will not be received",
+            }
+            : {
+              planned: true,
+              bucket: bucket ?? null,
+              region,
+              mx_record: mxRecord,
+              would_wire_receipt_rule: bucket !== undefined,
+              ...(bucket ? {} : {
+                blocked_by: "no inbound S3 bucket is resolvable (pass --bucket or set EMAILS_INBOUND_S3_BUCKET) — "
+                  + "a real run will refuse rather than register a domain that cannot receive",
+              }),
+            },
+          cli_equivalent: `emails ${commandPrefix} add ${domain} --provider ${opts.provider}${opts.sendOnly ? " --send-only" : ""}`,
         }, existing
           ? chalk.dim(`Domain already exists: ${domain} (${existing.id.slice(0, 8)})`)
-          : chalk.dim(`Would create ${domain} on the /v1 API (provider label ${opts.provider}).`));
+          : opts.sendOnly
+            ? chalk.dim(`Would create ${domain} on the /v1 API (provider label ${opts.provider}) WITHOUT inbound — send-only by request.`)
+            : bucket
+              ? chalk.dim(`Would create ${domain} on the /v1 API (provider label ${opts.provider}) AND ensure the SES receipt rule into s3://${bucket} (${region}); MX to publish: ${mxRecord}.`)
+              : chalk.dim(`Would REFUSE: ${domain} cannot receive without an inbound bucket (pass --bucket, set EMAILS_INBOUND_S3_BUCKET, or use --send-only).`));
         return;
       }
-      if (existing) {
-        output(existing, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})`));
+
+      if (opts.sendOnly) {
+        if (existing) {
+          output(existing, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})`) + "\n"
+            + chalk.dim(`  send-only: inbound was deliberately not touched. Audit: emails domain readiness ${domain}`));
+          return;
+        }
+        const created = createDomain(opts.provider, domain);
+        output(created, [
+          chalk.green(`✓ Domain added (send-only): ${domain} (${created.id.slice(0, 8)})`),
+          chalk.yellow(`  Inbound receiving was deliberately NOT provisioned — mail to @${domain} will not be received.`),
+          chalk.dim(`  Wire it later with: emails aws setup-inbound --domain ${domain}   ·   audit: emails domain readiness ${domain}`),
+        ].join("\n"));
         return;
       }
-      const created = createDomain(opts.provider, domain);
-      output(created, chalk.green(`✓ Domain added: ${domain} (${created.id.slice(0, 8)})`));
+
+      // Refuse BEFORE the row write when the SES leg cannot be provisioned from
+      // this context — never a silent app-only domain that bounces its mail.
+      const { preflightInboundProvisioning } = await import("../../lib/inbound-chain.js");
+      const preflight = await preflightInboundProvisioning({ bucket, region });
+      if (!preflight.ok) {
+        handleError(new Error(
+          `Refusing to add ${domain}: ${preflight.message} `
+          + `The domain was NOT registered — an app row without an SES receipt rule silently bounces all inbound mail. `
+          + `Fix the context and re-run, or register a send-only domain on purpose with --send-only.`,
+        ));
+        return;
+      }
+
+      const rec = existing ?? createDomain(opts.provider, domain);
+      try {
+        const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
+        // Merge-safe by construction: get -> merge-by-Sid -> put on the bucket
+        // policy, additive CreateReceiptRule. Idempotent, so re-running `add`
+        // CONVERGES a half-provisioned domain instead of erroring on it.
+        const wired = await setupInboundEmail({ domain, bucket: bucket!, region });
+        const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
+          import("../../lib/config.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
+        // Register the bucket + source so the watcher/sync actually reads what
+        // the receipt rule delivers — the same two calls `domain adopt` and
+        // `aws setup-inbound` make; without them mail lands where nothing reads.
+        addInboundBucket(wired.bucket, region);
+        const source = registerS3Source({
+          bucket: wired.bucket,
+          prefix: wired.s3_prefix,
+          region,
+          name: `${domain} SES/S3 inbound`,
+          status: "live",
+          liveSyncEnabled: true,
+        });
+        output({
+          ...rec,
+          inbound: {
+            bucket: wired.bucket,
+            prefix: wired.s3_prefix,
+            region,
+            rule_set: wired.rule_set,
+            rule_name: wired.rule_name,
+            source_id: source.id,
+            mx_record: wired.mx_record,
+          },
+        }, [
+          existing
+            ? chalk.green(`✓ Domain already registered: ${domain} (${rec.id.slice(0, 8)})`)
+            : chalk.green(`✓ Domain added: ${domain} (${rec.id.slice(0, 8)})`),
+          chalk.green(`✓ SES inbound → s3://${wired.bucket}/${wired.s3_prefix}`) + chalk.dim(` (rule ${wired.rule_name}${wired.bucket_created ? ", bucket created" : ""})`),
+          chalk.dim(`  Publish MX in DNS:  ${wired.mx_record}  (for @${domain})`),
+          chalk.dim(`  Audit the chain any time: emails domain readiness ${domain}`),
+        ].join("\n"));
+      } catch (e) {
+        // The row exists but the chain does not: that is a FAILURE with the
+        // row's state named, never a success that hides a bouncing domain.
+        handleError(new Error(
+          `Domain ${domain} is registered (${rec.id.slice(0, 8)}) but SES inbound was NOT wired: `
+          + `${e instanceof Error ? e.message : String(e)}. Mail to @${domain} will bounce until the receipt rule exists. `
+          + `Complete it with 'emails aws setup-inbound --domain ${domain}${bucket ? ` --bucket ${bucket}` : ""}' or re-run this command; `
+          + `verify with 'emails domain readiness ${domain}'.`,
+        ));
+      }
     } catch (e) {
       handleError(e);
     }
@@ -401,11 +511,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainsCmd
     .command("add <domain>")
-    .description("Add a domain to a provider")
+    .description("Add a domain and provision its SES inbound receipt rule (use --send-only to deliberately skip inbound)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
-    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string }) => addDomainAction(domain, opts, "domains"));
+    .option("--send-only", "Register the domain WITHOUT inbound: deliberately skip the SES receipt rule (mail to the domain will not be received)")
+    .option("--bucket <name>", "Inbound S3 bucket (default: config inbound_s3_bucket / EMAILS_INBOUND_S3_BUCKET)")
+    .option("--region <region>", "AWS region for SES/S3 inbound (default: config inbound_s3_region or us-east-1)")
+    .option("--dry-run", "Resolve inputs and show the planned change — the app row AND the inbound chain — without calling AWS or writing to the DB")
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sendOnly?: boolean; bucket?: string; region?: string }) => addDomainAction(domain, opts, "domains"));
 
   domainsCmd
     .command("connect <domain>")
@@ -457,11 +570,74 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   domainCmd
     .command("add <domain>")
-    .description("Add a domain to a provider")
+    .description("Add a domain and provision its SES inbound receipt rule (use --send-only to deliberately skip inbound)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain-type <type>", "Domain type: system, self_hosted, or local_only")
-    .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
-    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string }) => addDomainAction(domain, opts, "domain"));
+    .option("--send-only", "Register the domain WITHOUT inbound: deliberately skip the SES receipt rule (mail to the domain will not be received)")
+    .option("--bucket <name>", "Inbound S3 bucket (default: config inbound_s3_bucket / EMAILS_INBOUND_S3_BUCKET)")
+    .option("--region <region>", "AWS region for SES/S3 inbound (default: config inbound_s3_region or us-east-1)")
+    .option("--dry-run", "Resolve inputs and show the planned change — the app row AND the inbound chain — without calling AWS or writing to the DB")
+    .action((domain: string, opts: { provider: string; dryRun?: boolean; domainType?: string; sendOnly?: boolean; bucket?: string; region?: string }) => addDomainAction(domain, opts, "domain"));
+
+  // ── readiness: the inbound-chain drift detector ─────────────────────────────
+  // Read-only. Audits the LIVE chain a domain needs to receive — public MX, the
+  // active SES receipt rule set, the app registration, and (best-effort) S3
+  // delivery evidence — and reports each link as ok / MISSING / unknown with its
+  // remediation. This is a different question from the stored lifecycle ledger
+  // (`emails domains status`) and from expected-vs-published DNS
+  // (`emails domain check`): it exists so a half-provisioned domain is caught by
+  // an audit instead of by a bounced message.
+  domainCmd
+    .command("readiness [domain]")
+    .description("Audit the inbound chain (MX → SES receipt rule → app registration → S3 evidence) per domain; exits 1 when drift is found")
+    .option("--bucket <name>", "Inbound S3 bucket to audit against (default: config inbound_s3_bucket / EMAILS_INBOUND_S3_BUCKET)")
+    .option("--region <region>", "AWS region (default: config inbound_s3_region or us-east-1)")
+    .action(async (domainArg: string | undefined, opts: { bucket?: string; region?: string }) => {
+      try {
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const inboundConfig = getInboundConfig();
+        const bucket = opts.bucket ?? inboundConfig.bucket;
+        const region = opts.region ?? inboundConfig.region;
+        const registered = listDomains(undefined, { limit: 1000 });
+        const registeredNames = new Set(registered.map((d) => d.domain.trim().toLowerCase()));
+        const targets = domainArg ? [domainArg] : [...registeredNames];
+        if (targets.length === 0) {
+          output({ bucket: bucket ?? null, region, reports: [] }, chalk.dim("No domains registered — nothing to audit."));
+          return;
+        }
+        const { auditInboundChain } = await import("../../lib/inbound-chain.js");
+        const reports = [];
+        for (const target of targets) {
+          reports.push(await auditInboundChain({
+            domain: target,
+            region,
+            bucket,
+            appRegistered: registeredNames.has(target.trim().toLowerCase()),
+          }));
+        }
+        const statusWord = (status: string): string =>
+          status === "ok" ? chalk.green("ok") : status === "missing" ? chalk.red("MISSING") : chalk.yellow("unknown");
+        const lines: string[] = [chalk.bold("\nInbound chain readiness:")];
+        for (const report of reports) {
+          lines.push(`\n  ${chalk.cyan(report.domain)}  ${report.receiving_ready ? chalk.green("receiving-ready") : report.drift ? chalk.red("DRIFT") : chalk.yellow("unverified")}`);
+          for (const link of report.links) {
+            lines.push(`    ${statusWord(link.status)}  ${link.link}: ${link.detail}`);
+            if (link.status === "missing" && link.remediation) lines.push(chalk.dim(`          fix: ${link.remediation}`));
+          }
+        }
+        const drifted = reports.filter((report) => report.drift);
+        if (drifted.length > 0) {
+          lines.push("");
+          lines.push(chalk.red(`  ${drifted.length} of ${reports.length} domain(s) have a broken inbound chain: ${drifted.map((report) => report.domain).join(", ")}`));
+        }
+        lines.push("");
+        output({ bucket: bucket ?? null, region, reports }, lines.join("\n"));
+        // Drift makes the audit exit non-zero so it can gate cron/CI directly.
+        if (drifted.length > 0) process.exitCode = 1;
+      } catch (e) {
+        handleError(e);
+      }
+    });
 
   domainCmd
     .command("connect <domain>")

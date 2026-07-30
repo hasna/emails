@@ -94,8 +94,13 @@ The domain setup path is the same either way, because none of it is served over
 the wire: `emails domain add` (or `emails domain adopt` for a domain the
 provider has already verified), then `emails domain dns <domain>` for the
 records to publish, then `emails domain check <domain>` to confirm what is live.
-`emails aws setup-inbound` creates the S3 bucket and SES receipt rules when the
-domain should also receive.
+`emails domain add` provisions the SES receipt rule into the inbound S3 bucket
+by default and refuses — before registering anything — when it cannot, so a
+domain never ends up half-provisioned and silently bouncing; pass `--send-only`
+to deliberately register a domain that should not receive. `emails aws
+setup-inbound` creates the S3 bucket and SES receipt rules on its own, and
+`emails domain readiness` audits the whole inbound chain per domain (MX, SES
+receipt rule, app registration, S3 delivery evidence) to catch drift.
 
 Authentication records are required only for the capability you enable:
 
