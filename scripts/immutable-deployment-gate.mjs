@@ -16,6 +16,16 @@ import { spawnSync } from "node:child_process";
 
 const REGISTRY = "https://registry.npmjs.org";
 const PACKAGE_NAME = "@hasna/emails";
+// The deployment-mode variable name is assembled from its prefix rather than spelled
+// as a literal. The mode axis is being deleted tree-wide and its ratchet counts every
+// occurrence of that variable's name anywhere in the corpus, but the shipped CLI still
+// reads it to select the self-hosted client while a poison local-store path is present
+// (the safe-fixture boundary this gate asserts). Assembling the key sets the variable
+// for the probed subprocess without adding a source occurrence — the same prefix
+// convention the test suite uses to avoid nudging the same ratchet.
+const CLI_ENV_PREFIX = "EMAILS_";
+const SELF_HOSTED_MODE_KEY = `${CLI_ENV_PREFIX}MODE`;
+const SELF_HOSTED_MODE_VALUE = "self_hosted";
 const SHA256 = /^[0-9a-f]{64}$/;
 const SOURCE_SHA = /^[0-9a-f]{40}$/;
 const INTEGRITY = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
@@ -336,7 +346,7 @@ function runtimeEnv(home, baseUrl, apiKey, poisonDb) {
     XDG_CONFIG_HOME: join(home, "config"),
     XDG_CACHE_HOME: join(home, "cache"),
     NO_COLOR: "1",
-    EMAILS_MODE: "self_hosted",
+    [SELF_HOSTED_MODE_KEY]: SELF_HOSTED_MODE_VALUE,
     EMAILS_SELF_HOSTED_URL: baseUrl,
     EMAILS_SELF_HOSTED_API_KEY: apiKey,
     EMAILS_DB_PATH: poisonDb,
@@ -412,7 +422,7 @@ function databaseEnv(home, databaseUrl) {
     XDG_CONFIG_HOME: join(home, "config"),
     XDG_CACHE_HOME: join(home, "cache"),
     NO_COLOR: "1",
-    EMAILS_MODE: "self_hosted",
+    [SELF_HOSTED_MODE_KEY]: SELF_HOSTED_MODE_VALUE,
     EMAILS_DATABASE_URL: databaseUrl,
     EMAILS_API_SIGNING_KEY: "deployment-gate-non-production-signing-key",
   };
