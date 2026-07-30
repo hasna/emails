@@ -102,18 +102,33 @@ exit 2
 }
 
 // A fake `secrets` backed by a JSON file so get/set round-trips (persist tests).
-function installVaultBackedSecretsCommand(initialJson: string): string {
+// Emulates the CURRENT (>= 0.2.9) CLI: plaintext `get` requires --show on a
+// captured stdout, `set` accepts the value on stdin via --stdin, and the argv
+// that reached the CLI is recorded so tests can assert no credential rode in it.
+function installVaultBackedSecretsCommand(initialJson: string): { storePath: string; argvLogPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "emails-client-env-vault-"));
   tempDirs.push(dir);
   const storePath = join(dir, "store.json");
+  const argvLogPath = join(dir, "argv.log");
   writeFileSync(storePath, initialJson);
+  writeFileSync(argvLogPath, "");
   const bin = join(dir, "secrets");
   writeFileSync(bin, `#!/bin/sh
 STORE=${JSON.stringify(storePath)}
+ARGV_LOG=${JSON.stringify(argvLogPath)}
+printf '%s\\n' "$*" >> "$ARGV_LOG"
 if [ "$1" = "get" ]; then
+  case "$*" in *--show*|*--plaintext*) ;; *)
+    echo "Value redacted. Use --show to print it." >&2
+    exit 1
+  ;; esac
   if [ -f "$STORE" ]; then cat "$STORE"; exit 0; else exit 2; fi
 fi
 if [ "$1" = "set" ]; then
+  case "$*" in *--stdin*)
+    cat > "$STORE"
+    exit 0
+  ;; esac
   printf '%s' "$3" > "$STORE"
   exit 0
 fi
@@ -121,7 +136,7 @@ exit 2
 `);
   chmodSync(bin, 0o700);
   process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
-  return storePath;
+  return { storePath, argvLogPath };
 }
 
 beforeEach(() => {
@@ -255,7 +270,7 @@ describe("Emails client-env loader", () => {
   });
 
   it("persists a session token into env and merges it into the vault entry", () => {
-    const storePath = installVaultBackedSecretsCommand(
+    const { storePath, argvLogPath } = installVaultBackedSecretsCommand(
       '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"op-key"}',
     );
     process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
@@ -270,6 +285,13 @@ describe("Emails client-env loader", () => {
     expect(stored["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
     expect(stored["EMAILS_SELF_HOSTED_URL"]).toBe("https://emails.example.invalid");
 
+    // REGRESSION (secrets 0.2.9 incident, todos 10bf2fcd): the credential map must
+    // ride to the CLI on stdin, never in argv — argv is visible in `ps` to every
+    // same-user process for the life of the child.
+    const argvLog = readFileSync(argvLogPath, "utf8");
+    expect(argvLog).not.toContain("emss_new_session");
+    expect(argvLog).not.toContain("op-key");
+
     // Clearing removes it from env and the vault entry.
     const cleared = clearClientEnvSessionToken();
     expect(cleared.scope).toBe("vault");
@@ -277,6 +299,76 @@ describe("Emails client-env loader", () => {
     const after = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, string>;
     expect(after[EMAILS_SESSION_TOKEN_ENV]).toBeUndefined();
     expect(after["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
+  });
+
+  it("loads through the secrets >=0.2.9 default-deny guard (get without --show exits 1)", () => {
+    // REGRESSION for the 2026-07-30 fleet outage: secrets 0.2.9 made plain `get`
+    // refuse to write plaintext to a captured (non-TTY) stdout. The loader captures
+    // stdout by definition, so it MUST pass the explicit --show opt-in. This fake
+    // emulates the guard exactly: plain get -> rc=1 + stderr, get --show -> value.
+    const dir = mkdtempSync(join(tmpdir(), "emails-client-env-guard-"));
+    tempDirs.push(dir);
+    const bin = join(dir, "secrets");
+    writeFileSync(bin, `#!/bin/sh
+if [ "$1" = "get" ]; then
+  case "$*" in *--show*|*--plaintext*) ;; *)
+    echo "Value redacted. Use --show to print it." >&2
+    exit 1
+  ;; esac
+  printf '%s\\n' '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"guarded-client-key"}'
+  exit 0
+fi
+exit 2
+`);
+    chmodSync(bin, 0o700);
+    process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const loaded = loadEmailsClientEnvSecret();
+
+    expect(loaded.ready).toBe(true);
+    expect(process.env["EMAILS_SELF_HOSTED_API_KEY"]).toBe("guarded-client-key");
+  });
+
+  it("falls back to the legacy argv `set` when the installed secrets predates --stdin", () => {
+    // A pre-0.2.9 `secrets` rejects `set <key> --stdin` with a usage error (the
+    // value positional is missing) but accepts the legacy `set <key> <value>`.
+    // The fallback is gated on that usage error so a genuine write failure on a
+    // current CLI is never retried with the value in argv.
+    const dir = mkdtempSync(join(tmpdir(), "emails-client-env-legacy-"));
+    tempDirs.push(dir);
+    const storePath = join(dir, "store.json");
+    writeFileSync(
+      storePath,
+      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"op-key"}',
+    );
+    const bin = join(dir, "secrets");
+    writeFileSync(bin, `#!/bin/sh
+STORE=${JSON.stringify(storePath)}
+if [ "$1" = "get" ]; then
+  # Pre-0.2.9: --show is an unknown trailing flag, silently ignored.
+  if [ -f "$STORE" ]; then cat "$STORE"; exit 0; else exit 2; fi
+fi
+if [ "$1" = "set" ]; then
+  case "$*" in *--stdin*)
+    echo "Usage: secrets set <key> <value>" >&2
+    exit 1
+  ;; esac
+  printf '%s' "$3" > "$STORE"
+  exit 0
+fi
+exit 2
+`);
+    chmodSync(bin, 0o700);
+    process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    const result = persistClientEnvSessionToken("emss_legacy_session");
+
+    expect(result.scope).toBe("vault");
+    const stored = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, string>;
+    expect(stored[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_legacy_session");
+    expect(stored["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
   });
 
   it("persists to the process env only when no vault pointer is configured", () => {
