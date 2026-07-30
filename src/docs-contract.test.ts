@@ -85,4 +85,33 @@ describe("agent documentation contract", () => {
     expect(cutover).toContain("0020_attachment_repair_ledger");
     expect(cutover).toContain("pre-0020");
   });
+
+  it("keeps station-local retirement behind the two-station backup and rollback gate", () => {
+    const runtime = readFileSync(join(root, "docs", "SELF_HOSTED_RUNTIME.md"), "utf8");
+    const retirement = readFileSync(join(root, "docs", "STATION_LOCAL_RETIREMENT.md"), "utf8");
+    const smoke = readFileSync(join(root, "scripts", "self-hosted-client-smoke.sh"), "utf8");
+
+    expect(runtime).toContain("./scripts/self-hosted-client-smoke.sh");
+    expect(runtime).toContain("STATION_LOCAL_RETIREMENT.md");
+    for (const phrase of [
+      "Two-station pre-stop barrier",
+      "independent backup verifier",
+      "-wal",
+      "-shm",
+      "attachment/cache",
+      "final fenced backup",
+      "Remote proof and non-recreation proof",
+      "original-paths.tsv",
+      "Rollback",
+      "retention owner",
+      "Never delete",
+    ]) {
+      expect(retirement).toContain(phrase);
+    }
+    expect(smoke).toContain('test "${HASNA_EMAILS_DB_PATH+x}" = "x"');
+    expect(smoke).toContain('test "${EMAILS_DB_PATH+x}" = "x"');
+    expect(smoke).toContain('"$emails_cli" status --json');
+    expect(smoke).toContain('"$emails_cli" provider list --json');
+    expect(smoke).toContain('"$emails_cli" inbox list --limit 1 --json');
+  });
 });

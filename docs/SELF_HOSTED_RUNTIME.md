@@ -18,6 +18,19 @@ entry referenced by `EMAILS_CLIENT_ENV_SECRET` may carry the URL and any one of
 those credentials. See [AUTHENTICATION.md](AUTHENTICATION.md) for the account,
 tenant-key, and optional IdP flows.
 
+For a repeatable read-only client check, run the published smoke from the exact
+checked-out release on every client station:
+
+```bash
+./scripts/self-hosted-client-smoke.sh
+```
+
+It refuses local database selectors, then runs `emails --version`, remote
+status, provider-list, and a one-row inbox read. It performs no send or mailbox
+mutation and emits only an aggregate pass record; command responses stay in a
+private temporary directory. This is the smoke referenced by
+[STATION_LOCAL_RETIREMENT.md](STATION_LOCAL_RETIREMENT.md).
+
 Service configuration:
 
 ```bash
