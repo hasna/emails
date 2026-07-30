@@ -158,26 +158,31 @@ describe("credential and session resolution", () => {
     const { client } = fakeClient({
       get(sql, params) {
         if (sql.includes("api_key_tenants")) return params[0] === "known-kid" ? { tenant_id: "tenant-1" } : null;
+        return null;
+      },
+      many(sql, params) {
         if (sql.includes("idp_principal_tenants")) {
           return params[0] === "known-sub"
-            ? { sub: "known-sub", tenant_id: "tenant-1", idp_tid: "idp-tenant", principal_type: "user", revoked_at: null }
-            : null;
+            ? [{ sub: "known-sub", tenant_id: "tenant-1", idp_tid: "idp-tenant", principal_type: "user", revoked_at: null }]
+            : [];
         }
-        return null;
+        return [];
       },
     });
     const store = new AuthStore(client);
 
     expect(await store.getApiKeyTenant("missing")).toBeNull();
     expect(await store.getApiKeyTenant("known-kid")).toBe("tenant-1");
-    expect(await store.getIdpPrincipalTenant("missing")).toBeNull();
-    expect(await store.getIdpPrincipalTenant("known-sub")).toEqual({
-      sub: "known-sub",
-      tenantId: "tenant-1",
-      idpTid: "idp-tenant",
-      principalType: "user",
-      revokedAt: null,
-    });
+    expect(await store.listIdpPrincipalTenantsForSub("missing")).toEqual([]);
+    expect(await store.listIdpPrincipalTenantsForSub("known-sub")).toEqual([
+      {
+        sub: "known-sub",
+        tenantId: "tenant-1",
+        idpTid: "idp-tenant",
+        principalType: "user",
+        revokedAt: null,
+      },
+    ]);
   });
 
   it("upserts default IdP fields and reports whether revocation changed a row", async () => {

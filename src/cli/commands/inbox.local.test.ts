@@ -191,19 +191,13 @@ describe("local inbox commands", () => {
   it("deletes and clears persisted local rows with explicit confirmation", async () => {
     const first = seed();
     seed();
-    const logs: string[] = [];
-    const originalLog = console.log;
-    console.log = ((message?: unknown) => { logs.push(String(message ?? "")); }) as typeof console.log;
-    try {
-      await runInbox(["inbox", "delete", first.id, "--yes"]);
-      expect(getInboundEmail(first.id, getDatabase())).toBeNull();
-      await runInbox(["inbox", "clear", "--yes"]);
-    } finally {
-      console.log = originalLog;
-    }
 
-    expect(logs.join("\n")).toContain("Deleted email");
-    expect(logs.join("\n")).toContain("Cleared 1 email");
+    const deleted = await runInbox(["inbox", "delete", first.id, "--yes"]);
+    expect(getInboundEmail(first.id, getDatabase())).toBeNull();
+    expect(deleted.formatted).toContain("Deleted email");
+
+    const cleared = await runInbox(["inbox", "clear", "--yes"]);
+    expect(cleared.formatted).toContain("Cleared 1 email");
     expect((await runInbox(["inbox", "list"])).data).toEqual([]);
   });
 });
