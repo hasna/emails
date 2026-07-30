@@ -234,6 +234,24 @@ describe("domain add — full-chain provisioning", () => {
     expect(result.stderr).toContain("emails aws setup-inbound --domain partial.example.com");
   });
 
+  it("names the TRUE row state when refusing for an already-registered domain", async () => {
+    // Re-running `add` on an existing half-provisioned domain in a context that
+    // cannot provision must not claim the domain "was NOT registered" — it is.
+    await stub.seed({
+      domains: [{ id: "dom-already", domain: "already.example.com", provider: "sandbox", verified: false }],
+    });
+
+    const result = await runDomainCommandExpectingExit([
+      "domain", "add", "already.example.com", "--provider", "sandbox",
+    ]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("already registered");
+    expect(result.stderr).toContain("dom-alre");
+    expect(result.stderr).not.toContain("NOT registered");
+    expect(await stub.list("domains")).toHaveLength(1);
+  });
+
   it("--send-only deliberately skips inbound and says so — the ONLY way to get a domain without the chain", async () => {
     const result = await runDomainCommand([
       "domain", "add", "outbound.example.com", "--provider", "sandbox", "--send-only",

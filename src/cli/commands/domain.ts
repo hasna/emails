@@ -423,10 +423,15 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const { preflightInboundProvisioning } = await import("../../lib/inbound-chain.js");
       const preflight = await preflightInboundProvisioning({ bucket, region });
       if (!preflight.ok) {
-        handleError(new Error(
-          `Refusing to add ${domain}: ${preflight.message} `
-          + `The domain was NOT registered — an app row without an SES receipt rule silently bounces all inbound mail. `
-          + `Fix the context and re-run, or register a send-only domain on purpose with --send-only.`,
+        // The refusal names the true row state: an existing registration is not
+        // un-registered by refusing, and a new one was never written.
+        handleError(new Error(existing
+          ? `${domain} is already registered (${existing.id.slice(0, 8)}) but its inbound chain cannot be provisioned from this context: ${preflight.message} `
+            + `An app row without an SES receipt rule silently bounces all inbound mail. Fix the context and re-run, `
+            + `then verify with 'emails domain readiness ${domain}'.`
+          : `Refusing to add ${domain}: ${preflight.message} `
+            + `The domain was NOT registered — an app row without an SES receipt rule silently bounces all inbound mail. `
+            + `Fix the context and re-run, or register a send-only domain on purpose with --send-only.`,
         ));
         return;
       }
