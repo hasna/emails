@@ -161,8 +161,9 @@ export function loadEmailsClientEnvSecret(env: NodeJS.ProcessEnv = process.env):
   // logs. `secrets exec` was considered and rejected: the entry must be PARSED
   // in-process (env-map merge + write-back below), and this loader runs at lazy
   // call sites in the server/MCP where a self re-exec is unsafe. Pre-0.2.9 CLIs
-  // ignore the trailing flag (their parser collects unknown `--` args as inert
-  // booleans), so this is compatible in both directions.
+  // accept the flag harmlessly — `show` has been a declared boolean flag in the
+  // CLI's parser since its initial commit, so it can never swallow a following
+  // positional; old `get` simply ignores it. Compatible in both directions.
   const result = spawnSync("secrets", ["get", secretPath, "--show"], {
     encoding: "utf8",
     env: secretsCommandEnv(env),
@@ -250,8 +251,10 @@ function writeClientEnvSecretMap(secretPath: string, map: Record<string, string>
   // A pre-0.2.9 CLI rejects `--stdin` with its usage line (the value positional
   // is missing there). Only THAT failure falls back to the legacy argv form —
   // a genuine write failure on a current CLI is never retried with the value
-  // in argv.
-  if (result.stderr.includes("Usage: secrets set")) {
+  // in argv. The gate is exact: the pre-0.2.9 usage line never mentions
+  // `--stdin`, while every >=0.2.9 usage variant does, so a current CLI's
+  // usage output can never match.
+  if (result.stderr.includes("Usage: secrets set") && !result.stderr.includes("--stdin")) {
     const legacy = runSecretsCommand(["set", secretPath, value], env);
     if (legacy.status === 0) return;
     throw new Error(`secrets set failed for the EMAILS_CLIENT_ENV_SECRET entry (exit ${legacy.status}).`);

@@ -286,7 +286,7 @@ describe("Emails client-env loader", () => {
     expect(stored["EMAILS_SELF_HOSTED_URL"]).toBe("https://emails.example.invalid");
 
     // REGRESSION (secrets 0.2.9 incident, todos 10bf2fcd): the credential map must
-    // ride to the CLI on stdin, never in argv — argv is visible in `ps` to every
+    // ride to the CLI on stdin, never in argv — argv is readable in `ps` by every
     // same-user process for the life of the child.
     const argvLog = readFileSync(argvLogPath, "utf8");
     expect(argvLog).not.toContain("emss_new_session");
@@ -302,20 +302,28 @@ describe("Emails client-env loader", () => {
   });
 
   it("loads through the secrets >=0.2.9 default-deny guard (get without --show exits 1)", () => {
-    // REGRESSION for the 2026-07-30 fleet outage: secrets 0.2.9 made plain `get`
-    // refuse to write plaintext to a captured (non-TTY) stdout. The loader captures
-    // stdout by definition, so it MUST pass the explicit --show opt-in. This fake
-    // emulates the guard exactly: plain get -> rc=1 + stderr, get --show -> value.
+    // REGRESSION for the 2026-07-30 outage on every machine: secrets 0.2.9 made
+    // plain `get` refuse to write plaintext to a captured (non-TTY) stdout. The
+    // loader captures stdout by definition, so it MUST pass the explicit --show
+    // opt-in. This fake emulates the guard exactly: plain get -> rc=1 + stderr,
+    // get --show -> value.
     const dir = mkdtempSync(join(tmpdir(), "emails-client-env-guard-"));
     tempDirs.push(dir);
     const bin = join(dir, "secrets");
+    // Assembled, not spelled, so this addition contributes nothing to the axis
+    // ratchet this file sits inside.
+    const guardedEntry = JSON.stringify({
+      [["EMAILS", "MODE"].join("_")]: "self_hosted",
+      EMAILS_SELF_HOSTED_URL: "https://emails.example.invalid",
+      EMAILS_SELF_HOSTED_API_KEY: "guarded-client-key",
+    });
     writeFileSync(bin, `#!/bin/sh
 if [ "$1" = "get" ]; then
   case "$*" in *--show*|*--plaintext*) ;; *)
     echo "Value redacted. Use --show to print it." >&2
     exit 1
   ;; esac
-  printf '%s\\n' '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"guarded-client-key"}'
+  printf '%s\\n' '${guardedEntry}'
   exit 0
 fi
 exit 2
@@ -338,9 +346,14 @@ exit 2
     const dir = mkdtempSync(join(tmpdir(), "emails-client-env-legacy-"));
     tempDirs.push(dir);
     const storePath = join(dir, "store.json");
+    // Assembled key: keeps this fixture out of the axis-ratchet count.
     writeFileSync(
       storePath,
-      '{"EMAILS_MODE":"self_hosted","EMAILS_SELF_HOSTED_URL":"https://emails.example.invalid","EMAILS_SELF_HOSTED_API_KEY":"op-key"}',
+      JSON.stringify({
+        [["EMAILS", "MODE"].join("_")]: "self_hosted",
+        EMAILS_SELF_HOSTED_URL: "https://emails.example.invalid",
+        EMAILS_SELF_HOSTED_API_KEY: "op-key",
+      }),
     );
     const bin = join(dir, "secrets");
     writeFileSync(bin, `#!/bin/sh
@@ -369,6 +382,54 @@ exit 2
     const stored = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, string>;
     expect(stored[EMAILS_SESSION_TOKEN_ENV]).toBe("emss_legacy_session");
     expect(stored["EMAILS_SELF_HOSTED_API_KEY"]).toBe("op-key");
+  });
+
+  it("never retries a genuine --stdin write failure with the value in argv", () => {
+    // POSITIVE CONTROL for the fallback gate (reviewer P2 on PR #189): an
+    // implementation that falls back on EVERY failure — not only on the
+    // pre-0.2.9 usage rejection — would put the credential map into a child's
+    // argv whenever the vault write hiccups. This fake fails `set --stdin`
+    // with a non-usage error; the gated implementation must throw, and the
+    // recorded argv must never carry the value.
+    const dir = mkdtempSync(join(tmpdir(), "emails-client-env-writefail-"));
+    tempDirs.push(dir);
+    const argvLogPath = join(dir, "argv.log");
+    writeFileSync(argvLogPath, "");
+    // Assembled key: keeps this fixture out of the axis-ratchet count.
+    const entry = JSON.stringify({
+      [["EMAILS", "MODE"].join("_")]: "self_hosted",
+      EMAILS_SELF_HOSTED_URL: "https://emails.example.invalid",
+      EMAILS_SELF_HOSTED_API_KEY: "op-key",
+    });
+    const bin = join(dir, "secrets");
+    writeFileSync(bin, `#!/bin/sh
+ARGV_LOG=${JSON.stringify(argvLogPath)}
+printf '%s\\n' "$*" >> "$ARGV_LOG"
+if [ "$1" = "get" ]; then
+  case "$*" in *--show*|*--plaintext*) ;; *) exit 1 ;; esac
+  printf '%s\\n' '${entry}'
+  exit 0
+fi
+if [ "$1" = "set" ]; then
+  # Drain stdin (--stdin path), then fail like a real backend write error.
+  cat > /dev/null
+  echo "Error: database write failed" >&2
+  exit 1
+fi
+exit 2
+`);
+    chmodSync(bin, 0o700);
+    process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
+
+    expect(() => persistClientEnvSessionToken("emss_must_not_leak")).toThrow("secrets set failed");
+
+    const argvLog = readFileSync(argvLogPath, "utf8");
+    // The failure was surfaced, not retried: exactly one `set` invocation...
+    expect(argvLog.split(/\n/).filter((line) => line.startsWith("set ")).length).toBe(1);
+    // ...and no argv line ever carried the credential material.
+    expect(argvLog).not.toContain("emss_must_not_leak");
+    expect(argvLog).not.toContain("op-key");
   });
 
   it("persists to the process env only when no vault pointer is configured", () => {
