@@ -57,6 +57,9 @@ async function runAddressCommandExpectingExit(args: string[]) {
 }
 
 beforeAll(async () => {
+  // Verification writes an append-only `/v1/provisioning` audit event through
+  // the store seam, whose fail-closed writer validates writable columns against
+  // the service contract before sending the request.
   stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
@@ -129,6 +132,51 @@ describe("address list command", () => {
     expect(result.data).toEqual([]);
     expect(result.out).toContain("No addresses configured.");
   });
+
+  it("filters unverified addresses before applying the requested page", async () => {
+    const addresses = [];
+    for (let i = 1; i <= 25; i++) {
+      const stamp = `2026-01-${String(i).padStart(2, "0")}T00:00:00.000Z`;
+      addresses.push({
+        id: crypto.randomUUID(),
+        email: `sender-${String(i).padStart(2, "0")}@example.com`,
+        provider_id: "prov-1",
+        status: "active",
+        // The newest default page is entirely verified. Filtering a page that
+        // was already cut would therefore miss all five risky senders.
+        verified: i > 5,
+        created_at: stamp,
+        updated_at: stamp,
+      });
+    }
+    await stub.seed({ addresses });
+
+    const result = await runAddressCommand(["address", "list", "--unverified", "--limit", "2"]);
+
+    expect(result.data).toHaveLength(2);
+    expect(result.data).toMatchObject([
+      { email: "sender-05@example.com", verified: false },
+      { email: "sender-04@example.com", verified: false },
+    ]);
+    expect(result.out).not.toContain("sender-25@example.com");
+  });
+
+  it("reports when the unverified filter has no matches", async () => {
+    await stub.seed({
+      addresses: [{
+        id: crypto.randomUUID(),
+        email: "ready@example.com",
+        status: "active",
+        verified: true,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    const result = await runAddressCommand(["address", "list", "--unverified"]);
+    expect(result.data).toEqual([]);
+    expect(result.out).toContain("No unverified addresses.");
+  });
 });
 
 describe("address add / verify / suggest commands", () => {
@@ -142,6 +190,31 @@ describe("address add / verify / suggest commands", () => {
     const again = await runAddressCommand(["address", "add", "ops@example.com", "--provider", "prov-1"]);
     expect(again.out).toContain("already exists");
     expect((await stub.list("addresses")).filter((a) => a["email"] === "ops@example.com")).toHaveLength(1);
+  });
+
+  it("can add a verified address and records the ownership assertion first", async () => {
+    const added = await runAddressCommand([
+      "address", "add", "trusted@example.com", "--provider", "prov-1", "--verified",
+      "--actor", "operator@example.com", "--reason", "SES identity confirmed",
+    ]);
+
+    expect(added.data).toMatchObject({ email: "trusted@example.com", verified: true });
+    expect(added.out).toContain("Verified address added");
+    const events = await stub.list("provisioning");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_type: "address",
+      entity_id: (added.data as { id: string }).id,
+      from_state: "unverified",
+      to_state: "verification_authorized",
+      detail_json: {
+        action: "set_verified",
+        actor: "operator@example.com",
+        reason: "SES identity confirmed",
+        command: "emails address add --verified",
+        requested_verified: true,
+      },
+    });
   });
 
   it("reports verification status from the /v1 record", async () => {
@@ -377,7 +450,7 @@ describe("address list reports real ownership", () => {
 // set-owner, transfer-owner, unassign-owner, owner-history, suggest, provision,
 // verify, remove, suspend, activate, quota) found no verb that sets the flag.
 //   * `verify` only READS it — the name is the trap,
-//   * `add` has no --verified option,
+//   * `add` had no --verified option,
 //   * `activate` reactivates a SUSPENDED address, a different field,
 //   * `provision` refuses in every mode.
 // The only route left was a hand-rolled PATCH /v1/addresses/{id}. Every layer
@@ -394,6 +467,31 @@ describe("address set-verified command", () => {
     // The confirmation has to state the CONSEQUENCE. "Updated address" would leave
     // the operator unsure whether the thing that was refusing their mail is fixed.
     expect(out).toContain("no longer refused");
+  });
+
+  it("records who authorized the verification and why", async () => {
+    const created = createAddress({ email: "audited@example.com", provider_id: "p1" });
+
+    await runAddressCommand([
+      "address", "set-verified", created.id, "--yes",
+      "--actor", "on-call", "--reason", "domain ownership reviewed",
+    ]);
+
+    const events = await stub.list("provisioning");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_type: "address",
+      entity_id: created.id,
+      from_state: "unverified",
+      to_state: "verification_authorized",
+      detail_json: {
+        action: "set_verified",
+        actor: "on-call",
+        reason: "domain ownership reviewed",
+        command: "emails address set-verified",
+        requested_verified: true,
+      },
+    });
   });
 
   it("accepts an id as well as an email", async () => {
