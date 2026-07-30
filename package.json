@@ -47,6 +47,7 @@
     "test": "bash scripts/run-hermetic-tests.sh shared",
     "test:shared": "bash scripts/run-hermetic-tests.sh shared",
     "test:hermetic": "bash scripts/run-hermetic-tests.sh isolated",
+    "deployment:policy": "bun scripts/deployment-workflow-policy.mjs",
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts src/no-cloud-artifact-scan.test.ts",
     "no-cloud:pack": "bun scripts/no-cloud-artifact-scan.mjs",
     "secrets:staged": "node scripts/scan-staged-secrets.mjs",
