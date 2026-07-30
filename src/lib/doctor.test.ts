@@ -746,7 +746,10 @@ describe("runDiagnostics parity", () => {
 
   it("warns when this machine holds no config file and passes when it does", async () => {
     const absent = await runDiagnostics({ _store: realStore() });
-    expect(named(absent, "Config").status).toBe("warn");
+    const absentConfig = named(absent, "Config");
+    expect(absentConfig.status).toBe("warn");
+    expect(absentConfig.message).toContain("created automatically");
+    expect(absentConfig.message).not.toContain("emails config set");
 
     const { setConfigValue } = await import("./config.js");
     setConfigValue("cloudflare_account_id", "acct");

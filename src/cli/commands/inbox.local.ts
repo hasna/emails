@@ -1111,7 +1111,13 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const bucket = opts.bucket ?? inbound.bucket;
         const region = opts.region ?? inbound.region;
         const prefix = opts.prefix ?? inbound.prefix;
-        if (!bucket && !opts.source) { handleError(new Error("No S3 bucket: pass --bucket, --source, or set 'emails config set inbound_s3_bucket <name>'")); return; }
+        if (!bucket && !opts.source) {
+          handleError(new Error(
+            "No S3 bucket: pass --bucket, --source, or set EMAILS_INBOUND_S3_BUCKET "
+            + "(equivalently, edit inbound_s3_bucket in ~/.hasna/emails/config.json).",
+          ));
+          return;
+        }
         const { syncS3Inbox } = await import("../../lib/s3-sync.local.js");
         console.log(chalk.dim(`Syncing emails from ${opts.source ? `source ${opts.source}` : `s3://${bucket}/${prefix ?? ""}`}...`));
         const result = await syncS3Inbox({
