@@ -146,7 +146,13 @@ afterEach(() => {
   }
   if (savedHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = savedHome;
-  process.exitCode = savedExitCode;
+  // The readiness drift test sets `process.exitCode = 1` through the command
+  // action. Restoring the SAVED value is not enough: assigning `undefined` does
+  // not clear an already-set exit code in bun, so the whole test process would
+  // exit 1 with every test green — exactly the failure CI's isolated diagnosis
+  // step surfaced. An explicit 0 clears it; bun still exits non-zero on its own
+  // when any test actually fails.
+  process.exitCode = typeof savedExitCode === "number" ? savedExitCode : 0;
   resetS3SendHandler();
   resetStsSendHandler();
 });
