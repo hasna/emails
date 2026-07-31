@@ -15,10 +15,9 @@ describe("emails ui build contract", () => {
     const cliBuild = pkg.scripts["build:cli"] ?? "";
     const tuiRuntimeBuild = pkg.scripts["build:tui-runtime"] ?? "";
     const buildHelper = readFileSync(join(root, "scripts", "build-tui-runtime.ts"), "utf8");
-    const externalConfiguration = buildHelper.slice(
-      buildHelper.indexOf("const nativePackages"),
-      buildHelper.indexOf("const result"),
-    );
+    // The list literal only — the surrounding prose names the packages it must not contain.
+    const externalStart = buildHelper.indexOf("const externalPackages = [");
+    const externalConfiguration = buildHelper.slice(externalStart, buildHelper.indexOf("];", externalStart));
 
     expect(cliBuild).toContain("--packages external");
     expect(cliBuild).toContain("--splitting");
@@ -40,9 +39,13 @@ describe("emails ui build contract", () => {
     expect(externalConfiguration).not.toContain("@opentui/solid");
     expect(externalConfiguration).not.toContain("solid-js");
     expect(buildHelper).toContain("createSolidTransformPlugin");
-    expect(buildHelper).toContain('"@opentui/core-linux-arm64"');
-    expect(buildHelper).toContain('"@opentui/core-darwin-arm64"');
-    expect(buildHelper).toContain("...nativePackages");
+    // Guards the slice above: a renamed list would otherwise make every check on it vacuous.
+    expect(externalConfiguration).toContain('"@aws-sdk/*"');
+    // `@opentui/core` external, its prebuilts never named here. Listing a `@opentui/core-<platform>`
+    // package externalises the prebuilt away from the module that dlopens it, which is what shipped
+    // a UI that could not start in 1.3.4 — see src/cli/tui/runtime-bundle-externals.test.ts.
+    expect(externalConfiguration).toContain('"@opentui/core"');
+    expect(externalConfiguration).not.toContain("@opentui/core-");
     expect(buildHelper).not.toContain("nativeBundleCandidates");
     expect(buildHelper).not.toContain("bundledNative");
   });
