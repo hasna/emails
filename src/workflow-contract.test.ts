@@ -6,7 +6,7 @@ import { join } from "node:path";
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
 const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f";
-const unreleasedSectionSha256 = "0bbd40d1dd790d42e965f2ce4dc632d9b1905ce83c971928bdba8e11b3ec751f";
+const unreleasedSectionSha256 = "da5526d127f3a85c04d4b0d9f95bb4dd22edcbee7b34ff8999134fb180383699";
 const release132Section = `## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
