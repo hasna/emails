@@ -43,7 +43,7 @@ describe("emails ui build contract", () => {
     expect(externalConfiguration).toContain('"@aws-sdk/*"');
     // `@opentui/core` external, its prebuilts never named here. Listing a `@opentui/core-<platform>`
     // package externalises the prebuilt away from the module that dlopens it, which is what shipped
-    // a UI that could not start in 1.3.4 — see src/cli/tui/runtime-bundle-externals.test.ts.
+    // a UI that could not start in 1.3.4 — see src/cli/tui/ui-runtime-contract.test.ts.
     expect(externalConfiguration).toContain('"@opentui/core"');
     expect(externalConfiguration).not.toContain("@opentui/core-");
     expect(buildHelper).not.toContain("nativeBundleCandidates");

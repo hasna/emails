@@ -15,7 +15,7 @@ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin";
 // a devDependency and must not ship as a runtime dependency.
 //
 // Everything listed here is imported from the installed package at runtime, so every entry
-// must also be a declared runtime dependency — src/cli/tui/runtime-bundle-externals.test.ts
+// must also be a declared runtime dependency — src/cli/tui/ui-runtime-contract.test.ts
 // enforces exactly that against the built artifact.
 const externalPackages = [
   "@aws-sdk/*",
