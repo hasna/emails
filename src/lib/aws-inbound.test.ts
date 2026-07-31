@@ -165,6 +165,49 @@ describe("setupInboundEmail", () => {
     const result = await setupInboundEmail({ domain: "x.com", bucket: "existing-bucket" });
     expect(result.bucket_created).toBe(false);
   });
+
+  it("converges an existing receipt rule with the owned name instead of accepting stale wiring", async () => {
+    const updates: unknown[] = [];
+    mockS3Send.mockImplementation(async () => ({}));
+    mockSesSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { constructor?: { name?: string }; input?: unknown };
+      const name = c?.constructor?.name ?? "";
+      if (name === "DescribeActiveReceiptRuleSetCommand") return { Metadata: { Name: "emails-inbound" } };
+      if (name === "CreateReceiptRuleCommand") throw Object.assign(new Error("already exists"), { name: "AlreadyExistsException" });
+      if (name === "DescribeReceiptRuleCommand") {
+        return {
+          Rule: {
+            Name: "inbound-example-com",
+            Enabled: false,
+            Recipients: ["example.com"],
+            Actions: [{ S3Action: { BucketName: "old-bucket", ObjectKeyPrefix: "inbound/example.com/" } }],
+          },
+        };
+      }
+      if (name === "UpdateReceiptRuleCommand") {
+        updates.push(c.input);
+        return {};
+      }
+      return {};
+    });
+
+    const result = await setupInboundEmail({
+      domain: "example.com",
+      bucket: "my-emails",
+      region: "us-east-1",
+    });
+
+    expect(result.rule_created).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      RuleSetName: "emails-inbound",
+      Rule: {
+        Name: "inbound-example-com",
+        Enabled: true,
+        Actions: [{ S3Action: { BucketName: "my-emails", ObjectKeyPrefix: "inbound/example.com/" } }],
+      },
+    });
+  });
 });
 
 // ─── Bucket-policy merge — regression for the 2026-07-28 prod ingestion freeze ──

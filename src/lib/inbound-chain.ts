@@ -91,6 +91,8 @@ export interface SesReceiptRuleView {
   recipients: string[];
   /** Bucket names of the rule's S3 actions (empty = no S3 action). */
   s3_buckets: string[];
+  /** S3 delivery targets for prefix-sensitive readiness checks. */
+  s3_actions?: Array<{ bucket: string; prefix: string }>;
 }
 
 export type ActiveReceiptRules =
@@ -107,14 +109,20 @@ export async function fetchActiveReceiptRules(region: string): Promise<ActiveRec
     const { SESClient, DescribeActiveReceiptRuleSetCommand } = await import("@aws-sdk/client-ses");
     const ses = new SESClient({ region });
     const active = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
-    const rules = (active.Rules ?? []).map((rule) => ({
-      name: rule.Name ?? "",
-      enabled: rule.Enabled === true,
-      recipients: (rule.Recipients ?? []).map((recipient) => recipient.trim().toLowerCase()),
-      s3_buckets: (rule.Actions ?? [])
-        .map((action) => action.S3Action?.BucketName)
-        .filter((bucket): bucket is string => typeof bucket === "string"),
-    }));
+    const rules = (active.Rules ?? []).map((rule) => {
+      const s3Actions = (rule.Actions ?? []).flatMap((action) => {
+        const s3 = action.S3Action;
+        if (!s3 || typeof s3.BucketName !== "string") return [];
+        return [{ bucket: s3.BucketName, prefix: s3.ObjectKeyPrefix ?? "" }];
+      });
+      return {
+        name: rule.Name ?? "",
+        enabled: rule.Enabled === true,
+        recipients: (rule.Recipients ?? []).map((recipient) => recipient.trim().toLowerCase()),
+        s3_buckets: s3Actions.map((action) => action.bucket),
+        s3_actions: s3Actions,
+      };
+    });
     return { ok: true, rule_set: active.Metadata?.Name ?? null, rules };
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };
@@ -178,6 +186,7 @@ export function assessMxLink(assessment: MxAssessment, region: string): ChainLin
 
 export function assessSesRuleLink(rules: ActiveReceiptRules, domain: string, bucket: string | undefined): ChainLink {
   const setup = `emails aws setup-inbound --domain ${domain}${bucket ? ` --bucket ${bucket}` : ""} (or re-run 'emails domain add ${domain}')`;
+  const wantedPrefix = `inbound/${domain}/`;
   if (!rules.ok) {
     return {
       link: "ses_receipt_rule",
@@ -218,20 +227,29 @@ export function assessSesRuleLink(rules: ActiveReceiptRules, domain: string, buc
     };
   }
   if (bucket) {
-    const delivering = withS3.find((rule) => rule.s3_buckets.includes(bucket));
+    const bucketMatches = withS3.filter((rule) => rule.s3_buckets.includes(bucket));
+    const delivering = bucketMatches.find((rule) => {
+      if (!rule.s3_actions) return true;
+      return rule.s3_actions.some((action) => action.bucket === bucket && action.prefix === wantedPrefix);
+    });
     if (!delivering) {
+      const wrongPrefix = bucketMatches
+        .flatMap((rule) => rule.s3_actions ?? [])
+        .find((action) => action.bucket === bucket);
       const elsewhere = [...new Set(withS3.flatMap((rule) => rule.s3_buckets))].join(", ");
       return {
         link: "ses_receipt_rule",
         status: "missing",
-        detail: `rule '${withS3[0]!.name}' delivers to ${elsewhere}, not the configured inbound bucket ${bucket} — mail lands where nothing reads it`,
+        detail: wrongPrefix
+          ? `rule '${bucketMatches[0]!.name}' delivers to s3://${bucket}/${wrongPrefix.prefix}, not s3://${bucket}/${wantedPrefix} — mail lands where the registered source does not read it`
+          : `rule '${withS3[0]!.name}' delivers to ${elsewhere}, not the configured inbound bucket ${bucket} — mail lands where nothing reads it`,
         remediation: setup,
       };
     }
     return {
       link: "ses_receipt_rule",
       status: "ok",
-      detail: `rule '${delivering.name}' in set '${rules.rule_set}' delivers to s3://${bucket}`,
+      detail: `rule '${delivering.name}' in set '${rules.rule_set}' delivers to s3://${bucket}/${wantedPrefix}`,
       remediation: null,
     };
   }

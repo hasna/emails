@@ -83,6 +83,7 @@ export async function enrichAddress(address: EmailAddress): Promise<EnrichedAddr
 }
 
 export async function enrichAddresses(addresses: EmailAddress[]): Promise<EnrichedAddress[]> {
+  if (addresses.length === 0) return [];
   const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id));
   const ownerIds = addresses.flatMap((address) => [address.owner_id, address.administrator_id])
     .filter((id): id is string => !!id);

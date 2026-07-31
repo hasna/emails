@@ -34,6 +34,7 @@ function rules(overrides: Partial<Extract<ActiveReceiptRules, { ok: true }>> = {
       enabled: true,
       recipients: ["covered.example.com"],
       s3_buckets: [BUCKET],
+      s3_actions: [{ bucket: BUCKET, prefix: "inbound/covered.example.com/" }],
     }],
     ...overrides,
   };
@@ -122,7 +123,7 @@ describe("assessSesRuleLink", () => {
 
   it("reports MISSING when the covering rule has no S3 action at all", () => {
     const link = assessSesRuleLink(rules({
-      rules: [{ name: "inbound-covered-example-com", enabled: true, recipients: ["covered.example.com"], s3_buckets: [] }],
+      rules: [{ name: "inbound-covered-example-com", enabled: true, recipients: ["covered.example.com"], s3_buckets: [], s3_actions: [] }],
     }), "covered.example.com", BUCKET);
     expect(link.status).toBe("missing");
     expect(link.detail).toContain("S3");
@@ -130,15 +131,42 @@ describe("assessSesRuleLink", () => {
 
   it("reports MISSING and names the actual bucket when the rule delivers somewhere else", () => {
     const link = assessSesRuleLink(rules({
-      rules: [{ name: "inbound-covered-example-com", enabled: true, recipients: ["covered.example.com"], s3_buckets: ["some-other-bucket"] }],
+      rules: [{
+        name: "inbound-covered-example-com",
+        enabled: true,
+        recipients: ["covered.example.com"],
+        s3_buckets: ["some-other-bucket"],
+        s3_actions: [{ bucket: "some-other-bucket", prefix: "inbound/covered.example.com/" }],
+      }],
     }), "covered.example.com", BUCKET);
     expect(link.status).toBe("missing");
     expect(link.detail).toContain("some-other-bucket");
   });
 
+  it("reports MISSING when the bucket is right but the rule delivers under a prefix the registered source will not read", () => {
+    const link = assessSesRuleLink(rules({
+      rules: [{
+        name: "inbound-covered-example-com",
+        enabled: true,
+        recipients: ["covered.example.com"],
+        s3_buckets: [BUCKET],
+        s3_actions: [{ bucket: BUCKET, prefix: "inbound/somewhere-else/" }],
+      }],
+    }), "covered.example.com", BUCKET);
+    expect(link.status).toBe("missing");
+    expect(link.detail).toContain("inbound/somewhere-else/");
+    expect(link.detail).toContain("inbound/covered.example.com/");
+  });
+
   it("treats a rule with no recipients as covering every domain", () => {
     const link = assessSesRuleLink(rules({
-      rules: [{ name: "catch-everything", enabled: true, recipients: [], s3_buckets: [BUCKET] }],
+      rules: [{
+        name: "catch-everything",
+        enabled: true,
+        recipients: [],
+        s3_buckets: [BUCKET],
+        s3_actions: [{ bucket: BUCKET, prefix: "inbound/anything.example.com/" }],
+      }],
     }), "anything.example.com", BUCKET);
     expect(link.status).toBe("ok");
   });
