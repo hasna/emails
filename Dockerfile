@@ -61,7 +61,6 @@ LABEL org.opencontainers.image.source="https://github.com/hasna/emails" \
 
 ENV HOME=/home/bun \
     PATH=/usr/local/bin \
-    EMAILS_MODE=self_hosted \
     EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem \
     NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem \
     NODE_ENV=production \
@@ -77,7 +76,7 @@ WORKDIR /app
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["/usr/local/bin/bun", "-e", "const port = Number(process.env.PORT || 8080); const mode = process.env.EMAILS_MODE?.trim().toLowerCase(); const path = mode === 'local' ? '/api/providers?limit=1' : '/ready'; const r=await fetch(`http://127.0.0.1:${port}${path}`);process.exit(r.ok?0:1)"]
+  CMD ["/usr/local/bin/bun", "-e", "const port = Number(process.env.PORT || 8080); const postgres = (process.env.EMAILS_DATABASE_URL ?? '').trim() !== ''; const path = postgres ? '/ready' : '/api/providers?limit=1'; const r=await fetch(`http://127.0.0.1:${port}${path}`);process.exit(r.ok?0:1)"]
 
 VOLUME ["/tmp"]
 USER 1000:1000

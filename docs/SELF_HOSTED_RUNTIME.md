@@ -31,10 +31,13 @@ mutation and emits only an aggregate pass record; command responses stay in a
 private temporary directory. This is the smoke referenced by
 [STATION_LOCAL_RETIREMENT.md](STATION_LOCAL_RETIREMENT.md).
 
-Service configuration:
+Service configuration. The service has NO deployment mode: setting
+`EMAILS_DATABASE_URL` is what makes `emails-serve` the operator `/v1` API over your
+own PostgreSQL, and leaving it unset is what makes it the local SQLite dashboard.
+`EMAILS_MODE` remains a client selector while the client families still use it;
+do not set it in the service environment.
 
 ```bash
-export EMAILS_MODE=self_hosted
 export EMAILS_DATABASE_URL="postgresql://..."
 export EMAILS_API_SIGNING_KEY="..." # 32+ characters
 export EMAILS_SEND_PROVIDER=ses     # or resend
