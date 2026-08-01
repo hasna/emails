@@ -14,11 +14,17 @@
 // (TuiMessage / MailboxCounts / MessageBody / …) so the CLI/MCP inbox reads the
 // SHARED self_hosted store instead of the machine-local SQLite island.
 //
-// SECRET SAFETY: the bearer key is resolved from EMAILS_SELF_HOSTED_API_KEY (via
-// resolveSelfHostedConfig) and only ever placed in an in-process `Authorization`
-// header. It is never written to argv, logged, or embedded in an error message.
+// SECRET SAFETY: the bearer credential is resolved from the configured client
+// environment (via resolveSelfHostedConfig) and only ever placed in an
+// in-process `Authorization` header. It is never written to argv, logged, or
+// embedded in an error message.
 
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
+import {
+  EMAILS_SELF_HOSTED_API_KEY_ENV,
+  EMAILS_SESSION_TOKEN_ENV,
+  type EmailsClientCredentialCandidate,
+} from "./client-env.js";
 import { getEmailsMode } from "./mode.js";
 import {
   type AttachmentPath,
@@ -818,6 +824,7 @@ function selfHostedTimeoutMs(): number {
 export interface SelfHostedMailDataSourceOptions {
   baseUrl: string;
   apiKey: string;
+  credentials?: readonly EmailsClientCredentialCandidate[];
   fetchImpl?: SelfHostedFetch;
   now?: () => number;
   /** Per-request timeout in ms (default: EMAILS_SELF_HOSTED_HTTP_TIMEOUT or 30s). */
@@ -830,6 +837,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
   readonly mode = "self_hosted" as const;
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly credentials: readonly EmailsClientCredentialCandidate[];
   private readonly fetchImpl: SelfHostedFetch;
   private readonly now: () => number;
   private readonly timeoutMs: number;
@@ -844,6 +852,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
     }
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.apiKey = options.apiKey;
+    this.credentials = options.credentials?.length
+      ? options.credentials
+      : [{ setting: EMAILS_SELF_HOSTED_API_KEY_ENV, value: options.apiKey }];
     this.now = options.now ?? Date.now;
     this.timeoutMs = selfHostedTransportLimit(options.timeoutMs, selfHostedTimeoutMs(), "timeoutMs");
     this.maxResponseBytes = selfHostedTransportLimit(
@@ -858,8 +869,40 @@ export class SelfHostedMailDataSource implements MailDataSource {
   // ── transport (bearer key only in-header, never logged) ──────────────────
 
   private async request(method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
+    for (let index = 0; index < this.credentials.length; index += 1) {
+      const candidate = this.credentials[index]!;
+      const response = await this.requestOnce(candidate.value, method, path, body);
+      if (index < this.credentials.length - 1 && this.shouldTryNextCredential(candidate, response)) continue;
+      return response;
+    }
+    return this.requestOnce(this.apiKey, method, path, body);
+  }
+
+  private shouldTryNextCredential(
+    candidate: EmailsClientCredentialCandidate,
+    response: { status: number; json: unknown },
+  ): boolean {
+    return candidate.setting === EMAILS_SESSION_TOKEN_ENV
+      && response.status === 401
+      && this.errorReason(response.json) === "reauthenticate";
+  }
+
+  private errorReason(body: unknown): string | null {
+    if (!body || typeof body !== "object") return null;
+    const fields = body as { reason?: unknown; code?: unknown };
+    if (typeof fields.reason === "string") return fields.reason;
+    if (typeof fields.code === "string") return fields.code;
+    return null;
+  }
+
+  private async requestOnce(
+    credential: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; json: unknown }> {
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${credential}`,
       Accept: "application/json",
     };
     // Never let fetch follow a redirect with the bearer header. `manual` keeps
@@ -1742,6 +1785,14 @@ export function resolveSelfHostedMailDataSource(fetchImpl?: SelfHostedFetch): Se
   const config = resolveSelfHostedConfig();
   if (!config) return null;
   // `apiKey` here is the Bearer credential slot — a user session token when
-  // present, else the operator API key (resolveSelfHostedConfig decides).
-  return new SelfHostedMailDataSource({ baseUrl: config.baseUrl, apiKey: config.credential, fetchImpl });
+  // present, else the next configured credential (resolveSelfHostedConfig decides).
+  return new SelfHostedMailDataSource({
+    baseUrl: config.baseUrl,
+    apiKey: config.credential,
+    credentials: [
+      { setting: config.credentialSetting ?? EMAILS_SELF_HOSTED_API_KEY_ENV, value: config.credential },
+      ...(config.credentialFallbacks ?? []),
+    ],
+    fetchImpl,
+  });
 }

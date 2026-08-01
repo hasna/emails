@@ -22,6 +22,7 @@
 
 import type { StoreCapabilities } from "../store/capabilities.js";
 import type { StoreDescriptor } from "../store/descriptor.js";
+import type { EmailsClientCredentialCandidate, EmailsClientCredentialSetting } from "../lib/client-env.js";
 import type { AddressOwnershipLedger } from "../store-address-ownership-ledger.js";
 import type { GroupMembership } from "../store-group-membership.js";
 import type { SequenceCapableEmailStore } from "../store-sequence-subledger.js";
@@ -238,6 +239,10 @@ export interface HttpEmailStoreOptions {
   baseUrl: string;
   /** An API key or a session token. Sent as a bearer credential and never logged. */
   credential: string;
+  /** Which setting supplied `credential`; safe to report. */
+  credentialSetting?: EmailsClientCredentialSetting;
+  /** Later credentials to try after a selected session token needs reauthentication. */
+  credentialFallbacks?: readonly EmailsClientCredentialCandidate[];
   /** Injectable `fetch`, for tests and for callers with their own agent. */
   fetchImpl?: FetchImplementation;
   timeoutMs?: number;
@@ -272,6 +277,8 @@ export function createHttpEmailStore(
   const transport = createTransport({
     baseUrl: options.baseUrl,
     credential: options.credential,
+    ...(options.credentialSetting ? { credentialSetting: options.credentialSetting } : {}),
+    ...(options.credentialFallbacks ? { credentialFallbacks: options.credentialFallbacks } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
   });

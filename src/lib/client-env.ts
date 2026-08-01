@@ -14,6 +14,38 @@ export const EMAILS_SESSION_TOKEN_ENV = "EMAILS_SESSION_TOKEN";
  */
 export const EMAILS_IDP_TOKEN_ENV = "EMAILS_IDP_TOKEN";
 
+/** The operator or tenant API key used by self-hosted clients. */
+export const EMAILS_SELF_HOSTED_API_KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
+
+/**
+ * Credential selection order for self-hosted clients. A live user session wins
+ * over an IdP token, and an IdP token wins over the operator key; transports may
+ * fall through only from a selected session token that the server explicitly
+ * rejects as needing reauthentication.
+ */
+export const CLIENT_ENV_CREDENTIAL_SELECTION_KEYS = Object.freeze([
+  EMAILS_SESSION_TOKEN_ENV,
+  EMAILS_IDP_TOKEN_ENV,
+  EMAILS_SELF_HOSTED_API_KEY_ENV,
+] as const);
+
+export type EmailsClientCredentialSetting = (typeof CLIENT_ENV_CREDENTIAL_SELECTION_KEYS)[number];
+
+export interface EmailsClientCredentialCandidate {
+  /** The environment setting that supplied the credential; safe to log. */
+  readonly setting: EmailsClientCredentialSetting;
+  /** Secret credential value. Never log or serialize. */
+  readonly value: string;
+}
+
+export function resolveEmailsClientCredentialCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+): EmailsClientCredentialCandidate[] {
+  return CLIENT_ENV_CREDENTIAL_SELECTION_KEYS
+    .map((setting) => ({ setting, value: env[setting]?.trim() ?? "" }))
+    .filter((candidate) => candidate.value !== "");
+}
+
 // Structural keys the vault entry MUST carry (endpoint + mode). A credential is
 // required too, but a session token OR the API key satisfies it — see
 // CLIENT_ENV_CREDENTIAL_KEYS — so neither credential is individually mandatory.
@@ -31,7 +63,7 @@ export const CLIENT_ENV_REQUIRED_KEYS = [
 // session first, then identity, then key (see src/store-resolution.ts and the
 // legacy client). An operator with only the API key keeps working unchanged.
 const CLIENT_ENV_CREDENTIAL_KEYS = [
-  "EMAILS_SELF_HOSTED_API_KEY",
+  EMAILS_SELF_HOSTED_API_KEY_ENV,
   EMAILS_SESSION_TOKEN_ENV,
   EMAILS_IDP_TOKEN_ENV,
 ] as const;

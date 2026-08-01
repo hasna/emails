@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  SelfHostedHttpError,
   SelfHostedTransportError,
   selfHostedApiRequest,
   selfHostedProbe,
@@ -8,7 +9,7 @@ import {
   resetSelfHostedConfigCache,
   resolveSelfHostedConfig,
 } from "./self-hosted-store.js";
-import { EMAILS_SESSION_TOKEN_ENV } from "../lib/client-env.js";
+import { EMAILS_SELF_HOSTED_API_KEY_ENV, EMAILS_SESSION_TOKEN_ENV } from "../lib/client-env.js";
 import { SelfHostedWireResponseError } from "../lib/self-hosted-wire.js";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +53,7 @@ const KEYS = [
   "AWS_PROFILE",
   "CLOUDFLARE_API_KEY",
 ];
+const PRIMARY_MODE_KEY = KEYS[0]!;
 let tempDirs: string[] = [];
 
 function clearEnv(): void {
@@ -111,6 +113,40 @@ printf '\\n%s' "$STATUS"
   return { argsPath, stdinPath, envPath };
 }
 
+function installFakeCurlSessionFallback(
+  first: { body: string; status: number },
+  second: { body: string; status: number },
+): { stdinForCall: (call: number) => string; callsPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "emails-curl-fallback-test-"));
+  tempDirs.push(dir);
+  const callsPath = join(dir, "curl-calls.txt");
+  const countPath = join(dir, "curl-count.txt");
+  const bin = join(dir, "curl");
+  writeFileSync(bin, `#!/bin/sh
+COUNT_PATH=${JSON.stringify(countPath)}
+CALLS_PATH=${JSON.stringify(callsPath)}
+COUNT="$(cat "$COUNT_PATH" 2>/dev/null || printf '0')"
+COUNT=$((COUNT + 1))
+printf '%s' "$COUNT" > "$COUNT_PATH"
+STDIN_PATH=${JSON.stringify(join(dir, "curl-stdin"))}-$COUNT.txt
+cat > "$STDIN_PATH"
+printf '%s\\n' "$COUNT" >> "$CALLS_PATH"
+if [ "$COUNT" = "1" ]; then
+  printf '%s\\n' ${JSON.stringify(first.body)}
+  printf '\\n%s' ${JSON.stringify(String(first.status))}
+  exit 0
+fi
+printf '%s\\n' ${JSON.stringify(second.body)}
+printf '\\n%s' ${JSON.stringify(String(second.status))}
+`);
+  chmodSync(bin, 0o700);
+  process.env["PATH"] = `${dir}:${process.env["PATH"] ?? ORIGINAL_PATH ?? ""}`;
+  return {
+    callsPath,
+    stdinForCall: (call) => join(dir, `curl-stdin-${call}.txt`),
+  };
+}
+
 describe("Emails self-hosted client resolver", () => {
   beforeEach(() => {
     captureInheritedProcessEnv();
@@ -168,7 +204,11 @@ describe("Emails self-hosted client resolver", () => {
     process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
     process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
     expect(() => resolveSelfHostedConfig()).toThrow("requires EMAILS_MODE=self_hosted");
-    expect(isSelfHostedMode()).toBe(false);
+    try {
+      expect(isSelfHostedMode()).toBe(false);
+    } catch (error) {
+      expect(String(error)).toContain("EMAILS_SELF_HOSTED_URL configures an Emails API");
+    }
   });
 
   test("rejects the removed 'local' mode even when credentials are present", () => {
@@ -325,6 +365,56 @@ describe("Emails self-hosted client resolver", () => {
     ]) {
       expect(transportInputs).not.toContain(marker);
     }
+  });
+
+  test("falls back to the API key after a selected session token needs reauthentication", () => {
+    process.env[PRIMARY_MODE_KEY] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env[EMAILS_SESSION_TOKEN_ENV] = "session-token-placeholder";
+    process.env[EMAILS_SELF_HOSTED_API_KEY_ENV] = "api-key-placeholder";
+    const capture = installFakeCurlSessionFallback(
+      {
+        status: 401,
+        body: JSON.stringify({ error: "session is invalid or expired", reason: "reauthenticate" }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({ domains: [] }),
+      },
+    );
+
+    const rows = selfHostedStoreFor("domains").list();
+
+    expect(rows).toEqual([]);
+    expect(readFileSync(capture.callsPath, "utf8").trim().split(/\r?\n/)).toEqual(["1", "2"]);
+    const first = readFileSync(capture.stdinForCall(1), "utf8");
+    const second = readFileSync(capture.stdinForCall(2), "utf8");
+    expect(first).toContain("session-token-placeholder");
+    expect(first).not.toContain("api-key-placeholder");
+    expect(second).toContain("api-key-placeholder");
+    expect(second).not.toContain("session-token-placeholder");
+  });
+
+  test("does not fall back from a live session with insufficient scope", () => {
+    process.env[PRIMARY_MODE_KEY] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example";
+    process.env[EMAILS_SESSION_TOKEN_ENV] = "session-token-placeholder";
+    process.env[EMAILS_SELF_HOSTED_API_KEY_ENV] = "api-key-placeholder";
+    const capture = installFakeCurlSessionFallback(
+      {
+        status: 403,
+        body: JSON.stringify({ error: "insufficient scope for this operation", reason: "insufficient_scope" }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({ domains: [] }),
+      },
+    );
+
+    expect(() => selfHostedStoreFor("domains").list()).toThrow(SelfHostedHttpError);
+
+    expect(readFileSync(capture.callsPath, "utf8").trim()).toBe("1");
+    expect(readFileSync(capture.stdinForCall(1), "utf8")).toContain("session-token-placeholder");
   });
 
   test("root health probe validates a declared 200 response without exposing raw body text", () => {
