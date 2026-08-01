@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { resolveResourceId } from "../db/self-hosted-store.js";
 import { findAddressesByEmail, getAddress, listAddresses, type ListAddressOptions } from "../db/addresses.js";
 import { listProviderNamesByIds } from "../db/providers.js";
@@ -13,6 +14,7 @@ import {
   type AddressOwnership,
   type AddressOwnershipEvent,
   type Owner,
+  type OwnerStore,
 } from "../db/owners.js";
 import type { EmailAddress } from "../types/index.js";
 
@@ -26,6 +28,11 @@ export interface AddressOwnershipDetail {
   address: EnrichedAddress;
   ownership: AddressOwnership | null;
   history: AddressOwnershipEvent[];
+}
+
+export interface AddressEnrichmentOptions {
+  providerDb?: Database;
+  ownerStore?: OwnerStore;
 }
 
 /**
@@ -70,10 +77,13 @@ export function resolveAddressRef(ref: string): EmailAddress {
   throw new Error(`Address not found: ${trimmed}`);
 }
 
-export async function enrichAddress(address: EmailAddress): Promise<EnrichedAddress> {
-  const providers = listProviderNamesByIds([address.provider_id]);
-  const owner = address.owner_id ? await getOwner(address.owner_id) : null;
-  const administrator = address.administrator_id ? await getOwner(address.administrator_id) : null;
+export async function enrichAddress(
+  address: EmailAddress,
+  options: AddressEnrichmentOptions = {},
+): Promise<EnrichedAddress> {
+  const providers = listProviderNamesByIds([address.provider_id], options.providerDb);
+  const owner = address.owner_id ? await getOwner(address.owner_id, options.ownerStore) : null;
+  const administrator = address.administrator_id ? await getOwner(address.administrator_id, options.ownerStore) : null;
   return {
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,
@@ -82,12 +92,15 @@ export async function enrichAddress(address: EmailAddress): Promise<EnrichedAddr
   };
 }
 
-export async function enrichAddresses(addresses: EmailAddress[]): Promise<EnrichedAddress[]> {
+export async function enrichAddresses(
+  addresses: EmailAddress[],
+  options: AddressEnrichmentOptions = {},
+): Promise<EnrichedAddress[]> {
   if (addresses.length === 0) return [];
-  const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id));
+  const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id), options.providerDb);
   const ownerIds = addresses.flatMap((address) => [address.owner_id, address.administrator_id])
     .filter((id): id is string => !!id);
-  const owners = await listOwnersByIds(ownerIds);
+  const owners = await listOwnersByIds(ownerIds, options.ownerStore);
   return addresses.map((address) => ({
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,

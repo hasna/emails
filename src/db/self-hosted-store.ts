@@ -1,5 +1,5 @@
 // Self-hosted HTTP storage bridge. It is selected only by an explicit
-// EMAILS_MODE=self_hosted setting plus an operator-supplied URL and API key.
+// EMAILS_MODE=self_hosted setting plus an operator-supplied URL and credential.
 //
 //   list   -> GET    /v1/<resource>            -> { <resource>: [...] }
 //   get    -> GET    /v1/<resource>/<id>       -> { <singular>: <entity> } | 404
@@ -11,12 +11,21 @@
 // without an await), so this bridge performs the HTTP call synchronously via a
 // spawned `curl`. Bun has no synchronous `fetch`.
 //
-// SAFETY: the API key and request body are NEVER placed on process argv or in
-// local temp files. They are passed to `curl -K -` over stdin, and the key value
+// SAFETY: the credential and request body are NEVER placed on process argv or in
+// local temp files. They are passed to `curl -K -` over stdin, and the credential value
 // is never logged or embedded in an error.
 
 import { spawnSync } from "node:child_process";
-import { EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "../lib/client-env.js";
+import {
+  CLIENT_ENV_CREDENTIAL_SELECTION_KEYS,
+  EMAILS_IDP_TOKEN_ENV,
+  EMAILS_SELF_HOSTED_API_KEY_ENV,
+  EMAILS_SESSION_TOKEN_ENV,
+  loadEmailsClientEnvSecret,
+  resolveEmailsClientCredentialCandidates,
+  type EmailsClientCredentialCandidate,
+  type EmailsClientCredentialSetting,
+} from "../lib/client-env.js";
 import { getEmailsMode } from "../lib/mode.js";
 import {
   parseSelfHostedErrorJson,
@@ -43,10 +52,14 @@ export interface SelfHostedConfig {
   baseUrl: string; // `<origin>/v1`
   /**
    * Bearer credential threaded into BOTH transports. A user session token
-   * (emss_…) when present, otherwise the operator API key. The client never
+   * (emss_…) when present, otherwise the next configured credential. The client never
    * sends a tenant — the server derives it from this credential.
    */
   credential: string;
+  /** Which setting supplied `credential`; safe to report. */
+  credentialSetting?: EmailsClientCredentialSetting;
+  /** Later credentials in the same source-of-truth order; values are secrets. */
+  credentialFallbacks?: readonly EmailsClientCredentialCandidate[];
 }
 
 function toV1BaseUrl(apiUrl: string): string {
@@ -91,22 +104,27 @@ export function resolveSelfHostedConfig(
     modeRaw = env["EMAILS_MODE"]?.trim() ?? env["HASNA_EMAILS_MODE"]?.trim() ?? options.selectedMode ?? modeRaw;
   }
   const apiUrl = env["EMAILS_SELF_HOSTED_URL"]?.trim();
-  const apiKey = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim();
-  const sessionToken = env[EMAILS_SESSION_TOKEN_ENV]?.trim();
-  const idpToken = env["EMAILS_IDP_TOKEN"]?.trim();
+  const candidates = resolveEmailsClientCredentialCandidates(env);
   // Credential precedence: an explicit user session first, then the caller's
   // own idp identity token (ADR-0002 — an agent uses ITS identity even when
   // an operator API key is also present in the env), then the operator key.
   // The server maps whichever credential to its tenant; the client never sends one.
-  const credential = sessionToken || idpToken || apiKey;
-
-  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${sessionToken ? "s" : ""}${idpToken ? "f" : ""}${apiKey ? "k" : ""}`;
+  const signature = `${modeRaw ?? ""}|${apiUrl ?? ""}|${credentialSettingsSignature(candidates)}`;
   if (signature === _cachedSignature && _cachedConfig) return _cachedConfig;
 
-  const config = computeConfig(modeRaw, apiUrl, credential);
+  const config = computeConfig(modeRaw, apiUrl, candidates);
   _cachedSignature = signature;
   _cachedConfig = config;
   return config;
+}
+
+function credentialSettingsSignature(candidates: readonly EmailsClientCredentialCandidate[]): string {
+  const markers: Record<EmailsClientCredentialSetting, string> = {
+    [EMAILS_SESSION_TOKEN_ENV]: "s",
+    [EMAILS_IDP_TOKEN_ENV]: "f",
+    [EMAILS_SELF_HOSTED_API_KEY_ENV]: "k",
+  };
+  return candidates.map((candidate) => markers[candidate.setting]).join("");
 }
 
 function assertSupportedMode(modeRaw: string | undefined): void {
@@ -121,19 +139,25 @@ function assertSupportedMode(modeRaw: string | undefined): void {
 function computeConfig(
   modeRaw: string | undefined,
   apiUrl: string | undefined,
-  credential: string | undefined,
+  candidates: readonly EmailsClientCredentialCandidate[],
 ): SelfHostedConfig {
   assertSupportedMode(modeRaw);
-  if (!apiUrl || !credential) {
+  if (!apiUrl || candidates.length === 0) {
     const missing = [
       !apiUrl ? "EMAILS_SELF_HOSTED_URL" : null,
-      !credential ? "EMAILS_SELF_HOSTED_API_KEY, EMAILS_SESSION_TOKEN, or EMAILS_IDP_TOKEN" : null,
+      candidates.length === 0 ? CLIENT_ENV_CREDENTIAL_SELECTION_KEYS.join(", or ") : null,
     ].filter(Boolean).join(" and ");
     throw new Error(
       `${APP}: the self-hosted client is not configured (${missing} missing). ${CONFIG_HELP}`,
     );
   }
-  return { baseUrl: toV1BaseUrl(apiUrl), credential };
+  const [primary, ...fallbacks] = candidates;
+  return {
+    baseUrl: toV1BaseUrl(apiUrl),
+    credential: primary!.value,
+    credentialSetting: primary!.setting,
+    credentialFallbacks: fallbacks,
+  };
 }
 
 /**
@@ -233,7 +257,48 @@ function curlProcessEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function credentialsForConfig(config: SelfHostedConfig): readonly EmailsClientCredentialCandidate[] {
+  return [
+    {
+      setting: config.credentialSetting ?? EMAILS_SELF_HOSTED_API_KEY_ENV,
+      value: config.credential,
+    },
+    ...(config.credentialFallbacks ?? []),
+  ];
+}
+
+function errorReason(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const fields = parsed as { reason?: unknown; code?: unknown };
+      if (typeof fields.reason === "string") return fields.reason;
+      if (typeof fields.code === "string") return fields.code;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function shouldTryNextCredential(candidate: EmailsClientCredentialCandidate, result: CurlResult): boolean {
+  return candidate.setting === EMAILS_SESSION_TOKEN_ENV
+    && result.status === 401
+    && errorReason(result.body) === "reauthenticate";
+}
+
 function httpRequest(config: SelfHostedConfig, method: string, path: string, body?: unknown): CurlResult {
+  const candidates = credentialsForConfig(config);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!;
+    const result = httpRequestOnce({ ...config, credential: candidate.value }, method, path, body);
+    if (index < candidates.length - 1 && shouldTryNextCredential(candidate, result)) continue;
+    return result;
+  }
+  return httpRequestOnce(config, method, path, body);
+}
+
+function httpRequestOnce(config: SelfHostedConfig, method: string, path: string, body?: unknown): CurlResult {
   const url = `${config.baseUrl}${path}`;
   const connectTimeout = connectTimeoutSeconds();
   const maxTime = maxTimeSeconds();

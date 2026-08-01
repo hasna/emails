@@ -2,8 +2,9 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail, markVerified } from "../../db/addresses.js";
 import { suspendAddress, activateAddress, setAddressQuota } from "../../db/address-lifecycle.js";
+import { recordProvisioningEvent } from "../../db/provisioning.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
-import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, MAX_CLI_PAGE_LIMIT, parseCliListPage, resolveId } from "../utils.js";
 import {
   enrichAddresses,
   getAddressOwnershipDetail,
@@ -81,17 +82,56 @@ function resolveSelfHostedAddressId(ref: string): string {
   handleError(new Error(`Address not found: ${ref}`));
 }
 
+/**
+ * Persist the operator's verification assertion before enabling the sender.
+ *
+ * The provisioning-event ledger is append-only in both stores and already owns
+ * domain/address readiness history. Recording the authorization first means an
+ * audit failure leaves the address safely unverified; a later PATCH failure may
+ * leave an attempted authorization event, but can never leave an unaudited sender
+ * enabled.
+ */
+async function markVerifiedWithAudit(
+  address: { id: string; email: string; verified: boolean },
+  audit: { actor: string; reason: string; command: string },
+) {
+  const event = await recordProvisioningEvent(
+    "address",
+    address.id,
+    address.verified ? "verified" : "unverified",
+    "verification_authorized",
+    {
+      action: "set_verified",
+      actor: audit.actor,
+      reason: audit.reason,
+      command: audit.command,
+      requested_verified: true,
+    },
+  );
+  return { address: markVerified(address.id), event };
+}
+
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
-  const listAddressesAction = async (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+  const listAddressesAction = async (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean; unverified?: boolean }) => {
     try {
       const page = parseCliListPage(opts);
       // Hydrate owner/administrator/provider_name instead of hardcoding nulls: an
       // owned address must never be reported as unowned, in the table or in --json.
-      const addresses = await enrichAddresses(listAddresses(opts.provider, page));
+      // Filter BEFORE applying the requested page. Otherwise a page containing
+      // verified rows can print "No addresses" even though unverified senders are
+      // present later in the registry — precisely the default-page blind spot this
+      // option exists to remove. The address family has a documented 1,000-row CLI
+      // ceiling, so use that same bounded scan rather than an unbounded read.
+      const listed = opts.unverified
+        ? listAddresses(opts.provider, { limit: MAX_CLI_PAGE_LIMIT, offset: 0 })
+            .filter((address) => !address.verified)
+            .slice(page.offset, page.offset + page.limit)
+        : listAddresses(opts.provider, page);
+      const addresses = await enrichAddresses(listed);
       if (addresses.length === 0) {
-        output([], chalk.dim("No addresses configured."));
+        output([], chalk.dim(opts.unverified ? "No unverified addresses." : "No addresses configured."));
         return;
       }
       const verbose = opts.verbose || isCliVerboseOutput();
@@ -155,6 +195,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--unverified", "Show only addresses whose verified flag is false")
     .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
@@ -163,17 +204,42 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Add a sender address")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--name <displayName>", "Display name")
-    .action(async (email: string, opts: { provider: string; name?: string }) => {
+    .option("--verified", "Assert ownership and add the address as verified (allows outbound mail)")
+    .option("--actor <actor>", "Actor recorded in the verification audit log", "cli")
+    .option("--reason <reason>", "Reason recorded in the verification audit log", "operator asserted sender ownership")
+    .action(async (email: string, opts: { provider: string; name?: string; verified?: boolean; actor: string; reason: string }) => {
       try {
         // Addresses are created directly on the app's /v1/addresses API. Providers
         // are a label carried through (the /v1 API exposes no /v1/providers), so we
         // do NOT resolve a local provider row or invoke a provider adapter.
         const existing = getAddressByEmail(opts.provider, email);
         if (existing) {
+          if (opts.verified && !existing.verified) {
+            const verified = await markVerifiedWithAudit(existing, {
+              actor: opts.actor,
+              reason: opts.reason,
+              command: "emails address add --verified",
+            });
+            output(
+              verified.address,
+              chalk.green(`✓ Existing address verified: ${email} (${existing.id.slice(0, 8)}; audit ${verified.event.id.slice(0, 8)})`),
+            );
+            return;
+          }
           output(existing, chalk.green(`✓ Address already exists: ${email} (${existing.id.slice(0, 8)})`));
           return;
         }
-        const addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
+        let addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
+        if (opts.verified) {
+          const verified = await markVerifiedWithAudit(addr, {
+            actor: opts.actor,
+            reason: opts.reason,
+            command: "emails address add --verified",
+          });
+          addr = verified.address;
+          output(addr, chalk.green(`✓ Verified address added: ${email} (${addr.id.slice(0, 8)}; audit ${verified.event.id.slice(0, 8)})`));
+          return;
+        }
         output(addr, chalk.green(`✓ Address added: ${email} (${addr.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
@@ -186,6 +252,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--unverified", "Show only addresses whose verified flag is false")
     .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
@@ -333,11 +400,11 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   // A command named `verify` that cannot verify is a usability trap: an operator whose
   // send was refused with `sender_unverified` runs `emails address verify <email>`,
   // gets "⚠ … is not yet verified", and reasonably concludes the tool has told them
-  // what to do next — when in fact this command has no write path at all and, until
-  // `set-verified` existed, neither did any other. `address add` has no --verified
-  // flag and `address provision` refuses in every mode, so the only route left was a
-  // hand-rolled PATCH /v1/addresses/{id}. The name is kept for compatibility; the
-  // description and the output now name the command that performs the change.
+  // what to do next — when in fact this command has no write path at all and, before
+  // `set-verified` and `address add --verified` existed, neither did any other.
+  // `address provision` still refuses in every mode, so the only route left at the
+  // time was a hand-rolled PATCH /v1/addresses/{id}. The name is kept for
+  // compatibility; the description and output name the command that writes.
   addressCmd
     .command("verify <email>")
     .description("Check verification status of an address (READ-ONLY; use 'address set-verified' to change it)")
@@ -373,8 +440,10 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("set-verified <email-or-id>")
     .description("Mark a sender address as verified (allows outbound mail from it)")
+    .option("--actor <actor>", "Actor recorded in the verification audit log", "cli")
+    .option("--reason <reason>", "Reason recorded in the verification audit log", "operator asserted sender ownership")
     .option("--yes", "Skip confirmation prompt")
-    .action(async (ref: string, opts: { yes?: boolean }) => {
+    .action(async (ref: string, opts: { actor: string; reason: string; yes?: boolean }) => {
       try {
         // Accept an email or an id: an operator arriving from a `sender_unverified`
         // refusal has the ADDRESS in hand, not its uuid, and `verify` takes an email —
@@ -400,8 +469,17 @@ export function registerAddressCommands(program: Command, output: (data: unknown
           `Mark ${before!.email} as verified? This allows outbound mail to be sent from it.`,
           opts.yes,
         );
-        const after = markVerified(resolvedId);
-        output(after, chalk.green(`✓ ${after.email} is now verified — outbound mail from it is no longer refused`));
+        const verified = await markVerifiedWithAudit(before!, {
+          actor: opts.actor,
+          reason: opts.reason,
+          command: "emails address set-verified",
+        });
+        output(
+          verified.address,
+          chalk.green(
+            `✓ ${verified.address.email} is now verified — outbound mail from it is no longer refused (audit ${verified.event.id.slice(0, 8)})`,
+          ),
+        );
       } catch (e) {
         handleError(e);
       }

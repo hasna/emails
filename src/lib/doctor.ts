@@ -562,10 +562,21 @@ async function storeChecks(store: EmailStore): Promise<DoctorCheck[]> {
   const addresses = await resourceCheck<AddressRecord>(
     "Addresses",
     (limit, offset) => store.addresses.listAddresses({ limit, offset }),
-    (rows, truncated) => boundedCount(rows.length, "sender address(es)", truncated, (total) => ({
-      status: total > 0 ? "pass" : "warn",
-      message: `${total} sender address(es)`,
-    })),
+    (rows, truncated) => boundedCount(rows.length, "sender address(es)", truncated, (total) => {
+      if (total === 0) return { status: "warn", message: "0 sender address(es)" };
+      const verified = rows.filter((row) => row.verified).length;
+      const unverified = total - verified;
+      if (unverified === 0) {
+        return { status: "pass", message: `${verified}/${total} sender address(es) verified` };
+      }
+      return {
+        status: "warn",
+        message:
+          `${verified}/${total} sender address(es) verified; ${unverified} unverified sender(s) will be `
+          + "refused before any provider call (policy_denial: sender_unverified). Review with "
+          + "'emails address list --unverified'.",
+      };
+    }),
   );
 
   const contacts = await resourceCheck<ResourceRow>(
