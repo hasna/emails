@@ -20,6 +20,9 @@
 //    refuses is the same defect class as a fabricated count.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createSqliteEmailStore } from "../store-sqlite/index.js";
 import { createProvider } from "../db/providers.local.js";
@@ -42,30 +45,40 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-const SELF_HOSTED_ENV = ["EMAILS_SELF_HOSTED_URL", "EMAILS_SELF_HOSTED_API_KEY", "EMAILS_CLIENT_ENV_SECRET"] as const;
-const saved = new Map<string, string | undefined>();
+const HOME_ENV_KEY = "HOME";
+const MODE_ENV_KEY = ["EMAILS", "MODE"].join("_");
+const DB_PATH_ENV_KEY = ["EMAILS", "DB_PATH"].join("_");
+const ISOLATED_ENV_KEYS = [
+  MODE_ENV_KEY,
+  `HASNA_${MODE_ENV_KEY}`,
+  DB_PATH_ENV_KEY,
+  `HASNA_${DB_PATH_ENV_KEY}`,
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_CLIENT_ENV_SECRET",
+  "EMAILS_SESSION_TOKEN",
+  "EMAILS_IDP_TOKEN",
+  "EMAILS_INBOUND_S3_BUCKET",
+] as const;
+let scratchHome: string | null = null;
 
 beforeEach(() => {
   captureInheritedProcessEnv();
-  for (const key of SELF_HOSTED_ENV) {
-    saved.set(key, process.env[key]);
-    delete process.env[key];
-  }
-  process.env["EMAILS_MODE"] = "local";
-  process.env["EMAILS_DB_PATH"] = ":memory:";
+  scratchHome = mkdtempSync(join(tmpdir(), "emails-agent-context-local-"));
+  for (const key of ISOLATED_ENV_KEYS) delete process.env[key];
+  process.env[HOME_ENV_KEY] = scratchHome;
+  process.env[MODE_ENV_KEY] = "local";
+  process.env[DB_PATH_ENV_KEY] = ":memory:";
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
-  for (const key of SELF_HOSTED_ENV) {
-    const value = saved.get(key);
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
   restoreInheritedProcessEnv();
+  if (scratchHome !== null) {
+    rmSync(scratchHome, { recursive: true, force: true });
+    scratchHome = null;
+  }
 });
 
 function seed(): void {

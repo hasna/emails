@@ -43,6 +43,8 @@ const ENV_KEYS = [
   EMAILS_CLIENT_ENV_SECRET_ENV,
   "EMAILS_SELF_HOSTED_URL",
   "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_SESSION_TOKEN",
+  "EMAILS_IDP_TOKEN",
   // Legacy mode keys (must be rejected loudly).
   "MAILERY_MODE",
   "HASNA_MAILERY_MODE",
@@ -208,13 +210,9 @@ describe("resolveEmailsMode — dual mode", () => {
     });
   });
 
-  it("does not infer self_hosted from credentials alone", () => {
+  it("refuses credentials alone instead of splitting API storage from local mode", () => {
     setSelfHostedCredentials();
-    expect(resolveEmailsMode()).toMatchObject({
-      mode: "local",
-      label: "Local",
-      source: { kind: "default" },
-    });
+    expect(() => resolveEmailsMode()).toThrow("EMAILS_SELF_HOSTED_URL configures an Emails API");
   });
 
   it("accepts the Hasna-prefixed mode alias", () => {

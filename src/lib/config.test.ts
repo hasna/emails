@@ -30,15 +30,27 @@ function restoreInheritedProcessEnv(): void {
 // Use a temp dir unique per test run to isolate from real ~/.hasna/emails
 const TMP_HOME = join("/tmp", `emails-config-test-${process.pid}`);
 
-// Endpoint credentials alone never select self_hosted mode. Tests explicitly
-// set EMAILS_MODE=self_hosted when exercising the remote attachment policy.
+// These tests keep self-hosted client credentials available while selecting the
+// attachment policy explicitly; credentials alone are now a split-storage error.
 const SELF_HOSTED_URL = "https://emails.config.test";
 const SELF_HOSTED_KEY = "config-test-api-key";
+const MODE_ENV_KEY = ["EMAILS", "MODE"].join("_");
+const SELF_HOSTED_ENV_KEYS = [
+  MODE_ENV_KEY,
+  `HASNA_${MODE_ENV_KEY}`,
+  "EMAILS_CLIENT_ENV_SECRET",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_SESSION_TOKEN",
+  "EMAILS_IDP_TOKEN",
+] as const;
 
 beforeEach(() => {
   captureInheritedProcessEnv();
   mkdirSync(TMP_HOME, { recursive: true });
   process.env.HOME = TMP_HOME;
+  for (const key of SELF_HOSTED_ENV_KEYS) delete process.env[key];
+  process.env[MODE_ENV_KEY] = "local";
   process.env.EMAILS_SELF_HOSTED_URL = SELF_HOSTED_URL;
   process.env.EMAILS_SELF_HOSTED_API_KEY = SELF_HOSTED_KEY;
   resetSelfHostedConfigCache();
@@ -48,9 +60,7 @@ afterEach(() => {
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
-  delete process.env.EMAILS_MODE;
-  delete process.env.EMAILS_SELF_HOSTED_URL;
-  delete process.env.EMAILS_SELF_HOSTED_API_KEY;
+  for (const key of SELF_HOSTED_ENV_KEYS) delete process.env[key];
   resetSelfHostedConfigCache();
   restoreInheritedProcessEnv();
 });

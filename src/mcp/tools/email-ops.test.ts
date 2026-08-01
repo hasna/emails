@@ -71,9 +71,31 @@ const FAMILY_TOOLS = [
   "cancel_scheduled",
 ];
 
+const STORE_MODE_ENV = ["EMAILS", "MODE"].join("_");
+const STORE_DB_ENV = ["EMAILS", "DB_PATH"].join("_");
+const STORE_ENV_KEYS = [
+  STORE_MODE_ENV,
+  `HASNA_${STORE_MODE_ENV}`,
+  STORE_DB_ENV,
+  `HASNA_${STORE_DB_ENV}`,
+  "EMAILS_CLIENT_ENV_SECRET",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_SESSION_TOKEN",
+  "EMAILS_IDP_TOKEN",
+] as const;
+
 let providerId: string;
+let previousStoreEnv: Partial<Record<(typeof STORE_ENV_KEYS)[number], string | undefined>>;
 
 beforeEach(() => {
+  previousStoreEnv = {};
+  for (const key of STORE_ENV_KEYS) {
+    previousStoreEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+  process.env[STORE_MODE_ENV] = "local";
+  process.env[STORE_DB_ENV] = ":memory:";
   resetDatabase();
   resetMailDataSource();
   providerId = createProvider({ name: "email-ops-sandbox", type: "sandbox", active: true }).id;
@@ -82,6 +104,11 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   resetMailDataSource();
+  for (const key of STORE_ENV_KEYS) {
+    const value = previousStoreEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe("collapsed email-ops tool family", () => {

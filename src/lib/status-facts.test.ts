@@ -30,17 +30,35 @@ import type { DomainRecord } from "../store/records.js";
 import type { Outcome } from "../store/outcome.js";
 import { emptyMailboxCounts, type MailboxSourceSummary } from "./mail-types.js";
 
-const DB_PATH_ENV = "EMAILS_DB_PATH";
+const HOME_ENV = "HOME";
+const MODE_ENV = ["EMAILS", "MODE"].join("_");
+const DB_PATH_ENV = ["EMAILS", "DB_PATH"].join("_");
 const API_URL_ENV = "EMAILS_SELF_HOSTED_URL";
 const API_KEY_ENV = "EMAILS_SELF_HOSTED_API_KEY";
-const TOUCHED_ENV = [DB_PATH_ENV, API_URL_ENV, API_KEY_ENV, "HASNA_EMAILS_DB_PATH"] as const;
+const TOUCHED_ENV = [
+  HOME_ENV,
+  MODE_ENV,
+  `HASNA_${MODE_ENV}`,
+  DB_PATH_ENV,
+  `HASNA_${DB_PATH_ENV}`,
+  API_URL_ENV,
+  API_KEY_ENV,
+  "EMAILS_CLIENT_ENV_SECRET",
+  "EMAILS_SESSION_TOKEN",
+  "EMAILS_IDP_TOKEN",
+  "EMAILS_INBOUND_S3_BUCKET",
+] as const;
 
 let saved: Array<readonly [string, string | undefined]> = [];
 let scratch: string | null = null;
+let homeScratch: string | null = null;
 
 beforeEach(() => {
   saved = TOUCHED_ENV.map((key) => [key, process.env[key]] as const);
   for (const key of TOUCHED_ENV) delete process.env[key];
+  homeScratch = mkdtempSync(join(tmpdir(), "emails-status-facts-home-"));
+  process.env[HOME_ENV] = homeScratch;
+  process.env[MODE_ENV] = "local";
   process.env[DB_PATH_ENV] = ":memory:";
   resetDatabase();
 });
@@ -54,6 +72,10 @@ afterEach(() => {
   if (scratch !== null) {
     rmSync(scratch, { recursive: true, force: true });
     scratch = null;
+  }
+  if (homeScratch !== null) {
+    rmSync(homeScratch, { recursive: true, force: true });
+    homeScratch = null;
   }
 });
 
