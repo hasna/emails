@@ -480,6 +480,75 @@ for (const harness of HARNESSES) {
   });
 }
 
+describe("a legacy API that returns 200 after dropping a content write", () => {
+  const MESSAGE_ID = "00000000-0000-4000-8000-000000000001";
+  const ORIGINAL_MESSAGE = {
+    id: MESSAGE_ID,
+    direction: "outbound",
+    from_addr: "sender@example.test",
+    to_addrs: ["recipient@example.test"],
+    cc_addrs: [],
+    subject: "legacy silent drop",
+    body_text: "original body",
+    body_html: "<p>original body</p>",
+    status: "sent",
+    provider_message_id: null,
+    message_id: null,
+    in_reply_to: null,
+    received_at: null,
+    is_read: true,
+    is_starred: false,
+    labels: [],
+    headers: { Original: "unchanged" },
+    attachments: [],
+    source_id: null,
+    send_state: "sent",
+    send_started_at: null,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("sends the complete replacement but rejects the unchanged 200 response without leaking it", async () => {
+    let writtenBody: Record<string, unknown> | null = null;
+    const store = createHttpEmailStore({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "test-credential",
+      fetchImpl: async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(typeof input === "object" && "url" in input ? input.url : input);
+        if (url.includes("/openapi.json")) return new Response("{}", { status: 404 });
+        expect(init?.method).toBe("PATCH");
+        writtenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ message: ORIGINAL_MESSAGE }, { status: 200 });
+      },
+    });
+
+    let raised: unknown;
+    try {
+      await storeEmailContent(MESSAGE_ID, {
+        text: SECRET_BODY,
+        html: `<p>${SECRET_BODY}</p>`,
+        headers: { [SECRET_HEADER_NAME]: SECRET_HEADER_VALUE },
+      }, store);
+    } catch (error) {
+      raised = error;
+    }
+
+    // Positive control: the ordinary HTTP store really sent every new value. The failure is
+    // therefore the unchanged response, not a client that omitted the fields itself.
+    expect(writtenBody).toEqual({
+      body_text: SECRET_BODY,
+      body_html: `<p>${SECRET_BODY}</p>`,
+      headers: { [SECRET_HEADER_NAME]: SECRET_HEADER_VALUE },
+    });
+    expect(raised).toBeInstanceOf(Error);
+    expect((raised as Error).message).toMatch(/without confirming the complete requested content replacement/);
+    const errorText = `${(raised as Error).message}\n${(raised as Error).stack ?? ""}`;
+    expect(errorText).not.toContain(SECRET_BODY);
+    expect(errorText).not.toContain(SECRET_HEADER_NAME);
+    expect(errorText).not.toContain(SECRET_HEADER_VALUE);
+  });
+});
+
 // ---- a fabrication guard that would otherwise have lost its only test -----------
 //
 // The deleted suite asserted that a `/v1` response whose `headers` field is NOT AN OBJECT is
