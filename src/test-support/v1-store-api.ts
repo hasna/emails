@@ -83,6 +83,7 @@ import type { Outcome } from "../store/outcome.js";
 import type {
   AddressPatch,
   ListMessagesOptions,
+  MessageContentPatch,
   MessageFolder,
   MessageRecord,
   MessageStatusPatch,
@@ -758,9 +759,32 @@ async function handleMessageById(context: RouteContext, id: string): Promise<Res
       ...(body["add_label"] === undefined ? {} : { add_label: String(body["add_label"]) }),
       ...(body["remove_label"] === undefined ? {} : { remove_label: String(body["remove_label"]) }),
     };
-    const patched = settled(await store.messages.updateMessageStatus(id, patch));
-    if ("response" in patched) return patched.response;
-    return patched.value === null ? notFound("message") : json(200, { message: publicMessage(patched.value) });
+    const contentTouched =
+      body["body_text"] !== undefined ||
+      body["body_html"] !== undefined ||
+      body["headers"] !== undefined;
+    const statusTouched = Object.keys(patch).length > 0;
+    let value: MessageRecord | null;
+    if (statusTouched) {
+      const patched = settled(await store.messages.updateMessageStatus(id, patch));
+      if ("response" in patched) return patched.response;
+      value = patched.value;
+    } else {
+      const read = settled(await store.messages.getMessage(id));
+      if ("response" in read) return read.response;
+      value = read.value;
+    }
+    if (value !== null && contentTouched) {
+      const content: MessageContentPatch = {
+        body_text: body["body_text"] === undefined ? value.body_text : body["body_text"] as string | null,
+        body_html: body["body_html"] === undefined ? value.body_html : body["body_html"] as string | null,
+        headers: body["headers"] === undefined ? value.headers : body["headers"] as Record<string, unknown>,
+      };
+      const updated = settled(await store.messages.updateMessageContent(id, content));
+      if ("response" in updated) return updated.response;
+      value = updated.value;
+    }
+    return value === null ? notFound("message") : json(200, { message: publicMessage(value) });
   }
   if (method === "DELETE") {
     const removed = settled(await store.messages.deleteMessage(id));

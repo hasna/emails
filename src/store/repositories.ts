@@ -79,6 +79,7 @@ import type {
   ListOptions,
   MailboxRollup,
   MessageCountsRecord,
+  MessageContentPatch,
   MessageInput,
   MessageListRecord,
   MessageRaw,
@@ -173,6 +174,7 @@ export interface MessagesRepository {
   /** Idempotent write keyed on `source_id`; reports whether a row was inserted. */
   upsertMessage(input: MessageInput): Promise<Outcome<{ record: MessageRecord; inserted: boolean }>>;
   updateMessageStatus(id: string, patch: MessageStatusPatch): Promise<Outcome<MessageRecord | null>>;
+  updateMessageContent(id: string, patch: MessageContentPatch): Promise<Outcome<MessageRecord | null>>;
   deleteMessage(id: string): Promise<Outcome<boolean>>;
   messageCounts(opts?: { domains?: string[] }): Promise<Outcome<MessageCountsRecord>>;
   /** Capability: `rawMessage`. */

@@ -156,6 +156,7 @@ export const ROUTES: readonly RouteUse[] = Object.freeze([
     template: "/v1/messages/{id}",
     operations: [
       "updateMessageStatus",
+      "updateMessageContent",
       "setInboundRead",
       "setInboundStarred",
       "setInboundArchived",

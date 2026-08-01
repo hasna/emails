@@ -3826,7 +3826,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       patch: {
         operationId: "updateMessage",
         parameters: [...idParam],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" } } } } } },
+        requestBody: { content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" }, body_text: { type: "string", nullable: true }, body_html: { type: "string", nullable: true }, headers: { type: "object", additionalProperties: true } } } } } },
         responses: {
           "200": {
             content: {
@@ -3839,12 +3839,13 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
+          "400": errorResponse("Unknown or malformed message patch field"),
         },
       },
       put: {
         operationId: "replaceMessage",
         parameters: [...idParam],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" } } } } } },
+        requestBody: { content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { status: { type: "string" }, provider_message_id: { type: "string", nullable: true }, is_read: { type: "boolean" }, is_starred: { type: "boolean" }, archived: { type: "boolean" }, add_label: { type: "string" }, remove_label: { type: "string" }, body_text: { type: "string", nullable: true }, body_html: { type: "string", nullable: true }, headers: { type: "object", additionalProperties: true } } } } } },
         responses: {
           "200": {
             content: {
@@ -3857,6 +3858,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
               },
             },
           },
+          "400": errorResponse("Unknown or malformed message patch field"),
         },
       },
       delete: {

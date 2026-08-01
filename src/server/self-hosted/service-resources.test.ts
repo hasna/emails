@@ -241,6 +241,72 @@ describe("self_hosted service generic resources", () => {
     expect((await sched!.json()).to_addresses).toEqual(["b@x.com"]);
   });
 
+  test("tenant-scoped Postgres content write updates all three fields under the tenant fence", async () => {
+    const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const client: TypedQueryClient = {
+      async query() { return { rows: [], rowCount: 0 }; },
+      async many() { return []; },
+      async get<T>(sql: string, params: readonly unknown[] = []): Promise<T | null> {
+        calls.push({ sql, params });
+        return {
+          id: params[0],
+          direction: "outbound",
+          from_addr: "sender@example.test",
+          to_addrs: ["recipient@example.test"],
+          cc_addrs: [],
+          subject: "stored content",
+          body_text: params[1],
+          body_html: params[2],
+          status: "sent",
+          provider_message_id: null,
+          message_id: null,
+          in_reply_to: null,
+          received_at: null,
+          is_read: true,
+          is_starred: false,
+          labels: [],
+          headers: JSON.parse(String(params[3])),
+          attachments: [],
+          source_id: null,
+          idempotency_key: null,
+          send_payload_hash: null,
+          send_state: "none",
+          send_started_at: null,
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-01T00:00:01.000Z",
+        } as unknown as T;
+      },
+      async one() { throw new Error("one not expected"); },
+      async execute() {},
+    };
+    const scoped = new EmailsSelfHostedStore(client).forTenant("tenant-content");
+
+    const updated = await scoped.updateMessageContent("message-content", {
+      body_text: "after",
+      body_html: "<p>after</p>",
+      headers: { "X-After": "yes" },
+    });
+
+    expect(updated).toMatchObject({
+      id: "message-content",
+      body_text: "after",
+      body_html: "<p>after</p>",
+      headers: { "X-After": "yes" },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("body_text  = $2");
+    expect(calls[0]!.sql).toContain("body_html  = $3");
+    expect(calls[0]!.sql).toContain("headers    = $4::jsonb");
+    expect(calls[0]!.sql).toContain("tenant_id = $5");
+    expect(calls[0]!.params).toEqual([
+      "message-content",
+      "after",
+      "<p>after</p>",
+      JSON.stringify({ "X-After": "yes" }),
+      "tenant-content",
+    ]);
+  });
+
   test("unknown resource still 404s", async () => {
     const res = await handleSelfHostedRequest(deps(), req("GET", "/v1/nonsense", { token: readToken() }));
     expect(res?.status).toBe(404);

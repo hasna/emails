@@ -527,6 +527,12 @@ export interface MessageInput {
   send_started_at?: string | null;
 }
 
+export interface MessageContentPatch {
+  body_text: string | null;
+  body_html: string | null;
+  headers: Record<string, unknown>;
+}
+
 /** Delivery/engagement event persisted by a provider webhook. */
 export interface WebhookDeliveryEventInput {
   email_id: string | null;
@@ -4291,6 +4297,20 @@ export class TenantScopedStore {
         JSON.stringify([...labels.values()]),
         this.tenantId,
       ],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  async updateMessageContent(id: string, patch: MessageContentPatch): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET
+         body_text  = $2,
+         body_html  = $3,
+         headers    = $4::jsonb,
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $5
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, patch.body_text, patch.body_html, JSON.stringify(patch.headers), this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }

@@ -22,6 +22,7 @@ import type {
   ListOptions,
   MailboxRollup,
   MessageCountsRecord,
+  MessageContentPatch,
   MessageInput,
   MessageListRecord,
   MessageRaw,
@@ -400,6 +401,40 @@ function patchMessage(db: Database, id: string, patch: MessageStatusPatch): Outc
   );
 }
 
+function patchMessageContent(
+  db: Database,
+  id: string,
+  patch: MessageContentPatch,
+): Outcome<MessageRecord | null> {
+  return guard(() =>
+    withImmediateTransaction(db, () => {
+      const row = selectRow(db, id);
+      if (!row) return ok(null);
+      if (rowTable(row) === LEDGER_TABLE) {
+        db.run(
+          `INSERT INTO email_content (email_id, html, text_body, headers_json)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(email_id) DO UPDATE SET
+             html = excluded.html,
+             text_body = excluded.text_body,
+             headers_json = excluded.headers_json`,
+          [id, patch.body_html, patch.body_text, JSON.stringify(patch.headers)],
+        );
+        db.run(`UPDATE ${LEDGER_TABLE} SET updated_at = ? WHERE id = ?`, [now(), id]);
+      } else {
+        db.run(
+          `UPDATE ${UNIFIED_TABLE}
+             SET text_body = ?, html_body = ?, headers_json = ?, updated_at = ?
+           WHERE id = ?`,
+          [patch.body_text, patch.body_html, JSON.stringify(patch.headers), now(), id],
+        );
+      }
+      const updated = selectRow(db, id);
+      return ok(updated ? mapMessageRecord(updated) : null);
+    }),
+  );
+}
+
 function readCounts(db: Database, opts: { domains?: string[] } | undefined): MessageCountsRecord {
   const { where, params } = messageFilters({ domains: opts?.domains });
   const row = db
@@ -530,6 +565,10 @@ export function createMessagesRepository(db: Database, capabilities: StoreCapabi
 
     async updateMessageStatus(id: string, patch: MessageStatusPatch): Promise<Outcome<MessageRecord | null>> {
       return patchMessage(db, id, patch);
+    },
+
+    async updateMessageContent(id: string, patch: MessageContentPatch): Promise<Outcome<MessageRecord | null>> {
+      return patchMessageContent(db, id, patch);
     },
 
     async deleteMessage(id: string): Promise<Outcome<boolean>> {
