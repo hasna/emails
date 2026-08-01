@@ -66,9 +66,14 @@ beforeEach(async () => {
 });
 afterEach(() => stub.clearEnv());
 
+// Every `add` below passes `--send-only` ON PURPOSE: these tests cover /v1
+// ROUTING, not inbound provisioning. Default `add` now provisions the SES
+// receipt rule too (and refuses when it cannot) — that contract is covered in
+// domain.inbound-provisioning.test.ts; here the deliberate row-only shape keeps
+// the routing assertions free of AWS concerns.
 describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
   it("add writes to the self-hosted API (not a local provider)", async () => {
-    const { data } = await runDomainCommand(["domain", "add", "cloudy.example.com", "--provider", "selfHosted"]);
+    const { data } = await runDomainCommand(["domain", "add", "cloudy.example.com", "--provider", "selfHosted", "--send-only"]);
     const entity = data as { id: string; domain: string };
     expect(entity.domain).toBe("cloudy.example.com");
     const remote = await serverDomains();
@@ -76,43 +81,43 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
   });
 
   it("list reads from the self-hosted API", async () => {
-    await runDomainCommand(["domain", "add", "one.example.com", "--provider", "selfHosted"]);
-    await runDomainCommand(["domain", "add", "two.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "one.example.com", "--provider", "selfHosted", "--send-only"]);
+    await runDomainCommand(["domain", "add", "two.example.com", "--provider", "selfHosted", "--send-only"]);
     const { data } = await runDomainCommand(["domain", "list"]);
     const domains = data as Array<{ domain: string }>;
     expect(domains.map((d) => d.domain).sort()).toEqual(["one.example.com", "two.example.com"]);
   });
 
   it("domains list (plural) reads from the self-hosted API instead of blocking", async () => {
-    await runDomainCommand(["domain", "add", "alpha.example.com", "--provider", "selfHosted"]);
-    await runDomainCommand(["domain", "add", "beta.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "alpha.example.com", "--provider", "selfHosted", "--send-only"]);
+    await runDomainCommand(["domain", "add", "beta.example.com", "--provider", "selfHosted", "--send-only"]);
     const { data } = await runDomainCommand(["domains", "list"]);
     const domains = data as Array<{ domain: string }>;
     expect(domains.map((d) => d.domain).sort()).toEqual(["alpha.example.com", "beta.example.com"]);
   });
 
   it("domains status (no arg) lists via the self-hosted API instead of blocking", async () => {
-    await runDomainCommand(["domain", "add", "gamma.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "gamma.example.com", "--provider", "selfHosted", "--send-only"]);
     const { data } = await runDomainCommand(["domains", "status"]);
     const domains = data as Array<{ domain: string }>;
     expect(domains.map((d) => d.domain)).toEqual(["gamma.example.com"]);
   });
 
   it("domains status <domain> shows the API record in self_hosted", async () => {
-    await runDomainCommand(["domain", "add", "delta.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "delta.example.com", "--provider", "selfHosted", "--send-only"]);
     const { data } = await runDomainCommand(["domains", "status", "delta.example.com"]);
     const rec = data as { domain: string };
     expect(rec.domain).toBe("delta.example.com");
   });
 
   it("add is idempotent by name against the self-hosted API", async () => {
-    await runDomainCommand(["domain", "add", "dup.example.com", "--provider", "selfHosted"]);
-    await runDomainCommand(["domain", "add", "dup.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "dup.example.com", "--provider", "selfHosted", "--send-only"]);
+    await runDomainCommand(["domain", "add", "dup.example.com", "--provider", "selfHosted", "--send-only"]);
     expect((await serverDomains()).length).toBe(1);
   });
 
   it("remove deletes from the self-hosted API", async () => {
-    await runDomainCommand(["domain", "add", "gone.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "gone.example.com", "--provider", "selfHosted", "--send-only"]);
     const remote = await serverDomains();
     expect(remote.length).toBe(1);
     const id = remote[0]!["id"] as string;
@@ -121,7 +126,7 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
   });
 
   it("resolves an id PREFIX against the self-hosted dataset for remove", async () => {
-    await runDomainCommand(["domain", "add", "prefix.example.com", "--provider", "selfHosted"]);
+    await runDomainCommand(["domain", "add", "prefix.example.com", "--provider", "selfHosted", "--send-only"]);
     const remote = await serverDomains();
     const id = remote[0]!["id"] as string;
     // An 8-char prefix must be resolved by listing the self-hosted store — proving

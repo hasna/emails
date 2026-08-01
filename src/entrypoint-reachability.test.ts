@@ -23,6 +23,7 @@ const SRC_ROOT = join(REPO_ROOT, "src");
 // needs a reason; nothing else may be added without one.
 const ALLOWED_UNREACHABLE: Array<{ path: string; reason: string }> = [
   { path: "src/test-support/aws-s3-mock.ts", reason: "test-only harness, imported by *.test.ts" },
+  { path: "src/test-support/aws-sts-mock.ts", reason: "test-only harness (shared STS mock, same design as the S3 one), imported by *.test.ts" },
   { path: "src/test-support/v1-stub.ts", reason: "test-only out-of-process /v1 stub, imported by *.test.ts" },
   {
     path: "src/test-support/v1-store-api.ts",

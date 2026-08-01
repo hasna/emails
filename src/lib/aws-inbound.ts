@@ -37,6 +37,13 @@ export interface InboundSetupResult {
 
 type S3Sdk = typeof import("@aws-sdk/client-s3");
 type SesSdk = typeof import("@aws-sdk/client-ses");
+type ReceiptRuleInput = {
+  Name: string;
+  Enabled: boolean;
+  Recipients: string[];
+  Actions: Array<{ S3Action: { BucketName: string; ObjectKeyPrefix: string } }>;
+  ScanEnabled: boolean;
+};
 
 let s3SdkPromise: Promise<S3Sdk> | undefined;
 let sesSdkPromise: Promise<SesSdk> | undefined;
@@ -317,6 +324,33 @@ async function ensureReceiptRuleSet(ses: SESClient, sesSdk: SesSdk): Promise<{ n
   return { name, created: true };
 }
 
+function normalizeReceiptRecipients(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((recipient) => String(recipient).trim().toLowerCase()).filter(Boolean)
+    : [];
+}
+
+function receiptRuleCoversDesiredInbound(rule: unknown, desired: ReceiptRuleInput): boolean {
+  if (typeof rule !== "object" || rule === null || Array.isArray(rule)) return false;
+  const record = rule as Record<string, unknown>;
+  if (record["Enabled"] !== true) return false;
+
+  const recipients = normalizeReceiptRecipients(record["Recipients"]);
+  const desiredRecipients = desired.Recipients.map((recipient) => recipient.trim().toLowerCase());
+  const coversRecipients = recipients.length === 0 || desiredRecipients.every((recipient) => recipients.includes(recipient));
+  if (!coversRecipients) return false;
+
+  const desiredAction = desired.Actions[0]!.S3Action;
+  const actions = Array.isArray(record["Actions"]) ? record["Actions"] : [];
+  return actions.some((action) => {
+    const s3 = typeof action === "object" && action !== null && !Array.isArray(action)
+      ? (action as { S3Action?: { BucketName?: unknown; ObjectKeyPrefix?: unknown } }).S3Action
+      : undefined;
+    return s3?.BucketName === desiredAction.BucketName
+      && (s3.ObjectKeyPrefix ?? "") === desiredAction.ObjectKeyPrefix;
+  });
+}
+
 /**
  * Full setup: S3 bucket + SES receipt rule for the domain.
  */
@@ -348,32 +382,43 @@ export async function setupInboundEmail(opts: InboundSetupOptions): Promise<Inbo
   const ruleSet = await ensureReceiptRuleSet(ses, sesSdk);
 
   // 3. Receipt rule: domain → S3
-  const { CreateReceiptRuleCommand } = sesSdk;
+  const { CreateReceiptRuleCommand, DescribeReceiptRuleCommand, UpdateReceiptRuleCommand } = sesSdk;
   const ruleName = `inbound-${opts.domain.replace(/\./g, "-")}`;
+  const desiredRule: ReceiptRuleInput = {
+    Name: ruleName,
+    Enabled: true,
+    Recipients: opts.catchAll
+      ? [opts.domain, `.${opts.domain}`]
+      : [opts.domain],
+    Actions: [
+      {
+        S3Action: {
+          BucketName: opts.bucket,
+          ObjectKeyPrefix: prefix,
+        },
+      },
+    ],
+    ScanEnabled: true,
+  };
   let ruleCreated = false;
   try {
     await ses.send(new CreateReceiptRuleCommand({
       RuleSetName: ruleSet.name,
-      Rule: {
-        Name: ruleName,
-        Enabled: true,
-        Recipients: opts.catchAll
-          ? [opts.domain, `.${opts.domain}`]
-          : [opts.domain],
-        Actions: [
-          {
-            S3Action: {
-              BucketName: opts.bucket,
-              ObjectKeyPrefix: prefix,
-            },
-          },
-        ],
-        ScanEnabled: true,
-      },
+      Rule: desiredRule,
     }));
     ruleCreated = true;
   } catch (e: unknown) {
     if (e instanceof Error && e.name === "AlreadyExistsException") {
+      const existing = await ses.send(new DescribeReceiptRuleCommand({
+        RuleSetName: ruleSet.name,
+        RuleName: ruleName,
+      }));
+      if (!receiptRuleCoversDesiredInbound(existing.Rule, desiredRule)) {
+        await ses.send(new UpdateReceiptRuleCommand({
+          RuleSetName: ruleSet.name,
+          Rule: desiredRule,
+        }));
+      }
       ruleCreated = false;
     } else {
       throw e;

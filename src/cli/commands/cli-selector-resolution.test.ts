@@ -154,7 +154,11 @@ describe("domain remove accepts the domain name like its sibling verbs", () => {
   it("removes by name", () => {
     const env = localEnv();
     const providerId = seedProvider(env);
-    ok(runCli(["domain", "add", "acme.example", "--provider", providerId], env), "domain add");
+    // --send-only ON PURPOSE: this test covers the remove-by-name selector, not
+    // inbound provisioning. Default `domain add` now provisions the SES receipt
+    // rule too (and refuses when it cannot) — covered in
+    // domain.inbound-provisioning.test.ts.
+    ok(runCli(["domain", "add", "acme.example", "--provider", providerId, "--send-only"], env), "domain add");
 
     ok(runCli(["domain", "remove", "acme.example", "--yes"], env), "domain remove by name");
     const after = runCli(["--json", "domain", "list"], env);

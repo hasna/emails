@@ -16,7 +16,7 @@ errors are written to stderr.
 | Root command | Subcommands or purpose |
 | --- | --- |
 | `provider` | `add`, `list`, `remove`, `update`, `status`, `check`, `sync` |
-| `domain` | `add`, `connect`, `adopt`, `list`, `dns`, `verify`, `status`, `usable`, `move-provider`, `remove`, `check`, `setup-cloudflare`, warming commands, `available`, `buy`, `purchase-status`, `list-registered`, `setup` |
+| `domain` | `add`, `connect`, `adopt`, `readiness`, `list`, `dns`, `verify`, `status`, `usable`, `move-provider`, `remove`, `check`, `setup-cloudflare`, warming commands, `available`, `buy`, `purchase-status`, `list-registered`, `setup` |
 | `domains` | `list`, `status`, `add`, `connect`, `dns`, `verify`, `check`, `enable-inbound`, `enable-outbound`, `disable-outbound` |
 | `address` | `add`, `list`, `owner`, ownership changes/history, `suggest`, `provision`, `verify`, `set-verified`, `remove`, `suspend`, `activate`, `quota` |
 | `send` | Send one message; supports templates, attachments, scheduling, tracking, and idempotency options where the selected store supports them. |
@@ -70,6 +70,18 @@ build" error in every deployment mode:
 Use `emails domains status` for stored domain state, `emails domain check` for
 live public DNS, `emails domain adopt` for an already verified provider domain,
 and `emails aws setup-inbound` for SES/S3 inbound wiring.
+
+`emails domain add` provisions the full inbound chain by default: it registers
+the domain AND ensures the SES receipt rule into the inbound S3 bucket (the
+same merge-safe path as `emails aws setup-inbound`). When the receipt rule
+cannot be provisioned from the current context (no bucket, no AWS
+credentials), it refuses before writing anything rather than registering a
+domain that silently bounces its mail; `--send-only` is the explicit opt-out
+for domains that should not receive. `emails domain readiness [domain]`
+audits the live chain per domain — MX, the active SES receipt rule, the app
+registration, and best-effort S3 delivery evidence — reporting each link as
+ok / MISSING / unknown with the fix, and exits non-zero when any registered
+domain has drifted into the half-provisioned shape.
 
 ## Mode differences
 
