@@ -8,6 +8,9 @@ import {
   EmailsSelfHostedStore,
   encodeMessagesCursor,
   type AttachmentRepairLedgerRun,
+  type MessageContentPatch,
+  type MessageRecord,
+  type TenantScopedStore,
 } from "./store.js";
 import { attachmentRepairRunResultSha256 } from "./attachment-repair-maintenance.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
@@ -228,6 +231,87 @@ describe("Emails self-hosted service", () => {
     const res = await handleSelfHostedRequest(deps(), req("GET", "/v1/domains"));
     expect(res?.status).toBe(401);
     expect((await res!.json()).reason).toBe("missing_token");
+  });
+
+  test("PATCH /v1/messages/{id} writes body content and rejects unknown fields", async () => {
+    const d = deps();
+    const token = mintApiKey({
+      app: "emails",
+      scopes: ["emails:*"],
+      signingSecret: SIGNING_SECRET,
+    }).token;
+    const original: MessageRecord = {
+      id: "11111111-1111-4111-8111-111111111111",
+      direction: "outbound",
+      from_addr: "sender@example.test",
+      to_addrs: ["recipient@example.test"],
+      cc_addrs: [],
+      subject: "content route",
+      body_text: "before",
+      body_html: "<p>before</p>",
+      status: "sent",
+      provider_message_id: null,
+      message_id: null,
+      in_reply_to: null,
+      received_at: null,
+      is_read: true,
+      is_starred: false,
+      labels: [],
+      headers: { Before: "yes" },
+      attachments: [],
+      source_id: null,
+      idempotency_key: null,
+      send_payload_hash: null,
+      send_state: "none",
+      send_started_at: null,
+      created_at: "2026-08-01T00:00:00.000Z",
+      updated_at: "2026-08-01T00:00:00.000Z",
+    };
+    const writes: MessageContentPatch[] = [];
+    const scoped = {
+      resolveMessageId: async () => ({ id: original.id }),
+      getMessage: async () => original,
+      updateMessageContent: async (_id: string, patch: MessageContentPatch) => {
+        writes.push(patch);
+        return {
+          ...original,
+          body_text: patch.body_text,
+          body_html: patch.body_html,
+          headers: patch.headers,
+        };
+      },
+    } as unknown as TenantScopedStore;
+    d.store = { forTenant: () => scoped } as unknown as EmailsSelfHostedStore;
+
+    const updated = await handleSelfHostedRequest(d, req("PATCH", `/v1/messages/${original.id}`, {
+      token,
+      body: {
+        body_text: "after",
+        body_html: "<p>after</p>",
+        headers: { After: "yes" },
+      },
+    }));
+    expect(updated?.status).toBe(200);
+    expect(await updated!.json()).toMatchObject({
+      message: {
+        body_text: "after",
+        body_html: "<p>after</p>",
+        headers: { After: "yes" },
+      },
+    });
+    expect(writes).toEqual([{
+      body_text: "after",
+      body_html: "<p>after</p>",
+      headers: { After: "yes" },
+    }]);
+
+    const refused = await handleSelfHostedRequest(d, req("PATCH", `/v1/messages/${original.id}`, {
+      token,
+      body: { body_text: "must not land", body_typo: "unknown" },
+    }));
+    expect(refused?.status).toBe(400);
+    expect(await refused!.json()).toMatchObject({ reason: "unknown_field" });
+    expect(writes).toHaveLength(1);
   });
 
   test("/v1 with a bad-signature key is rejected 401", async () => {

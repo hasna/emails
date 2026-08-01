@@ -1,135 +1,16 @@
-// ONE email-content reader. There is no arm to pick, and nothing here asks where this
-// installation keeps its mail.
+// One email-content implementation over the typed store seam. It never branches on a
+// deployment label: SQLite writes the local message/legacy-ledger tables, while the HTTP
+// store calls the authenticated `/v1/messages/{id}` route backed by tenant-scoped Postgres.
 //
-// WHAT THIS FILE USED TO BE. `email-content.ts` was a 24-line facade that built a dispatch
-// helper, read the process-wide deployment word, and handed each of two exports to one of
-// two sibling modules:
+// The 1.3.3 seam collapse intentionally removed this writer because that route silently
+// discarded body fields. The 1.3.6 repair adds an explicit `updateMessageContent` operation
+// to both store implementations, the service store, and the closed OpenAPI patch contract.
+// A fulfilled `storeEmailContent` promise therefore means an existing message record was
+// returned with the replacement body/header projection; absence and store refusals raise.
 //
-//   * `email-content.local.ts` (68 lines) — `INSERT OR REPLACE INTO email_content` for the
-//     write, and a read that FIRST consulted the operator dataset through a sibling
-//     family's routing helper and fell back to `SELECT * FROM email_content`;
-//   * `email-content.remote.ts` (42 lines) — both operations against the operator's
-//     `/v1/messages/<id>` record, the write as a `PATCH` of `body_html` / `body_text` /
-//     `headers`.
-//
-// Both arms are gone. The data comes through the store seam (`src/store/`), the injectable
-// is a store and not a database handle, and the one thing this family can no longer do is
-// named in a thrown refusal rather than approximated by a comfortable default.
-//
-// ─── THE ONE THING A READER MUST KNOW ABOUT THIS FAMILY ──────────────────────────────
-//
-// THE DELETED `PATCH` WRITE WAS A SILENT NO-OP THAT REPORTED SUCCESS, and on an
-// API-configured installation it was THE ONLY REACHABLE WRITE. The operator's by-id handler
-// (src/server/self-hosted/service.ts, the `PATCH`/`PUT` arm of the `/v1/messages/<id>`
-// route) builds its patch from EXACTLY SEVEN keys — status, provider_message_id, is_read,
-// is_starred, archived, add_label, remove_label — and then answers 200 with the message.
-// `body_html`, `body_text` and `headers` are not among them and are not rejected either:
-// unlike the attachment-repair routes, that handler runs no unknown-field check, and the
-// published contract declares the seven properties without closing the object. So the fields
-// are DROPPED, and `storeEmailContent` told its caller the write was done.
-//
-// It passed its suite because the suite pointed at `src/test-support/v1-stub.ts`, whose patch
-// handler is a blind merge: it persists any key it is handed and echoes it straight back.
-// The fixture whose route contract is pinned to the service's own OpenAPI document
-// (`src/test-support/v1-store-api.ts`) drops the same three fields, because that is what the
-// service does. That is the whole reason the suite beside this file is parameterised over
-// two REAL stores instead of a dictionary.
-//
-// ─── WHY THE WRITE IS NOW A REFUSAL, AND WHY THAT IS NOT A CAPABILITY GATE ────────────
-//
-// The seam has NO OPERATION THAT SETS A BODY OR A HEADER SET ON AN EXISTING MESSAGE. This
-// is an ABSENCE, not a false capability, and the distinction matters because a gated
-// operation at least refuses loudly while an absent one invites exactly the silent success
-// described above. The evidence, so a reviewer can check it rather than trust it:
-//
-//   1. `src/store/repositories.ts` contains no occurrence of `body_text`, `body_html` or
-//      `headers` in any signature.
-//   2. The message status patch type (src/store/records.ts) carries status,
-//      provider_message_id, is_read, is_starred, archived, add_label and remove_label —
-//      and nothing else.
-//   3. `createMessage` and `upsertMessage` DO carry a body, on `MessageInput`, but they
-//      MINT A ROW: both require `from_addr` and `to_addrs`, which this family's signature
-//      does not have, and the upsert fences on `source_id`, which the SQLite store hard-
-//      codes to NULL for legacy ledger rows (src/store-sqlite/messages-sql.ts). Neither can
-//      decorate a row that already exists.
-//   4. `EmailContentRepository` — the repository the seam guard maps this very family onto
-//      — holds only ATTACHMENT operations, and no writes at all. Bodies live on the messages
-//      repository.
-//   5. THE STRONGEST ARM HAS NEVER HAD THE OPERATION EITHER. The service's own tenant-scoped
-//      store takes the same seven-field patch and its `UPDATE messages SET …` touches only
-//      status, provider_message_id, is_read, is_starred, labels and updated_at. So this is
-//      not a seam that was declared too narrowly — it is a product that has never been able
-//      to set a body on a row that already exists.
-//   6. THERE IS NO CAPABILITY TO GATE A NEW OPERATION ON. None of the seven capability keys
-//      covers it, so an operation added today would land ungated — which is the same hole
-//      the record route had to be introduced to close.
-//
-// Branching on which store is held would be the only other way out, and it is forbidden
-// (src/store/descriptor.ts). So the write refuses, by name, and the refusal is a THROWN,
-// TYPED error rather than a returned flag: a returned flag is ignorable, and the last
-// version of this operation was ignored for as long as it existed.
-//
-// WHAT STILL RECORDS A BODY, so this refusal is not read as a lost feature. On an
-// API-configured installation the SERVICE records it, at send time, when its send route
-// reserves the send intent — this family's write was never needed there and never worked
-// there. On a local installation `src/lib/sent-ledger.local.ts` records it, in the same
-// module and on the same paths as the `INSERT INTO emails` it accompanies; that statement
-// moved there out of the deleted arm, and the comment above it explains why keeping the two
-// halves of one ledger write together is the honest split. What refuses is THIS family's
-// exported write — the published SDK surface and the path an API-configured installation
-// would reach — because that is the path that has been reporting a discarded write as done.
-//
-// WHAT SHOULD HAPPEN INSTEAD, reported and deliberately not done here, and it is NOT a
-// body-patch operation. The two-step "create the ledger row, then decorate it with a body" is
-// itself the bug: `MessageInput` already carries `body_text`, `body_html` and `headers`, so
-// ledger creation and body recording are ONE `createMessage` call. That collapse belongs to
-// the `emails.*` family, and it additionally needs the send-intent ledger, because
-// `createMessage` refuses an `idempotency_key` on both stores and the forwarding path sets
-// one. A seam body-patch plus a widened service route is the FALLBACK, wanted only if the
-// published `storeEmailContent` export must keep working for external callers — and it would
-// have to come with the unknown-field rejection that route is missing, so that the current
-// silent drop stops being contractually permitted.
-//
-// ─── WHAT THIS FILE CAN NO LONGER DETERMINE, STATED RATHER THAN DERIVED ──────────────
-//
-//  1. Whether a body was recorded. See above: it cannot record one, and it says so.
-//  1a. Which of the two readable tables a row came from. The seam's single-message read scans
-//     the whole unified stream, so an id that belongs to the inbound table is now ANSWERED
-//     where the deleted local arm returned null for it (its `SELECT` named `email_content`
-//     alone). That is a widening rather than a change of meaning — the question was always
-//     "give me this message's body" — and it is asserted.
-//  2. Whether a message HAS content, as distinct from EXISTING. The deleted local arm
-//     returned null when the `email_content` ROW was missing even though the message was
-//     right there, and the deleted remote arm returned null only when the MESSAGE was
-//     missing — so one configuration answered 404 for a real message with an empty body
-//     and the other answered it with nulls. The stronger arm's meaning is kept: NULL MEANS
-//     NO SUCH MESSAGE. A message that exists and carries no body is a record whose `html`
-//     and `text_body` are null, which is the honest spelling of "there is nothing here"
-//     and is distinguishable from "there is no such thing".
-//  2a. WHICH message a prefix meant, when it matched several. The two stores disagreed about
-//     prefixes entirely (see `readMessage`); resolved toward the stronger arm, and an
-//     ambiguous prefix now RAISES rather than answering null or picking the first match.
-//  3. Header VALUE types. `MessageRecord.headers` is `Record<string, unknown>` and this
-//     family used to declare `Record<string, string>` while casting rather than converting
-//     — so a numeric header value flowed through both arms under a type that said it could
-//     not. The declaration is widened to match the seam. Narrowing would have meant
-//     dropping entries (a silent loss) or stringifying them (a fabrication: a nested object
-//     becomes the text `[object Object]`).
-//
-// ─── WHAT THIS FILE DELIBERATELY DOES NOT DO ─────────────────────────────────────────
-//
-//  1. It never asks WHICH store it holds, and it never reads a deployment word.
-//  2. IT NEVER PUTS CONTENT IN A MESSAGE. Not in the refusal, not in an error, not in a
-//     diagnostic. A body, a header set and an attachment payload are the most sensitive
-//     values this package handles, and an error string is the single most likely place for
-//     one to be logged, shipped to a crash reporter, or pasted into an issue. Every message
-//     constructed below names an OPERATION and, at most, a message id.
-//  3. It does not return an empty record, an empty string or an empty header map in place
-//     of a read it could not perform. A store that refuses raises; only a store that
-//     answered "no such message" produces null.
-//  4. It does not touch the deployment-mode axis module, the dispatch layer, the curl
-//     bridge, or any mode-gated branch in another family. Those are phase 9's, and only
-//     once the ratchet in src/mode-axis-ratchet.test.ts reads zero.
+// Reads retain the seam-collapse semantics: null means no message, a body-less message is a
+// record with null body fields, unique prefixes resolve, and headers preserve unknown values.
+// Errors never include body or header contents.
 
 import { createConfiguredEmailStore } from "../store-resolution.js";
 import type { EmailStore } from "../store/email-store.js";
@@ -158,11 +39,10 @@ export interface EmailContentInput {
 }
 
 /**
- * The refusal for a write this installation cannot perform.
+ * Retained for source compatibility with 1.3.3-1.3.5 callers that imported it.
+ * The restored write does not throw this class.
  *
- * A named class, not a bare `Error`, so the ledger writer can catch THIS and nothing else.
- * Catching by message text would swallow a genuine store fault as though it were the
- * expected refusal, which is how a real failure becomes a shrug.
+ * @deprecated `storeEmailContent` is supported again on the 1.3.x line.
  */
 export class EmailContentWriteUnsupportedError extends Error {
   override readonly name = "EmailContentWriteUnsupportedError";
@@ -170,17 +50,7 @@ export class EmailContentWriteUnsupportedError extends Error {
   readonly emailId: string;
 
   constructor(emailId: string) {
-    // A FIXED SENTENCE, with no interpolation of anything the caller passed. This text can
-    // reach a CLI stream, an HTTP error body and — through the forwarding family — a database
-    // column, so it is built from a constant and a message id and nothing else. It names no
-    // environment variable and no configuration change: a refusal that tells the reader how
-    // to switch it off is a refusal documenting its own bypass.
-    super(
-      "Recording a message body is not an operation any store behind this package has. The store " +
-        "seam has no write that sets a body or a header set on an existing message, and the " +
-        "operator API's by-id message patch silently discards those fields rather than rejecting " +
-        "them. A body is recorded when the message is created, by the send path.",
-    );
+    super("This compatibility error is no longer thrown because message content writes are supported.");
     this.emailId = emailId;
   }
 }
@@ -209,24 +79,38 @@ function storeFor(store: EmailStore | undefined): EmailStore {
 }
 
 /**
- * Record a message's rendered body and headers.
+ * Replace a message's rendered body and headers.
  *
- * ALWAYS REFUSES, and the return type says so. `never` rather than `Promise<void>` is
- * deliberate twice over: it makes every caller's dead tail visible to `tsc`, and it throws
- * SYNCHRONOUSLY, so a caller that forgot to await gets a thrown error rather than an
- * unhandled rejection the event loop swallows. The previous version of this operation was
- * ignorable and was ignored for as long as it existed.
+ * This is asynchronous because the configured store may be the HTTP/API arm. A fulfilled
+ * promise means the store returned the updated message record; a missing message rejects
+ * instead of reporting a write that did not happen.
  *
- * The signature keeps both of the deleted arms' parameters so the exported surface is
- * unchanged; neither value is read, and `content` in particular is never named in the
- * error — see note 2 in the header.
+ * Omitted fields keep the 1.3.2 replacement semantics: text/html become null and headers
+ * become an empty object.
  */
-export function storeEmailContent(
+export async function storeEmailContent(
   emailId: string,
-  _content: EmailContentInput,
-  _store?: EmailStore,
-): never {
-  throw new EmailContentWriteUnsupportedError(emailId);
+  content: EmailContentInput,
+  store?: EmailStore,
+): Promise<void> {
+  const resolved = storeFor(store);
+  const patch = {
+    body_text: content.text ?? null,
+    body_html: content.html ?? null,
+    headers: content.headers ?? {},
+  };
+  const direct = await resolved.messages.updateMessageContent(emailId, patch);
+  if (!direct.ok) throw storeRefusal("record a message's body", direct);
+  if (direct.value !== null) return;
+
+  const id = await resolved.messages.resolveMessageId(emailId);
+  if (!id.ok) {
+    if (id.code === "not_found") throw new Error(`No such message exists: ${emailId}`);
+    throw storeRefusal("resolve a message id for a body write", id);
+  }
+  const second = await resolved.messages.updateMessageContent(id.value.id, patch);
+  if (!second.ok) throw storeRefusal("record a message's body", second);
+  if (second.value === null) throw new Error(`No such message exists: ${id.value.id}`);
 }
 
 /**

@@ -51,6 +51,7 @@ import type {
   ListOptions,
   MailboxRollup,
   MessageCountsRecord,
+  MessageContentPatch,
   MessageInput,
   MessageListRecord,
   MessageRaw,
@@ -295,6 +296,21 @@ export function createMessagesRepository(transport: Transport): MessagesReposito
       if (answer.status !== 200) return refusalForStatus(answer.status, answer.body, "updateMessageStatus");
       return ok(
         messageRecord(envelope(answer.body, "message", "updateMessageStatus"), "updateMessageStatus"),
+      );
+    },
+
+    async updateMessageContent(id: string, patch: MessageContentPatch): Promise<Outcome<MessageRecord | null>> {
+      const answer = await transport.request("PATCH", `/messages/${encodeURIComponent(id)}`, {
+        body: {
+          body_text: patch.body_text,
+          body_html: patch.body_html,
+          headers: patch.headers,
+        },
+      });
+      if (answer.status === 404) return ok(null);
+      if (answer.status !== 200) return refusalForStatus(answer.status, answer.body, "updateMessageContent");
+      return ok(
+        messageRecord(envelope(answer.body, "message", "updateMessageContent"), "updateMessageContent"),
       );
     },
 

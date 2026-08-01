@@ -10,6 +10,7 @@ type Operation = {
   requestBody?: {
     content?: Record<string, {
       schema?: {
+        additionalProperties?: boolean;
         properties?: Record<string, unknown>;
         required?: string[];
         oneOf?: Array<{
@@ -160,6 +161,20 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
       type: "string",
       description: "Base64-encoded attachment content",
     });
+  });
+
+  it("publishes message body/header writes and closes the patch object", () => {
+    for (const method of ["patch", "put"] as const) {
+      const operation = paths["/v1/messages/{id}"]?.[method];
+      const schema = operation?.requestBody?.content?.["application/json"]?.schema;
+      expect(schema?.additionalProperties, method).toBe(false);
+      expect(schema?.properties, method).toMatchObject({
+        body_text: { type: "string", nullable: true },
+        body_html: { type: "string", nullable: true },
+        headers: { type: "object", additionalProperties: true },
+      });
+      expect(operation?.responses, method).toHaveProperty("400");
+    }
   });
 
   it("publishes body-only send-intent recovery operations", () => {

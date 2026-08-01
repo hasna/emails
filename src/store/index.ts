@@ -48,6 +48,7 @@ export type {
   ListOptions,
   MailboxRollup,
   MessageCountsRecord,
+  MessageContentPatch,
   MessageFolder,
   MessageInput,
   MessageListRecord,

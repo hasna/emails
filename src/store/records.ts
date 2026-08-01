@@ -351,6 +351,17 @@ export interface MessageStatusPatch {
   remove_label?: string;
 }
 
+/**
+ * A complete replacement of the body and header projection on an existing
+ * message. All fields are required so a successful write cannot leave the
+ * caller guessing whether an omitted field was preserved or cleared.
+ */
+export interface MessageContentPatch {
+  body_text: string | null;
+  body_html: string | null;
+  headers: Record<string, unknown>;
+}
+
 /** Reconstructed raw MIME. Behind the `rawMessage` capability. */
 export interface MessageRaw {
   raw: string;

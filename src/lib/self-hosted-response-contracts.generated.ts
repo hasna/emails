@@ -18419,16 +18419,23 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     "path": "/v1/messages/{id}",
     "status": 400,
     "schema": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "error": {
-          "type": "string",
-          "minLength": 1
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/ErrorResponse"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error"
+          ]
         }
-      },
-      "required": [
-        "error"
       ]
     }
   },
@@ -18594,16 +18601,23 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     "path": "/v1/messages/{id}",
     "status": 400,
     "schema": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "error": {
-          "type": "string",
-          "minLength": 1
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/ErrorResponse"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error"
+          ]
         }
-      },
-      "required": [
-        "error"
       ]
     }
   },

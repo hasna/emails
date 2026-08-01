@@ -1323,7 +1323,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async replaceMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
+    async replaceMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string; "body_text"?: string | null; "body_html"?: string | null; "headers"?: Record<string, unknown> }, init?: RequestInit): Promise<{ "message": Message }> {
       return this.request("PUT", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,
@@ -1339,7 +1339,7 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
+    async updateMessage(id: string, body: { "status"?: string; "provider_message_id"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "archived"?: boolean; "add_label"?: string; "remove_label"?: string; "body_text"?: string | null; "body_html"?: string | null; "headers"?: Record<string, unknown> }, init?: RequestInit): Promise<{ "message": Message }> {
       return this.request("PATCH", `/v1/messages/${encodeURIComponent(String(id))}`, {
         body,
         query: undefined,

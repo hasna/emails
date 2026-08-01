@@ -138,15 +138,13 @@ export {
 //    `if (content)` is always truthy, so a caller's "no body" branch becomes unreachable and a
 //    body renders as the text `undefined`. That is the fabricated-value failure mode this
 //    refactor exists to remove, so it must not go unannounced.
-//  * `storeEmailContent` now REFUSES, always, by throwing `EmailContentWriteUnsupportedError`.
-//    No store behind this package can write a body onto an existing message — see
-//    `src/db/email-content.ts` for the six checks and for what should replace it. The error
-//    TYPE is exported below precisely so a consumer can catch this and nothing else, rather
-//    than string-matching a message or catching every `Error`.
+//  * `storeEmailContent` is also ASYNC now. It restores the 1.3.2 write through the typed
+//    store seam and resolves only after the configured SQLite or HTTP/API store returns the
+//    updated message record. `EmailContentWriteUnsupportedError` remains exported only for
+//    source compatibility with consumers of 1.3.3-1.3.5; the restored write does not throw it.
 //
-// Both need a MAJOR version at release. The version is deliberately not bumped in the change
-// that introduced them, and `CHANGELOG.md`'s `[Unreleased]` section is digest-frozen, so this
-// comment and the pull request are where the break is recorded.
+// The async shape remains the published 1.3.x contract; this patch restores the missing write
+// capability without reintroducing deployment routing or the old remote silent no-op.
 export {
   storeEmailContent,
   getEmailContent,

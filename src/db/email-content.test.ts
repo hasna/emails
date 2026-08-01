@@ -12,15 +12,12 @@
 //
 // WHAT IS TESTED HARDEST, in order:
 //
-//  1. THE WRITE REFUSES, BY TYPE, ON BOTH STORES, AND SYNCHRONOUSLY. A returned flag would be
-//     ignorable and the previous version of this operation was ignored for as long as it
-//     existed. The refusal must also carry NO CONTENT — asserted with a positive control,
-//     because an assertion that a string lacks a token is vacuous if the token was never in
-//     play.
+//  1. THE WRITE RETURNS A PROMISE AND READS BACK THE REPLACEMENT on both stores. The HTTP
+//     harness uses the contract-pinned route fixture rather than the old blind-merge stub.
 //  2. NULL MEANS "NO SUCH MESSAGE" AND ONLY THAT. A message that exists and carries no body
 //     is a RECORD whose fields are null, not an absence. The two deleted arms disagreed about
 //     this and one of them answered 404 for a real message.
-//  3. A REFUSAL RAISES. `null`, `{}` and an empty string are the three values a read the store
+//  3. A READ REFUSAL RAISES. `null`, `{}` and an empty string are the three values a read the store
 //     would not answer must never be spelled as.
 //  4. THE MIGRATION PATH STILL READS. Content written by the deleted arm's statement — a
 //     legacy ledger row plus an `email_content` row — must still come back through the seam,
@@ -46,10 +43,18 @@ import type { Outcome, Refusal } from "../store/outcome.js";
 import { createProvider } from "./providers.local.js";
 import { createSentEmailLedger, storeSentEmailContent } from "../lib/sent-ledger.local.js";
 import {
-  EmailContentWriteUnsupportedError,
   getEmailContent,
   storeEmailContent,
 } from "./email-content.js";
+
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2)
+    ? true
+    : false;
+type Assert<Value extends true> = Value;
+export type StoreEmailContentReturnRegression =
+  Assert<Equal<ReturnType<typeof storeEmailContent>, Promise<void>>>;
 
 /**
  * Markers that appear NOWHERE else in this file or in the package.
@@ -421,58 +426,56 @@ for (const harness of HARNESSES) {
   });
 
   describe(`storeEmailContent against ${harness.name}`, () => {
-    // The operation refuses on EVERY configuration, so a store is passed only to prove the
-    // refusal is not a consequence of not having one.
-    it("refuses, with the family's own error type", async () => {
-      const id = await harness.seedMessage({ subject: "target" });
+    it("updates an existing message and returns only after the body and headers are readable", async () => {
+      const id = await harness.seedMessage({
+        text: "original",
+        html: "<p>original</p>",
+        headers: { Old: "yes" },
+      });
 
-      expect(() => storeEmailContent(id, { text: "new body" }, harness.store()))
-        .toThrow(EmailContentWriteUnsupportedError);
-    });
+      const result = storeEmailContent(id, {
+        text: "replacement",
+        html: "<p>replacement</p>",
+        headers: { "X-Replaced": "yes" },
+      }, harness.store());
+      expect(typeof result.then, "the store seam is asynchronous on both arms").toBe("function");
+      await result;
 
-    it("refuses SYNCHRONOUSLY rather than as a rejected promise", async () => {
-      const id = await harness.seedMessage({ subject: "target" });
-      // A rejected promise is silently discardable by a caller that forgot to await, which is
-      // exactly how the deleted version went unnoticed.
-      let threwSynchronously = false;
-      try {
-        storeEmailContent(id, { text: "new body" }, harness.store());
-      } catch {
-        threwSynchronously = true;
-      }
-      expect(threwSynchronously).toBe(true);
-    });
-
-    it("carries the message id and NOT the content in its refusal", async () => {
-      const id = await harness.seedMessage({ subject: "target" });
-
-      let raised: unknown;
-      try {
-        storeEmailContent(id, { text: SECRET_BODY, headers: { [SECRET_HEADER_NAME]: SECRET_HEADER_VALUE } });
-      } catch (error) {
-        raised = error;
-      }
-      expect(raised).toBeInstanceOf(EmailContentWriteUnsupportedError);
-      // The NAME too, found unasserted by mutation testing: `instanceof` survives a bundler
-      // that renames the class, and the name is what reaches a serialised log or an MCP payload.
-      expect((raised as Error).name).toBe("EmailContentWriteUnsupportedError");
-      expect((raised as EmailContentWriteUnsupportedError).emailId).toBe(id);
-      const text = `${(raised as Error).message}\n${(raised as Error).stack ?? ""}`;
-      expect(text).not.toContain(SECRET_BODY);
-      expect(text).not.toContain(SECRET_HEADER_NAME);
-      expect(text).not.toContain(SECRET_HEADER_VALUE);
-    });
-
-    it("leaves the message unchanged", async () => {
-      const id = await harness.seedMessage({ text: "original", html: "<p>original</p>" });
-
-      expect(() => storeEmailContent(id, { text: "replacement" }, harness.store())).toThrow();
-
-      // Without this, the refusal assertion would also hold for an implementation that wrote
-      // and THEN threw.
       const content = await getEmailContent(id, harness.store());
-      expect(content!.text_body).toBe("original");
-      expect(content!.html).toBe("<p>original</p>");
+      expect(content).toMatchObject({
+        email_id: id,
+        text_body: "replacement",
+        html: "<p>replacement</p>",
+        headers: { "X-Replaced": "yes" },
+      });
+      expect(content!.headers).not.toHaveProperty("Old");
+    });
+
+    it("keeps 1.3.2 replacement semantics for omitted fields", async () => {
+      const id = await harness.seedMessage({
+        text: "original",
+        html: "<p>original</p>",
+        headers: { "X-Original": "yes" },
+      });
+
+      await storeEmailContent(id, { text: "replacement" }, harness.store());
+
+      const content = await getEmailContent(id, harness.store());
+      expect(content!.text_body).toBe("replacement");
+      expect(content!.html).toBeNull();
+      expect(content!.headers).toEqual({});
+    });
+
+    it("rejects a missing message instead of reporting a write that did not happen", async () => {
+      const present = await harness.seedMessage({ text: "positive control" });
+      await storeEmailContent(present, { text: "updated control" }, harness.store());
+      expect((await getEmailContent(present, harness.store()))!.text_body).toBe("updated control");
+
+      await expect(storeEmailContent(
+        "00000000-0000-4000-8000-000000000000",
+        { text: "must not be accepted" },
+        harness.store(),
+      )).rejects.toThrow(/no such message/i);
     });
   });
 }
@@ -595,21 +598,14 @@ describe("the published entry point", () => {
     expect(await returned).toBeNull();
   });
 
-  it("exports a storeEmailContent that refuses, and the error TYPE to catch it with", async () => {
+  it("exports a storeEmailContent that truthfully updates and returns a promise", async () => {
     const entry = await import("../index.js");
-    expect(typeof entry.EmailContentWriteUnsupportedError).toBe("function");
 
     const id = await sqliteHarness.seedMessage({ text: "present" });
-    let raised: unknown;
-    try {
-      entry.storeEmailContent(id, { text: "rejected" });
-    } catch (error) {
-      raised = error;
-    }
-    // Catchable BY TYPE from the public entry, not by string-matching a message. A consumer that
-    // catches every `Error` cannot tell this refusal from a bug.
-    expect(raised).toBeInstanceOf(entry.EmailContentWriteUnsupportedError);
-    expect((raised as Error).name).toBe("EmailContentWriteUnsupportedError");
+    const returned = entry.storeEmailContent(id, { text: "published write" });
+    expect(typeof returned.then).toBe("function");
+    await returned;
+    expect((await entry.getEmailContent(id))!.text_body).toBe("published write");
   });
 });
 

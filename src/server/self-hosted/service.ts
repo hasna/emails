@@ -28,6 +28,7 @@ import {
   policyDenialOf,
   type MessageFolder,
   type TenantScopedStore,
+  type MessageContentPatch,
   type MessageInput,
   type MessageListRecord,
   type MessageRecord,
@@ -86,6 +87,18 @@ interface ReadyResult {
 }
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MESSAGE_PATCH_FIELDS = new Set([
+  "status",
+  "provider_message_id",
+  "is_read",
+  "is_starred",
+  "archived",
+  "add_label",
+  "remove_label",
+  "body_text",
+  "body_html",
+  "headers",
+]);
 
 class RequestBodyTooLargeError extends Error {}
 
@@ -1696,15 +1709,58 @@ export async function handleSelfHostedRequest(
         const resolved = await resolveMessageIdOrError(auth.store, id);
         if (!resolved.ok) return resolved.response;
         const body = await readJsonBody(req);
-        const rec = await auth.store.updateMessageStatus(resolved.id, {
-          status: body.status === undefined ? undefined : String(body.status),
-          provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
-          is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
-          is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
-          archived: typeof body.archived === "boolean" ? body.archived : undefined,
-          add_label: typeof body.add_label === "string" ? body.add_label : undefined,
-          remove_label: typeof body.remove_label === "string" ? body.remove_label : undefined,
-        });
+        const unknown = Object.keys(body).filter((key) => !MESSAGE_PATCH_FIELDS.has(key));
+        if (unknown.length > 0) {
+          return json(400, {
+            error: `unknown message patch field: ${unknown[0]}`,
+            reason: "unknown_field",
+          });
+        }
+        if (body.headers !== undefined && (
+          typeof body.headers !== "object" ||
+          body.headers === null ||
+          Array.isArray(body.headers)
+        )) {
+          return json(400, { error: "headers must be an object", reason: "invalid_headers" });
+        }
+        if (body.body_text !== undefined && body.body_text !== null && typeof body.body_text !== "string") {
+          return json(400, { error: "body_text must be a string or null", reason: "invalid_body_text" });
+        }
+        if (body.body_html !== undefined && body.body_html !== null && typeof body.body_html !== "string") {
+          return json(400, { error: "body_html must be a string or null", reason: "invalid_body_html" });
+        }
+
+        const contentTouched =
+          body.body_text !== undefined ||
+          body.body_html !== undefined ||
+          body.headers !== undefined;
+        const statusTouched =
+          body.status !== undefined ||
+          body.provider_message_id !== undefined ||
+          body.is_read !== undefined ||
+          body.is_starred !== undefined ||
+          body.archived !== undefined ||
+          body.add_label !== undefined ||
+          body.remove_label !== undefined;
+        let rec = statusTouched
+          ? await auth.store.updateMessageStatus(resolved.id, {
+              status: body.status === undefined ? undefined : String(body.status),
+              provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
+              is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
+              is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
+              archived: typeof body.archived === "boolean" ? body.archived : undefined,
+              add_label: typeof body.add_label === "string" ? body.add_label : undefined,
+              remove_label: typeof body.remove_label === "string" ? body.remove_label : undefined,
+            })
+          : await auth.store.getMessage(resolved.id);
+        if (rec && contentTouched) {
+          const content: MessageContentPatch = {
+            body_text: body.body_text === undefined ? rec.body_text : body.body_text as string | null,
+            body_html: body.body_html === undefined ? rec.body_html : body.body_html as string | null,
+            headers: body.headers === undefined ? rec.headers : body.headers as Record<string, unknown>,
+          };
+          rec = await auth.store.updateMessageContent(resolved.id, content);
+        }
         return rec ? json(200, { message: publicMessage(rec) }) : json(404, { error: "message not found" });
       }
       if (method === "DELETE") {
