@@ -61,7 +61,6 @@ LABEL org.opencontainers.image.source="https://github.com/hasna/emails" \
 
 ENV HOME=/home/bun \
     PATH=/usr/local/bin \
-    EMAILS_MODE=self_hosted \
     EMAILS_DATABASE_CA_FILE=/opt/emails/certs/aws-rds-global-bundle.pem \
     NODE_EXTRA_CA_CERTS=/opt/emails/certs/aws-rds-global-bundle.pem \
     NODE_ENV=production \

@@ -298,6 +298,7 @@ describe("self-hosted container TLS contract", () => {
     // deployment word therefore ran the dashboard and was probed for a route it does not
     // have — permanently unhealthy, with no configuration error anywhere to explain it.
     // Both now read EMAILS_DATABASE_URL, so they cannot disagree on any input.
+    expect(dockerfile).not.toContain("EMAILS_MODE=");
     expect(runtimeSmoke).not.toContain("EMAILS_MODE");
     expect(runtimeSmoke).toContain(
       'fetch("http://127.0.0.1:8080/api/providers?limit=1")',
