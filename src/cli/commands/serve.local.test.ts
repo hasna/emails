@@ -21,6 +21,10 @@ import {
   API_SETTINGS_POINTER,
   DATABASE_PATH_SETTINGS,
 } from "../../store-resolution.js";
+import {
+  RETIRED_SERVER_MODE_SETTINGS,
+  SERVER_DATABASE_URL_SETTING,
+} from "../../server/storage-backend.js";
 import { startServeWebhookListener } from "./serve.local.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -106,5 +110,31 @@ describe("startServeWebhookListener", () => {
     } finally {
       occupied.stop(true);
     }
+  });
+});
+
+describe("emails serve backend selection", () => {
+  it("selects the PostgreSQL service from the database URL without a deployment word", () => {
+    const env = {
+      ...process.env,
+      [SERVER_DATABASE_URL_SETTING]: "postgres://operator.invalid/emails",
+    };
+    for (const setting of RETIRED_SERVER_MODE_SETTINGS) delete env[setting];
+
+    const result = Bun.spawnSync({
+      cmd: ["bun", "src/cli/index.tsx", "serve", "--help"],
+      cwd: join(import.meta.dir, "..", "..", ".."),
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    const stderr = new TextDecoder().decode(result.stderr);
+
+    expect(result.exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("Start the self-hosted HTTP service");
+    expect(stdout).toContain('default: "8080"');
+    expect(stdout).not.toContain("Start the HTTP server and dashboard");
   });
 });
