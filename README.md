@@ -196,7 +196,7 @@ emails analytics         # email analytics
 emails doctor            # system diagnostics
 emails doctor delivery   # diagnose missing inbound mail for one address
 emails provision         # registered but intentionally NOT IMPLEMENTED
-emails serve             # local dashboard or self-hosted /v1 service, by mode
+emails serve             # SQLite dashboard or PostgreSQL /v1 service, by EMAILS_DATABASE_URL
 emails mcp               # install MCP server
 emails remove            # remove MCP configuration from supported agent clients
 ```
@@ -376,12 +376,15 @@ emails-mcp            # stdio transport (default)
 
 ## REST API
 
-`emails serve` selects the server by deployment mode:
+`emails serve` selects the server by its data backend, derived from
+`EMAILS_DATABASE_URL`: unset or blank means `sqlite`, and a PostgreSQL URL means
+`postgresql`. There is no separate server selector for this choice.
 
-- In local mode it exposes the static dashboard and its unauthenticated,
-  loopback-oriented management API under `/api/*` on `127.0.0.1:3900`.
-- In `self_hosted` mode it exposes the authenticated PostgreSQL-backed `/v1`
-  service on `0.0.0.0:8080`; `/openapi.json` is the formal wire contract.
+- With the SQLite backend it exposes the static dashboard and its
+  unauthenticated, loopback-oriented management API under `/api/*` on
+  `127.0.0.1:3900`.
+- With the PostgreSQL backend it exposes the authenticated `/v1` service on
+  `0.0.0.0:8080`; `/openapi.json` is the formal wire contract.
 - Scoped send keys remain part of the local send authorization model; there is
   no separate hosted-agent API surface in this OSS server.
 
