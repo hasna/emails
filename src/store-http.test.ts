@@ -27,6 +27,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase, type Database } from "./db/database.js";
 import { uuid } from "./db/runtime.js";
+import { EMAILS_SELF_HOSTED_API_KEY_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
 import { emailsSelfHostedOpenApi } from "./server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES } from "./server/self-hosted/resources.js";
 import { CAPABILITY_KEYS, capabilityRefusal, isCapabilityRefusal } from "./store/capabilities.js";
@@ -554,6 +555,41 @@ describe("the HTTP transport's bounds", () => {
     });
     await expect(transport.request("GET", "/domains")).rejects.toThrow(EmailsApiFault);
   }, 10_000);
+
+  it("falls back to the API key after a selected session token needs reauthentication", async () => {
+    const authorizations: string[] = [];
+    const fetchImpl: FetchImplementation = async (_url, init) => {
+      authorizations.push(init?.headers?.Authorization ?? "");
+      if (authorizations.length === 1) {
+        return new Response(
+          JSON.stringify({ error: "session is invalid or expired", reason: "reauthenticate" }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ domains: [] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+    const transport = createTransport({
+      baseUrl: "http://127.0.0.1:1/v1",
+      credential: "session-token-placeholder",
+      credentialSetting: EMAILS_SESSION_TOKEN_ENV,
+      credentialFallbacks: [
+        { setting: EMAILS_SELF_HOSTED_API_KEY_ENV, value: "api-key-placeholder" },
+      ],
+      fetchImpl,
+    });
+
+    await expect(transport.request("GET", "/domains")).resolves.toEqual({
+      status: 200,
+      body: { domains: [] },
+    });
+    expect(authorizations).toEqual([
+      "Bearer session-token-placeholder",
+      "Bearer api-key-placeholder",
+    ]);
+  });
 
   it("splits 403 into a credential FAULT and a per-request refusal", async () => {
     // Both directions of the rule in outcome.ts. A credential with no tenant mapping

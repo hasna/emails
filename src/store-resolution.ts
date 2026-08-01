@@ -37,7 +37,12 @@
 // src/store/descriptor.ts for what happened the last time a label like that existed).
 
 import { defaultDatabasePath } from "./db/database.js";
-import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_IDP_TOKEN_ENV, EMAILS_SESSION_TOKEN_ENV } from "./lib/client-env.js";
+import {
+  CLIENT_ENV_CREDENTIAL_SELECTION_KEYS,
+  EMAILS_CLIENT_ENV_SECRET_ENV,
+  resolveEmailsClientCredentialCandidates,
+  type EmailsClientCredentialSetting,
+} from "./lib/client-env.js";
 import type { EmailStore } from "./store/email-store.js";
 import { createHttpEmailStore } from "./store-http/index.js";
 import { createSqliteEmailStore } from "./store-sqlite/index.js";
@@ -63,9 +68,7 @@ export const API_BASE_URL_SETTING = "EMAILS_SELF_HOSTED_URL";
  * which credential a mixed environment means.
  */
 export const API_CREDENTIAL_SETTINGS = Object.freeze([
-  EMAILS_SESSION_TOKEN_ENV,
-  EMAILS_IDP_TOKEN_ENV,
-  "EMAILS_SELF_HOSTED_API_KEY",
+  ...CLIENT_ENV_CREDENTIAL_SELECTION_KEYS,
 ] as const);
 
 /**
@@ -126,7 +129,7 @@ export type StorePlan =
       readonly baseUrl: string;
       readonly setting: string;
       /** Which setting carries the credential. NEVER the credential itself. */
-      readonly credentialSetting: string;
+      readonly credentialSetting: EmailsClientCredentialSetting;
     };
 
 /**
@@ -324,6 +327,8 @@ export function createConfiguredEmailStore(): EmailStore {
       return createHttpEmailStore({
         baseUrl: plan.baseUrl,
         credential: configured(process.env, plan.credentialSetting) as string,
+        credentialSetting: plan.credentialSetting,
+        credentialFallbacks: resolveEmailsClientCredentialCandidates(process.env).slice(1),
       });
   }
 }

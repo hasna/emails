@@ -19,6 +19,12 @@
 // code path.
 
 import { EmailsApiFault } from "./outcome.js";
+import {
+  EMAILS_SELF_HOSTED_API_KEY_ENV,
+  EMAILS_SESSION_TOKEN_ENV,
+  type EmailsClientCredentialCandidate,
+  type EmailsClientCredentialSetting,
+} from "../lib/client-env.js";
 
 /** The default per-request deadline, matching `EMAILS_SELF_HOSTED_HTTP_TIMEOUT`. */
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -41,6 +47,10 @@ export interface TransportOptions {
   baseUrl: string;
   /** The API key or session token. Sent as a bearer credential, never logged. */
   credential: string;
+  /** Which setting supplied `credential`; safe to report. */
+  credentialSetting?: EmailsClientCredentialSetting;
+  /** Later credentials to try after a selected session token needs reauthentication. */
+  credentialFallbacks?: readonly EmailsClientCredentialCandidate[];
   fetchImpl?: FetchImplementation;
   timeoutMs?: number;
   maxResponseBytes?: number;
@@ -102,79 +112,129 @@ function buildQuery(query: Record<string, QueryValue> | undefined): string {
   return encoded.length > 0 ? `?${encoded}` : "";
 }
 
+function credentialCandidates(options: TransportOptions): readonly EmailsClientCredentialCandidate[] {
+  return [
+    { setting: options.credentialSetting ?? EMAILS_SELF_HOSTED_API_KEY_ENV, value: options.credential },
+    ...(options.credentialFallbacks ?? []),
+  ];
+}
+
+function errorReason(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const fields = body as { reason?: unknown; code?: unknown };
+  if (typeof fields.reason === "string") return fields.reason;
+  if (typeof fields.code === "string") return fields.code;
+  return null;
+}
+
+function shouldTryNextCredential(candidate: EmailsClientCredentialCandidate, response: WireResponse): boolean {
+  return candidate.setting === EMAILS_SESSION_TOKEN_ENV
+    && response.status === 401
+    && errorReason(response.body) === "reauthenticate";
+}
+
 export function createTransport(options: TransportOptions): Transport {
   const { requestBase, safeBase } = toV1BaseUrl(options.baseUrl);
   const doFetch: FetchImplementation = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const candidates = credentialCandidates(options);
 
   return {
     safeBaseUrl: safeBase,
     async request(method, path, requestOptions): Promise<WireResponse> {
       const url = `${requestBase}${path}${buildQuery(requestOptions?.query)}`;
-      const headers: Record<string, string> = {
-        // Bearer, matching what both existing self-hosted clients send and what the
-        // service's `extractToken` accepts alongside `x-api-key`.
-        Authorization: `Bearer ${options.credential}`,
-        Accept: "application/json",
-      };
-      const hasBody = requestOptions?.body !== undefined;
-      if (hasBody) headers["Content-Type"] = "application/json";
-
-      const controller = new AbortController();
-      // The deadline covers the BODY READ, not just the headers. Cleared in the outer
-      // `finally` below rather than as soon as `fetch` resolves: a service that sends
-      // headers promptly and then stalls the body would otherwise hang this call
-      // forever, with the timeout already disarmed — the failure mode a per-request
-      // deadline exists to prevent, reintroduced by clearing it one step too early.
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        let response: Response;
-        try {
-          response = await doFetch(url, {
-            method,
-            headers,
-            ...(hasBody ? { body: JSON.stringify(requestOptions?.body) } : {}),
-            signal: controller.signal,
-          });
-        } catch (error) {
-          // A transport failure is a FAULT, never a refusal — see outcome.ts RULE 1.
-          // The message names the method and path but never the query string, which can
-          // carry a recipient address, and never the headers, which carry the credential.
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new EmailsApiFault(0, `${method} ${path} could not reach the Emails API: ${cause}`);
-        }
-
-        let text: string;
-        try {
-          text = await readBounded(response, maxResponseBytes, controller.signal, `${method} ${path}`);
-        } catch (error) {
-          // The BODY READ gets the same treatment as the connection: a mid-body reset, a
-          // TLS failure or the deadline firing is a FAULT and must arrive as the typed
-          // one, because callers discriminate with `instanceof EmailsApiFault`. An earlier
-          // version called this outside the try/catch above, so those rejections escaped
-          // raw while outcome.ts promised every network error would be typed.
-          if (error instanceof EmailsApiFault) throw error;
-          const cause = error instanceof Error ? error.message : String(error);
-          throw new EmailsApiFault(0, `${method} ${path} failed while reading the response: ${cause}`);
-        }
-        if (text.length === 0) return { status: response.status, body: null };
-        try {
-          return { status: response.status, body: JSON.parse(text) as unknown };
-        } catch {
-          // Unparseable body on a SUCCESS status is a fault: the caller asked a question
-          // and there is no answer to read. On an error status the status still carries
-          // meaning, so the body is reported as absent and outcome.ts maps the status.
-          if (response.status >= 200 && response.status < 300) {
-            throw new EmailsApiFault(response.status, `${method} ${path} answered with a body that is not JSON`);
-          }
-          return { status: response.status, body: null };
-        }
-      } finally {
-        clearTimeout(timer);
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index]!;
+        const response = await requestOnce(
+          doFetch,
+          timeoutMs,
+          maxResponseBytes,
+          candidate.value,
+          url,
+          method,
+          path,
+          requestOptions,
+        );
+        if (index < candidates.length - 1 && shouldTryNextCredential(candidate, response)) continue;
+        return response;
       }
+      return requestOnce(doFetch, timeoutMs, maxResponseBytes, options.credential, url, method, path, requestOptions);
     },
   };
+}
+
+async function requestOnce(
+  doFetch: FetchImplementation,
+  timeoutMs: number,
+  maxResponseBytes: number,
+  credential: string,
+  url: string,
+  method: string,
+  path: string,
+  requestOptions: { query?: Record<string, QueryValue>; body?: unknown } | undefined,
+): Promise<WireResponse> {
+  const headers: Record<string, string> = {
+    // Bearer, matching what both existing self-hosted clients send and what the
+    // service's `extractToken` accepts alongside `x-api-key`.
+    Authorization: `Bearer ${credential}`,
+    Accept: "application/json",
+  };
+  const hasBody = requestOptions?.body !== undefined;
+  if (hasBody) headers["Content-Type"] = "application/json";
+
+  const controller = new AbortController();
+  // The deadline covers the BODY READ, not just the headers. Cleared in the outer
+  // `finally` below rather than as soon as `fetch` resolves: a service that sends
+  // headers promptly and then stalls the body would otherwise hang this call
+  // forever, with the timeout already disarmed — the failure mode a per-request
+  // deadline exists to prevent, reintroduced by clearing it one step too early.
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await doFetch(url, {
+        method,
+        headers,
+        ...(hasBody ? { body: JSON.stringify(requestOptions?.body) } : {}),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // A transport failure is a FAULT, never a refusal — see outcome.ts RULE 1.
+      // The message names the method and path but never the query string, which can
+      // carry a recipient address, and never the headers, which carry the credential.
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new EmailsApiFault(0, `${method} ${path} could not reach the Emails API: ${cause}`);
+    }
+
+    let text: string;
+    try {
+      text = await readBounded(response, maxResponseBytes, controller.signal, `${method} ${path}`);
+    } catch (error) {
+      // The BODY READ gets the same treatment as the connection: a mid-body reset, a
+      // TLS failure or the deadline firing is a FAULT and must arrive as the typed
+      // one, because callers discriminate with `instanceof EmailsApiFault`. An earlier
+      // version called this outside the try/catch above, so those rejections escaped
+      // raw while outcome.ts promised every network error would be typed.
+      if (error instanceof EmailsApiFault) throw error;
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new EmailsApiFault(0, `${method} ${path} failed while reading the response: ${cause}`);
+    }
+    if (text.length === 0) return { status: response.status, body: null };
+    try {
+      return { status: response.status, body: JSON.parse(text) as unknown };
+    } catch {
+      // Unparseable body on a SUCCESS status is a fault: the caller asked a question
+      // and there is no answer to read. On an error status the status still carries
+      // meaning, so the body is reported as absent and outcome.ts maps the status.
+      if (response.status >= 200 && response.status < 300) {
+        throw new EmailsApiFault(response.status, `${method} ${path} answered with a body that is not JSON`);
+      }
+      return { status: response.status, body: null };
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

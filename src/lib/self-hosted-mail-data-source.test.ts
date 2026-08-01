@@ -5,6 +5,7 @@ import {
   resolveSelfHostedMailDataSource,
 } from "./self-hosted-mail-data-source.js";
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
+import { EMAILS_SELF_HOSTED_API_KEY_ENV, EMAILS_SESSION_TOKEN_ENV } from "./client-env.js";
 import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.js";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2241,6 +2242,62 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     await expect(ds.listMailbox("inbox")).rejects.toThrow(/timed out after 25ms/);
     // Well under any external 2-minute wall.
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("falls back to the API key after a selected session token needs reauthentication", async () => {
+    const authorizations: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (_url, init) => {
+      const headers = init.headers as Record<string, string>;
+      authorizations.push(headers.Authorization ?? "");
+      if (authorizations.length === 1) {
+        return Response.json(
+          { error: "session is invalid or expired", reason: "reauthenticate" },
+          { status: 401 },
+        );
+      }
+      return Response.json({ messages: [], next_cursor: null });
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "k",
+      credentials: [
+        { setting: EMAILS_SESSION_TOKEN_ENV, value: "session-token-placeholder" },
+        { setting: EMAILS_SELF_HOSTED_API_KEY_ENV, value: "api-key-placeholder" },
+      ],
+      fetchImpl,
+    });
+
+    await expect(ds.listMailbox("inbox")).resolves.toEqual([]);
+
+    expect(authorizations).toEqual([
+      "Bearer session-token-placeholder",
+      "Bearer api-key-placeholder",
+    ]);
+  });
+
+  it("does not fall back from a live session with insufficient scope", async () => {
+    const authorizations: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (_url, init) => {
+      const headers = init.headers as Record<string, string>;
+      authorizations.push(headers.Authorization ?? "");
+      return Response.json(
+        { error: "insufficient scope for this operation", reason: "insufficient_scope" },
+        { status: 403 },
+      );
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "k",
+      credentials: [
+        { setting: EMAILS_SESSION_TOKEN_ENV, value: "session-token-placeholder" },
+        { setting: EMAILS_SELF_HOSTED_API_KEY_ENV, value: "api-key-placeholder" },
+      ],
+      fetchImpl,
+    });
+
+    await expect(ds.listMailbox("inbox")).rejects.toThrow("HTTP 403");
+
+    expect(authorizations).toEqual(["Bearer session-token-placeholder"]);
   });
 });
 
