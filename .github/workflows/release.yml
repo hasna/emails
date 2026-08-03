@@ -26,15 +26,10 @@ on:
   # silently never fires is a worse failure than an untidy trigger.
   # Retire the mailery arm once a release has actually run under
   # npm/emails/.
-  # A dry run exercises every gate and the OIDC token mint without publishing.
-  # This workflow has never run, so there is a way to prove the wiring before a
-  # real release depends on it.
+  # A manual run exercises the repository gates without publishing. npm only
+  # exchanges the OIDC token during a publish or stage operation, so this does
+  # not claim to validate the npm-side trusted-publisher binding.
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Run every gate but do not publish"
-        type: boolean
-        default: true
 
 concurrency:
   group: hasna-emails-npm-release
@@ -85,8 +80,15 @@ jobs:
           fi
           echo "npm ${have} meets the ${need} minimum for trusted publishing"
 
-      - name: Install locked dependencies with release-age quarantine
-        run: bun install --frozen-lockfile --minimum-release-age 604800
+      # --minimum-release-age is deliberately NOT passed here. A frozen lockfile
+      # performs no resolution, so the age filter has nothing left to filter and
+      # the flag is a measured no-op: `bun install --frozen-lockfile
+      # --minimum-release-age 999999999` exits 0, while the same command without
+      # --frozen-lockfile exits 1 with "blocked by minimum-release-age". The
+      # quarantine is real, but it belongs at lockfile-UPDATE time; naming it
+      # here promised a protection this step cannot deliver.
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
 
       - name: Bind the tag to the package version
         id: version
@@ -115,10 +117,24 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} agrees with package.json ${pkg_version}"
 
+      # Tags are not protected by this repository's main-branch ruleset. Bind
+      # the release to reviewed history in the workflow itself so a tag on an
+      # unmerged branch cannot publish different code.
+      - name: Require the release commit on protected main
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "refs/remotes/origin/main"; then
+            echo "::error::release commit ${GITHUB_SHA} is not contained in protected main"
+            exit 1
+          fi
+          echo "release commit ${GITHUB_SHA} is contained in protected main"
+
       # npm versions are immutable, so a version that already exists can never
       # be replaced by this run. Failing here names that plainly instead of
       # letting the publish step report it after the whole suite has run.
       - name: Reject an already published version
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           name="${{ steps.version.outputs.name }}"
@@ -146,11 +162,11 @@ jobs:
       # has been reported not to hold in practice, and passing the flag is a
       # no-op when it is already automatic.
       - name: Publish to npm via OIDC trusted publishing
-        if: github.event_name == 'push' || inputs.dry_run == false
+        if: github.event_name == 'push'
         run: npm publish --provenance --access public
 
       - name: Verify the published version from the registry
-        if: github.event_name == 'push' || inputs.dry_run == false
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           name="${{ steps.version.outputs.name }}"
