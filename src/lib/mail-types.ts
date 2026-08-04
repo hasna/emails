@@ -37,6 +37,42 @@ export function normalizeMailbox(value: unknown): Mailbox {
   return MAILBOXES.includes(value as Mailbox) ? (value as Mailbox) : "inbox";
 }
 
+/**
+ * The folders that PARTITION the store: every message is in exactly one of
+ * them. `unread` and `starred` are deliberately absent — they are subsets of
+ * `inbox`, so including them would double-count.
+ *
+ * Derived from the folderMatch predicate in the self-hosted data source:
+ *   inbox    = !outbound && !archived && !spam && !trash
+ *   sent     =  outbound
+ *   archived = !outbound &&  archived && !spam && !trash
+ *   spam     = !outbound &&  spam
+ *   trash    = !outbound &&  trash
+ *
+ * Anything that reports "searched the mailbox" states its coverage against
+ * THIS list, so the folders it skipped can be named rather than left implicit.
+ */
+export const PARTITION_FOLDERS: Mailbox[] = ["inbox", "sent", "archived", "spam", "trash"];
+
+/**
+ * Parse a user-supplied `--folder` value, REFUSING an unrecognised one.
+ *
+ * Distinct from normalizeMailbox, which silently coerces anything unknown to
+ * "inbox" — correct for an internal call with a trusted value, and wrong at the
+ * CLI edge, where it turned a typo like `--folder starrred` into a successful
+ * listing of the WRONG folder at exit 0 (task a126c676).
+ *
+ * Lives here, beside MAILBOXES, so the CLI edge has ONE folder vocabulary to
+ * validate against instead of a per-command copy of the list.
+ */
+export function parseCliFolder(value: string | undefined, fallback: Mailbox = "inbox"): Mailbox {
+  const normalized = (value ?? fallback).trim().toLowerCase();
+  if (!MAILBOXES.includes(normalized as Mailbox)) {
+    throw new Error(`Unknown folder ${JSON.stringify(value)}. Valid folders: ${MAILBOXES.join(", ")}.`);
+  }
+  return normalized as Mailbox;
+}
+
 export function mailboxLabel(m: Mailbox): string {
   return {
     inbox: "Inbox",
