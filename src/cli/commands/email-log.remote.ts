@@ -330,7 +330,7 @@ async function selfHostedSentSearch(
 // the sibling that means sent-only says so in its name (`emails email search`,
 // under a namespace described as "Sent email log, search, and history").
 //
-// It searched "sent" alone until 2026-08-04. On the fleet mailbox that is ~691
+// It searched "sent" alone until 2026-08-04. On one real mailbox that is ~691
 // messages out of ~173,000: `emails search "past due"` returned rc=0 and zero
 // rows while the same term matched 400 inbound messages. Two live
 // investigations were driven off that zero before anyone re-measured.

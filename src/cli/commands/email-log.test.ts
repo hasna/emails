@@ -181,7 +181,7 @@ describe("search — routes search to /v1", () => {
 // ── task db244cd4 ────────────────────────────────────────────────────────────
 //
 // `emails search <q>` searched the SENT folder ONLY while calling itself
-// "Search email by subject, from, or to". On the fleet mailbox that is ~691
+// "Search email by subject, from, or to". On one real mailbox that is ~691
 // sent messages against ~173,000 inbound: a confident, rc=0 zero over 0.4% of
 // the corpus.
 //
