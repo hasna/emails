@@ -2601,3 +2601,128 @@ describe("SelfHostedMailDataSource — a blocked message carries its reason", ()
     expect((await ds.getMessage("77"))?.policy_denial).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: task be9b3bb0 — `emails ui` burned ~92% of a core while idle.
+//
+// Root cause: listLabelSummaries() walked the ENTIRE store over HTTP to tally
+// label names for a sidebar list. Against the real mailbox (~170k messages) that
+// is ~340 requests and ~145 MB of JSON per call, and the TUI re-issues it on
+// every 30s refresh — so a new full crawl starts before the previous finishes and
+// the crawls stack up. Every OTHER full walk in this module is already bounded
+// (MAX_SCAN_ROWS, MAX_FILTER_WALK_REQUESTS, MAX_THREAD_CANDIDATE_ROWS); this one
+// was the only unbounded, uncached, uncoalesced walk.
+//
+// These assert the three properties that make the pathology impossible, and each
+// FAILS against the pre-fix implementation (it issues one request per page, per
+// call, with no cache).
+// ---------------------------------------------------------------------------
+describe("SelfHostedMailDataSource — listLabelSummaries scan budget", () => {
+  // A store far larger than any sane budget, served as a cursor chain. Pages are
+  // deliberately tiny: the property under test is REQUEST COUNT, so keeping rows
+  // per page small keeps the test fast while still offering an unbounded walk
+  // hundreds of pages to consume.
+  function deepStoreServe(pageCount: number): { fetchImpl: SelfHostedFetch; requests: string[] } {
+    const requests: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      requests.push(`${method} ${u.pathname}${u.search}`);
+      const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+      if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+      const cursor = u.searchParams.get("cursor") ?? "";
+      const index = cursor === "" ? 0 : Number(cursor.slice("page-".length));
+      if (!Number.isInteger(index) || index < 0 || index >= pageCount) {
+        return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+      }
+      const messages = Array.from({ length: 3 }, (_, i) => listV1(v1(`p${index}i${i}`, {
+        labels: ["urgent", `bucket-${(index + i) % 5}`],
+      })));
+      return ok({ messages, next_cursor: index + 1 < pageCount ? `page-${index + 1}` : null });
+    };
+    return { fetchImpl, requests };
+  }
+
+  const DEEP_PAGES = 200;
+
+  it("bounds a single call instead of walking the whole store", async () => {
+    const serve = deepStoreServe(DEEP_PAGES);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const labels = await ds.listLabelSummaries({ limit: 80 });
+
+    // Pre-fix this walks all 200 pages. The budget must stop it far short.
+    expect(serve.requests.length).toBeLessThanOrEqual(12);
+    expect(serve.requests.length).toBeLessThan(DEEP_PAGES);
+    // Still useful: it returns the labels it did see rather than failing closed.
+    expect(labels.some((label) => label.name === "urgent")).toBe(true);
+  });
+
+  it("coalesces concurrent calls onto one walk", async () => {
+    const serve = deepStoreServe(DEEP_PAGES);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    // This is the shape the TUI actually produces: a 30s refresh fires a new
+    // sidebar-meta load while the previous one is still in flight.
+    const [a, b, c] = await Promise.all([
+      ds.listLabelSummaries({ limit: 80 }),
+      ds.listLabelSummaries({ limit: 80 }),
+      ds.listLabelSummaries({ limit: 80 }),
+    ]);
+
+    expect(serve.requests.length).toBeLessThanOrEqual(12);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+  });
+
+  it("serves a repeat call from cache instead of re-walking", async () => {
+    const serve = deepStoreServe(DEEP_PAGES);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.listLabelSummaries({ limit: 80 });
+    const afterFirst = serve.requests.length;
+    clock += 1_000; // well inside any sane TTL
+    await ds.listLabelSummaries({ limit: 80, search: "urg" });
+
+    expect(serve.requests.length).toBe(afterFirst);
+  });
+
+  it("still returns exact counts for a store inside the budget", async () => {
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [
+          v1("1", { labels: ["urgent", "ops"] }),
+          v1("2", { labels: ["urgent"] }),
+        ],
+        nextCursor: "page-2",
+      }],
+      ["page-2", { messages: [v1("3", { labels: ["ops"] })], nextCursor: null }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    // Equal counts tie-break on name ascending, so "ops" precedes "urgent".
+    expect(await ds.listLabelSummaries()).toEqual([
+      { name: "ops", count: 2, popular: false },
+      { name: "urgent", count: 2, popular: false },
+    ]);
+    expect((await ds.listLabelSummaries({ search: "urg" })).map((l) => l.name)).toEqual(["urgent"]);
+  });
+});
