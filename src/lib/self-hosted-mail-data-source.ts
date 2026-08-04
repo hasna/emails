@@ -866,7 +866,11 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private readonly maxResponseBytes: number;
   private scanCache: { at: number; rows: V1Message[] } | null = null;
   private labelTallyCache: { at: number; tally: Map<string, number> } | null = null;
-  private labelTallyInFlight: Promise<{ tally: Map<string, number> }> | null = null;
+  private labelTallyInFlight: { generation: number; promise: Promise<{ tally: Map<string, number> }> } | null = null;
+  // Fences the tally against a write that lands MID-WALK. Clearing the cache is
+  // not enough on its own: a walk already in flight would still install its
+  // now-stale result afterwards and serve it for a full TTL.
+  private labelTallyGeneration = 0;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
     const url = new URL(options.baseUrl);
@@ -1134,8 +1138,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   private invalidate(): void {
     this.scanCache = null;
-    // Labelling a message changes the tally, so a write must drop it too.
+    // Labelling a message changes the tally, so a write must drop it too — and
+    // must also fence any walk currently in flight, whose rows predate this
+    // write. Without the generation bump that walk would install a stale tally
+    // the moment it finished and serve it for a full TTL.
     this.labelTallyCache = null;
+    this.labelTallyGeneration += 1;
   }
 
   private async listFilteredMailboxPage(mailbox: Mailbox, scope: SelfHostedScope | undefined, opts?: MailboxListOptions): Promise<V1Message[]> {
@@ -1478,12 +1486,16 @@ export class SelfHostedMailDataSource implements MailDataSource {
   // applied to its OUTPUT — so one cached tally serves every caller, whatever
   // options they pass.
   private async labelTally(): Promise<{ tally: Map<string, number> }> {
+    const generation = this.labelTallyGeneration;
     const cached = this.labelTallyCache;
     if (cached && this.now() - cached.at < LABEL_TALLY_TTL_MS) return cached;
     // Coalesce: the TUI starts a new sidebar load every 30s without awaiting the
     // previous one. Without this, those calls each open their own cursor walk and
-    // the walks stack up instead of replacing one another.
-    if (this.labelTallyInFlight) return this.labelTallyInFlight;
+    // the walks stack up instead of replacing one another. A walk from an OLDER
+    // generation is not joinable — its rows predate a write — so a caller after
+    // an invalidate starts a fresh walk rather than inheriting stale counts.
+    const inFlight = this.labelTallyInFlight;
+    if (inFlight && inFlight.generation === generation) return inFlight.promise;
 
     const walk = (async () => {
       const tally = new Map<string, number>();
@@ -1502,15 +1514,20 @@ export class SelfHostedMailDataSource implements MailDataSource {
         if (requests >= MAX_LABEL_SCAN_REQUESTS) break;
       }
       const entry = { at: this.now(), tally };
-      this.labelTallyCache = entry;
+      // Only install if no write landed while this walk was running. Otherwise
+      // these rows are already stale and caching them would serve pre-write
+      // counts for a full TTL.
+      if (this.labelTallyGeneration === generation) this.labelTallyCache = entry;
       return entry;
     })();
 
-    this.labelTallyInFlight = walk;
+    const pending = { generation, promise: walk };
+    this.labelTallyInFlight = pending;
     try {
       return await walk;
     } finally {
-      this.labelTallyInFlight = null;
+      // Never clear a NEWER walk that replaced this one after an invalidate.
+      if (this.labelTallyInFlight === pending) this.labelTallyInFlight = null;
     }
   }
 

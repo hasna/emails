@@ -11,7 +11,7 @@ const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c
 // change to that section an explicit, reviewable edit, so an entry cannot drift
 // into a shipped release section unnoticed. Recompute with the same
 // markdownSection()/textSha256() pair this file already uses.
-const unreleasedSectionSha256 = "42cf7cc5790ec032c46fcf8446b0d0f907f67615ad181d786a4aff0367226858";
+const unreleasedSectionSha256 = "5d81b6a062a47677aed260da62d98c37c00ad782db5bf162a7ad665e1afdc9f1";
 const release132Section = `## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
