@@ -230,6 +230,28 @@ function filterWalkExhausted(mailbox: Mailbox, scannedRows: number): Error {
 }
 // How long a full scan is reused within one (short-lived) CLI/MCP invocation.
 const SCAN_TTL_MS = 15_000;
+
+// ── label summaries: a bounded, cached, coalesced sample ─────────────────────
+//
+// Label summaries feed a SIDEBAR LIST — "which labels exist, roughly how many",
+// capped at ~80 entries. The local seam answers it with one SQL GROUP BY; the
+// self-hosted seam has no server-side aggregate, so it can only tally rows it
+// has dragged over HTTP. Tallying the WHOLE store to render that list cost ~340
+// requests and ~145 MB of JSON against the real mailbox (~170k messages), and
+// the TUI re-issues it on every 30s refresh — so crawls overlapped and stacked
+// until the process sat on a full core (task be9b3bb0).
+//
+// So the walk is bounded like every other walk in this module, and the tally is
+// shared. THE COUNTS ARE THEREFORE A SAMPLE, not a census: they describe the most
+// recent MAX_LABEL_SCAN_REQUESTS pages (newest-first ordering), so on a store
+// larger than that a label's count is a lower bound and a label used only in old
+// mail can be missing entirely. That is a deliberate accuracy trade for sidebar
+// metadata, and it is the same one src/cli/tui/data.remote.ts already makes with
+// SELF_HOSTED_MAIL_SCAN_CAP=5000.
+const MAX_LABEL_SCAN_REQUESTS = 10;
+// Must exceed the TUI's own sidebar refresh cadence (30s), or every refresh pays
+// for a fresh walk and the cache buys nothing.
+const LABEL_TALLY_TTL_MS = 60_000;
 // Hard cap on rows walked while collecting one conversation. The candidate read
 // is already narrowed server-side by the subject filter, so this only bounds a
 // pathological "everyone uses the same subject" store.
@@ -843,6 +865,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private scanCache: { at: number; rows: V1Message[] } | null = null;
+  private labelTallyCache: { at: number; tally: Map<string, number> } | null = null;
+  private labelTallyInFlight: { generation: number; promise: Promise<{ tally: Map<string, number> }> } | null = null;
+  // Fences the tally against a write that lands MID-WALK. Clearing the cache is
+  // not enough on its own: a walk already in flight would still install its
+  // now-stale result afterwards and serve it for a full TTL.
+  private labelTallyGeneration = 0;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
     const url = new URL(options.baseUrl);
@@ -1110,6 +1138,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
 
   private invalidate(): void {
     this.scanCache = null;
+    // Labelling a message changes the tally, so a write must drop it too — and
+    // must also fence any walk currently in flight, whose rows predate this
+    // write. Without the generation bump that walk would install a stale tally
+    // the moment it finished and serve it for a full TTL.
+    this.labelTallyCache = null;
+    this.labelTallyGeneration += 1;
   }
 
   private async listFilteredMailboxPage(mailbox: Mailbox, scope: SelfHostedScope | undefined, opts?: MailboxListOptions): Promise<V1Message[]> {
@@ -1448,17 +1482,57 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return decodeAttachmentPayload(json, index, maxBytes);
   }
 
-  async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
-    const tally = new Map<string, number>();
-    for await (const page of this.listPages(PAGE_LIMIT)) {
-      for (const m of page) {
-        for (const raw of labelsOf(m)) {
-          const name = raw.trim();
-          if (!name) continue;
-          tally.set(name, (tally.get(name) ?? 0) + 1);
+  // The tally is store-wide and option-independent — `search` and `limit` are
+  // applied to its OUTPUT — so one cached tally serves every caller, whatever
+  // options they pass.
+  private async labelTally(): Promise<{ tally: Map<string, number> }> {
+    const generation = this.labelTallyGeneration;
+    const cached = this.labelTallyCache;
+    if (cached && this.now() - cached.at < LABEL_TALLY_TTL_MS) return cached;
+    // Coalesce: the TUI starts a new sidebar load every 30s without awaiting the
+    // previous one. Without this, those calls each open their own cursor walk and
+    // the walks stack up instead of replacing one another. A walk from an OLDER
+    // generation is not joinable — its rows predate a write — so a caller after
+    // an invalidate starts a fresh walk rather than inheriting stale counts.
+    const inFlight = this.labelTallyInFlight;
+    if (inFlight && inFlight.generation === generation) return inFlight.promise;
+
+    const walk = (async () => {
+      const tally = new Map<string, number>();
+      let requests = 0;
+      for await (const page of this.listPages(PAGE_LIMIT)) {
+        requests += 1;
+        for (const m of page) {
+          for (const raw of labelsOf(m)) {
+            const name = raw.trim();
+            if (!name) continue;
+            tally.set(name, (tally.get(name) ?? 0) + 1);
+          }
         }
+        // Stop at the budget rather than throwing: this is sidebar metadata, so
+        // it must degrade to a recent-window sample, never break the sidebar.
+        if (requests >= MAX_LABEL_SCAN_REQUESTS) break;
       }
+      const entry = { at: this.now(), tally };
+      // Only install if no write landed while this walk was running. Otherwise
+      // these rows are already stale and caching them would serve pre-write
+      // counts for a full TTL.
+      if (this.labelTallyGeneration === generation) this.labelTallyCache = entry;
+      return entry;
+    })();
+
+    const pending = { generation, promise: walk };
+    this.labelTallyInFlight = pending;
+    try {
+      return await walk;
+    } finally {
+      // Never clear a NEWER walk that replaced this one after an invalidate.
+      if (this.labelTallyInFlight === pending) this.labelTallyInFlight = null;
     }
+  }
+
+  async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {
+    const { tally } = await this.labelTally();
     const search = opts?.search?.trim().toLowerCase();
     let summaries: LabelSummary[] = [...tally.entries()]
       .filter(([name]) => !search || name.toLowerCase().includes(search))

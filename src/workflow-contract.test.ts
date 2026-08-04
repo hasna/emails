@@ -6,7 +6,12 @@ import { join } from "node:path";
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
 const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f";
-const unreleasedSectionSha256 = "da5526d127f3a85c04d4b0d9f95bb4dd22edcbee7b34ff8999134fb180383699";
+// Re-pinned when the [Unreleased] section gains the `emails ui` label-scan fix
+// (task be9b3bb0). This constant is a tripwire, not a formality: it makes every
+// change to that section an explicit, reviewable edit, so an entry cannot drift
+// into a shipped release section unnoticed. Recompute with the same
+// markdownSection()/textSha256() pair this file already uses.
+const unreleasedSectionSha256 = "5d81b6a062a47677aed260da62d98c37c00ad782db5bf162a7ad665e1afdc9f1";
 const release132Section = `## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
