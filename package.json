@@ -68,7 +68,8 @@
   },
   "overrides": {
     "brace-expansion": "2.1.2",
-    "fast-uri": "3.1.4"
+    "fast-uri": "3.1.5",
+    "ip-address": "10.3.1"
   },
   "author": "Andrei Hasna <andrei@hasna.com>",
   "license": "Apache-2.0",

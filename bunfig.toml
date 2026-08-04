@@ -1,4 +1,8 @@
 preload = ["@opentui/solid/preload"]
 
+[install]
+minimumReleaseAge = 604800
+minimumReleaseAgeExcludes = ["fast-uri"]
+
 [test]
 preload = ["@opentui/solid/preload"]
