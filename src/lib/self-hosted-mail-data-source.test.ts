@@ -3022,6 +3022,85 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
     expect(serve.requests.length - afterFirst).toBeGreaterThan(100);
   }, 120_000);
 
+  it("keeps a CHEAP scope on the original 60s freshness", async () => {
+    // The budget must not tax the common case. A scope that answers in a
+    // handful of requests has to behave exactly as it did before the cost-aware
+    // TTL existed: stale after 60s, re-walked on the next refresh.
+    const serve = scopedDeepServe(3, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+
+    clock += 30_000; // inside 60s: still served from cache
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBe(afterFirst);
+
+    clock += 31_000; // past 60s: a cheap scope refreshes as it always did
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  });
+
+  it("backs an EXPENSIVE scope off past the 60s TTL, so an idle sidebar stops re-buying it", async () => {
+    // The production shape, measured: the walk SUCCEEDS at ~205 requests and the
+    // 60s TTL then re-buys it every minute — 205 req/min, ~4.4 GB/hour, for one
+    // idle sidebar. 205 requests against a 12/min budget earns ~17min, capped at
+    // SCOPED_COUNT_MAX_TTL_MS (15min).
+    const serve = scopedDeepServe(205, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+    // Control: this scope really is expensive, so the assertions below are about
+    // the budget and not about a walk that never happened.
+    expect(afterFirst).toBeGreaterThan(200);
+
+    // Five minutes of 30s refreshes: every one of these cost a full walk before.
+    for (let i = 0; i < 10; i += 1) {
+      clock += 30_000;
+      await ds.mailboxCounts({ source: source(SCOPED) });
+    }
+    expect(serve.requests.length).toBe(afterFirst);
+
+    // Past the ceiling it refreshes, so counts cannot be frozen indefinitely.
+    clock += 16 * 60_000;
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  }, 60_000);
+
+  it("still drops an expensive scope's long-lived counts the moment a write lands", async () => {
+    // The longer TTL must not outrank invalidation, or a user action appears to
+    // do nothing to the sidebar for up to fifteen minutes.
+    const serve = scopedDeepServe(205, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+
+    await ds.setRead("p0i0", true);
+    clock += 1_000;
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  }, 60_000);
+
   it("does NOT break scoped stores that complete today with many small pages", async () => {
     // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
     // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this

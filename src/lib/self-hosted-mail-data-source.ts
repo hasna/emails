@@ -298,6 +298,48 @@ const MAX_SCOPED_COUNT_REQUESTS = 10_000;
 // Must exceed the TUI's 30s sidebar refresh, for the same reason as the tally.
 const SCOPED_COUNT_TTL_MS = 60_000;
 
+// ── a SUCCESSFUL walk is the expensive case, and the 60s TTL re-buys it ──────
+//
+// MEASURED AGAINST A REAL SERVE, 2026-08-05, one address scope on a six-figure
+// production mailbox (inbox ~174_000): the walk COMPLETES at 205 requests and
+// ~74 MB. It does not trip MAX_SCAN_ROWS, because the serve DOES honour ?to=
+// (control: ?to=<address that cannot exist> returns 0 rows) and the matched set
+// is under the bound. So the bound never fires and the failure cache below
+// never engages — the whole cost is a SUCCESSFUL walk, cached for 60s, re-run
+// on the next refresh, forever. Six-minute live run: 615 requests, 222 MB, one
+// full walk per minute.
+//
+// The 60s TTL was chosen to outlive the TUI's 30s refresh, which it does. What
+// it does not do is bound the SUSTAINED cost: 205 requests per 60s is 205
+// req/min and ~4.4 GB/hour for one idle sidebar.
+//
+// So the cache lifetime is derived from what the walk actually COST, against a
+// stated budget for sidebar metadata. A scope that answers in a handful of
+// requests keeps today's 60s freshness exactly; a scope that costs hundreds
+// backs off until it fits the budget, capped so staleness stays bounded.
+//
+// THIS IS NOT "raise the refresh interval". The refresh interval is untouched,
+// the message list still refreshes at 30s, every write still invalidates
+// immediately, and a cheap scope is bit-for-bit unaffected. What changes is
+// only how long an EXPENSIVE tally is reused, which is the one term in
+// requests-per-minute that a client can set without a server-side aggregate.
+//
+// THE BURST IS NOT REMOVED, ONLY ITS DUTY CYCLE. Each refill still costs one
+// whole walk, because /v1/messages/counts takes no recipient filter (measured:
+// ?to=<bogus> returns the WHOLE-STORE counts, byte-identical to unfiltered) and
+// the list envelope carries only `messages` and `next_cursor` — no total to
+// read. Removing the burst needs a server-side filtered count; that is filed
+// separately and is the actual fix.
+const SCOPED_COUNT_REQUEST_BUDGET_PER_MIN = 12;
+// Staleness ceiling. Counts are sidebar metadata and every write invalidates
+// them, so this only bounds how long NEW INBOUND mail can go uncounted.
+const SCOPED_COUNT_MAX_TTL_MS = 15 * 60_000;
+
+function scopedCountTtlMs(requests: number): number {
+  const budgeted = (requests / SCOPED_COUNT_REQUEST_BUDGET_PER_MIN) * 60_000;
+  return Math.min(SCOPED_COUNT_MAX_TTL_MS, Math.max(SCOPED_COUNT_TTL_MS, budgeted));
+}
+
 // ── remembering a walk that failed closed ────────────────────────────────────
 //
 // THE BOUND ABOVE MAKES ONE WALK FINITE. IT DOES NOT MAKE THE SEQUENCE OF WALKS
@@ -964,7 +1006,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
   // not enough on its own: a walk already in flight would still install its
   // now-stale result afterwards and serve it for a full TTL.
   private labelTallyGeneration = 0;
-  private scopedCountsCache = new Map<string, { at: number; counts: MailboxCounts }>();
+  // `ttl` is per-entry because it is derived from what THAT scope's walk cost.
+  private scopedCountsCache = new Map<string, { at: number; ttl: number; counts: MailboxCounts }>();
   private scopedCountsInFlight = new Map<string, { generation: number; promise: Promise<MailboxCounts> }>();
   // A walk that failed CLOSED is a result too, and until it was remembered here
   // it was the only outcome this class recomputed from scratch on every refresh.
@@ -1487,7 +1530,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const key = scopedCountsKey(scope);
     const generation = this.scopedCountsGeneration;
     const cached = this.scopedCountsCache.get(key);
-    if (cached && this.now() - cached.at < SCOPED_COUNT_TTL_MS) return { ...cached.counts };
+    if (cached && this.now() - cached.at < cached.ttl) return { ...cached.counts };
     // A remembered failure is re-thrown as the ORIGINAL error, not a fresh one
     // wrapped in "(cached)": its text already names both causes and both
     // remedies, and that advice is exactly as true the second time. Rewording it
@@ -1505,6 +1548,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const walk = (async () => {
       const counts = emptyCounts();
       const seen = new Set<string>();
+      // Across the WHOLE walk, including both halves of an address's to/from
+      // union: the budget is about what one refill costs the network, and the
+      // caller pays for both halves.
+      let walkRequests = 0;
       try {
         for (const filters of scopeServerFilterSets(scope)) {
           // PER FILTER SET, not across the union. An address scope reads the same
@@ -1517,6 +1564,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
           let scannedRows = 0;
           for await (const page of this.listPages(PAGE_LIMIT, filters)) {
             requests += 1;
+            walkRequests += 1;
             scannedRows += page.length;
             if (scannedRows > MAX_SCAN_ROWS || requests > MAX_SCOPED_COUNT_REQUESTS) {
               throw scopedCountWalkExhausted(scannedRows, requests);
@@ -1544,7 +1592,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
       // Only install if no write landed while this walk was running: those pages
       // are already stale, and caching them would serve pre-write counts for a
       // full TTL.
-      if (this.scopedCountsGeneration === generation) this.scopedCountsCache.set(key, { at: this.now(), counts });
+      if (this.scopedCountsGeneration === generation) {
+        this.scopedCountsCache.set(key, { at: this.now(), ttl: scopedCountTtlMs(walkRequests), counts });
+      }
       return counts;
     })();
 
