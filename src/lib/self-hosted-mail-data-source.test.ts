@@ -2919,7 +2919,111 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
     // 110_000 synthetic rows: slow to build, so it needs more than the 5s default.
   }, 60_000);
 
+  // A serve whose page is BUILT ONCE and handed back for every cursor. The
+  // property under test is what a REPEAT call costs after the walk has already
+  // failed closed, so rebuilding 100k synthetic rows per walk would make the
+  // test's own cost dominate the thing it measures. Row ids repeat, which the
+  // dedupe set absorbs; `scannedRows` still accumulates page.length, and that is
+  // the bound these exercise.
+  function exhaustingServe(pageCount: number): { fetchImpl: SelfHostedFetch; requests: string[] } {
+    const requests: string[] = [];
+    const page = Array.from({ length: 500 }, (_, i) => listV1(v1(`row${i}`, { to_addrs: [SCOPED] })));
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      requests.push(`${method} ${u.pathname}${u.search}`);
+      const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+      const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+      if (idMatch && method === "PATCH") return ok({ message: v1(decodeURIComponent(idMatch[1]!)) });
+      if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+      const cursor = u.searchParams.get("cursor") ?? "";
+      const index = cursor === "" ? 0 : Number(cursor.slice("page-".length));
+      if (!Number.isInteger(index) || index < 0 || index >= pageCount) {
+        return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+      }
+      return ok({ messages: page, next_cursor: index + 1 < pageCount ? `page-${index + 1}` : null });
+    };
+    return { fetchImpl, requests };
+  }
+
+  it("does not re-walk a scope whose count walk already failed closed", async () => {
+    // THE RESIDUAL THE ROW BOUND LEFT BEHIND. The bound makes one walk finite;
+    // it does not make the SEQUENCE of walks finite. Only a SUCCEEDING walk
+    // reaches the `scopedCountsCache.set` at the end of the walk body, so a
+    // scope that fails closed is remembered nowhere: the TUI catches the throw
+    // into `lastError`, reschedules the sidebar 30s later, and pays the whole
+    // 200-request walk again — forever, for as long as the inbox stays selected.
+    // On the production mailbox (174_482 messages against MAX_SCAN_ROWS =
+    // 100_000) that is the steady state, not an edge case.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+    // Control: the first walk really did walk, so a low delta below cannot be an
+    // artefact of the serve refusing to page at all.
+    expect(afterFirst).toBeGreaterThan(100);
+
+    clock += 30_000;
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeLessThanOrEqual(1);
+  }, 120_000);
+
+  it("retries an exhausted scope once the failure has aged out", async () => {
+    // The other side of the same property: remembering the failure must not
+    // become a permanent lockout. A scope that fails while the server is
+    // mid-deploy, or before an operator narrows the read, has to become
+    // countable again without restarting the TUI.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+
+    // Past SCOPED_COUNT_FAILURE_TTL_MS (15 min). The window is deliberately much
+    // longer than the 60s success TTL — the failure is a property of the store's
+    // size against a compile-time constant, so it cannot resolve on a
+    // count's timescale — but it is a window, not a permanent lockout.
+    clock += 20 * 60_000;
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeGreaterThan(100);
+  }, 120_000);
+
+  it("re-counts a failed scope immediately after a write, instead of serving the remembered failure", async () => {
+    // A remembered failure must be fenced by the same write invalidation the
+    // remembered COUNTS are, or a write that fixes the scope (a clear, a move)
+    // keeps reporting the old failure for a full TTL.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+
+    await ds.setRead("row0", true);
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeGreaterThan(100);
+  }, 120_000);
+
   it("does NOT break scoped stores that complete today with many small pages", async () => {
+    // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
     // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
     // walk at 200 REQUESTS; adversarial review measured two stores that resolve
     // exactly on the pre-fix code and threw under that cap. Both sit far below
