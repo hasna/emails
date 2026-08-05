@@ -2901,21 +2901,47 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
   // Comfortably inside the budget, so the walk completes and counts stay exact.
   const SHALLOW_PAGES = 40;
 
-  it("bounds the scoped walk instead of following the chain to its end", async () => {
-    const serve = scopedDeepServe(DEEP_PAGES);
+  it("bounds the scoped walk on rows scanned instead of following the chain to its end", async () => {
+    // 220 x 500 = 110_000 rows, so ONE filter set already exceeds MAX_SCAN_ROWS.
+    const serve = scopedDeepServe(220, { rowsPerPage: 500 });
     const ds = new SelfHostedMailDataSource({
       baseUrl: "https://emails.example/v1",
       apiKey: "test-key",
       fetchImpl: serve.fetchImpl,
     });
 
-    // Pre-fix this resolves after 600 requests (300 pages x the to/from union).
-    // Fixed, it fails closed at the budget and says why, exactly as the sibling
+    // Pre-fix the only bound counted MATCHED rows via `seen.size`. Fixed, the
+    // walk fails closed on rows SCANNED and says why, as the sibling
     // filtered-list walk already does (filterWalkExhausted).
     await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
-    expect(serve.requests.length).toBeLessThanOrEqual(201);
-    expect(serve.requests.length).toBeLessThan(DEEP_PAGES);
-  });
+    // It stops as soon as the row bound trips rather than draining the chain.
+    expect(serve.requests.length).toBeLessThanOrEqual(210);
+    // 110_000 synthetic rows: slow to build, so it needs more than the 5s default.
+  }, 60_000);
+
+  it("does NOT break scoped stores that complete today with many small pages", async () => {
+    // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
+    // walk at 200 REQUESTS; adversarial review measured two stores that resolve
+    // exactly on the pre-fix code and threw under that cap. Both sit far below
+    // MAX_SCAN_ROWS, which is why the bound counts rows and not requests.
+    const deep = scopedDeepServe(300, { rowsPerPage: 2 });
+    const dsDeep = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: deep.fetchImpl,
+    });
+    const deepCounts = await dsDeep.mailboxCounts({ source: source(SCOPED) });
+    expect(deepCounts.inbox).toBe(600);
+    expect(deep.requests.length).toBeGreaterThan(200);
+
+    const wide = scopedDeepServe(120, { rowsPerPage: 500 });
+    const dsWide = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: wide.fetchImpl,
+    });
+    expect((await dsWide.mailboxCounts({ source: source(SCOPED) })).inbox).toBe(60_000);
+  }, 60_000);
 
   it("coalesces concurrent scoped counts onto one walk", async () => {
     const serve = scopedDeepServe(SHALLOW_PAGES);
@@ -2978,6 +3004,55 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
 
     expect(scoped.inbox).toBe(8);
     expect(other.inbox).toBe(0);
+  });
+
+  it("keeps two DIFFERENT domain scopes off each other's cached counts", async () => {
+    // The scope has two dimensions and a key built from the ADDRESS alone passes
+    // every other test here — because two domain-only scopes both have no
+    // address, so they collapse onto one key and the second is served the
+    // first's numbers. Adversarial review demonstrated exactly that, so the
+    // domain dimension needs a case where it is the ONLY thing that differs.
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [
+          v1("1", { to_addrs: ["a@alpha.test"] }),
+          v1("2", { to_addrs: ["b@beta.test"] }),
+          v1("3", { to_addrs: ["c@beta.test"] }),
+          v1("4", { to_addrs: ["d@beta.test"] }),
+        ],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const alpha = await ds.mailboxCounts({ source: { domain: "alpha.test" } });
+    const beta = await ds.mailboxCounts({ source: { domain: "beta.test" } });
+
+    expect(alpha.inbox).toBe(1);
+    expect(beta.inbox).toBe(3);
+  });
+
+  it("hands every caller its own counts object, so one caller cannot poison the cache", async () => {
+    // MailboxCounts is a plain mutable record and the cached entry outlives the
+    // call. Without a copy on the way in and out, a caller that adjusts what it
+    // was given silently rewrites what the next caller is served — which every
+    // other test here misses, because they never mutate the result.
+    const serve = scopedDeepServe(3);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const first = await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(first.inbox).toBe(6);
+    first.inbox = 999_999;
+
+    expect((await ds.mailboxCounts({ source: source(SCOPED) })).inbox).toBe(6);
   });
 
   it("still returns exact scoped counts for a store inside the budget", async () => {
