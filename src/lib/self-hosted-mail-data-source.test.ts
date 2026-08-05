@@ -2975,6 +2975,41 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
     expect(serve.requests.length - afterFirst).toBeLessThanOrEqual(1);
   }, 120_000);
 
+  it("does NOT remember a TRANSIENT failure — one 503 must not freeze a scope for the window", async () => {
+    // The failure cache exists for the walk's own bound, which is a property of
+    // the store. A 503, a reset socket or a timeout reaches the same catch and is
+    // an event: remembering it would take one blip and turn it into fifteen
+    // minutes of missing counts, which is worse than the re-walk being prevented.
+    let failing = true;
+    const requests: string[] = [];
+    const page = [listV1(v1("only", { to_addrs: [SCOPED] }))];
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      requests.push(`${(init.method ?? "GET").toUpperCase()} ${u.pathname}`);
+      if (failing) return { status: 503, async text() { return JSON.stringify({ error: "upstream unavailable" }); } };
+      return { status: 200, async text() { return JSON.stringify({ messages: page, next_cursor: null }); } };
+    };
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow();
+    const afterFailure = requests.length;
+    expect(afterFailure).toBeGreaterThan(0);
+
+    // The blip clears. The very next refresh must go back to the network rather
+    // than replay the remembered error.
+    failing = false;
+    clock += 30_000;
+    const counts = await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(requests.length).toBeGreaterThan(afterFailure);
+    expect(counts.inbox).toBe(1);
+  });
+
   it("retries an exhausted scope once the failure has aged out", async () => {
     // The other side of the same property: remembering the failure must not
     // become a permanent lockout. A scope that fails while the server is

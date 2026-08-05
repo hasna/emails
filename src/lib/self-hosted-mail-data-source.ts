@@ -371,14 +371,28 @@ const SCOPED_COUNT_FAILURE_TTL_MS = 15 * 60_000;
 // `requests * PAGE_LIMIT`, which invented a row count — a 600-row store claimed
 // "scanned 100500 rows … holds more than 100000 messages" and so corroborated
 // the wrong one of the two causes it offers.
+// Marks the ONE failure that is a structural property of the store rather than
+// an event: the walk hit its own bound. Everything else reaching the same catch
+// — a 503, a socket reset, a timeout — is transient and must NOT be remembered,
+// or one network blip freezes a scope's counts for the whole failure window.
+// A property rather than the message text, so rewording the error cannot
+// silently turn a structural failure back into a retried one.
+const SCOPED_COUNT_EXHAUSTED = Symbol.for("emails.scopedCountWalkExhausted");
+
+function isScopedCountWalkExhausted(error: unknown): boolean {
+  return typeof error === "object" && error !== null && SCOPED_COUNT_EXHAUSTED in error;
+}
+
 function scopedCountWalkExhausted(scannedRows: number, requests: number): Error {
-  return new Error(
+  const error = new Error(
     `self-hosted emails: scoped folder counts scanned ${scannedRows} rows over `
       + `${requests} requests without completing. Either this server ignored the `
       + "GET /v1/messages ?to=/?from= recipient filters, or this one address holds more "
       + `than ${MAX_SCAN_ROWS} messages — upgrade the emails-serve deployment, or scope the `
       + "read to a domain instead of an address.",
   );
+  Object.defineProperty(error, SCOPED_COUNT_EXHAUSTED, { value: true, enumerable: false });
+  return error;
 }
 
 // The cache key IS the scope, so two scopes can never share an entry. Both
@@ -1581,10 +1595,15 @@ export class SelfHostedMailDataSource implements MailDataSource {
           }
         }
       } catch (error) {
+        // ONLY the walk's own bound is remembered. A 503, a reset socket or a
+        // timeout lands here too and is transient: caching it would freeze this
+        // scope's counts for the whole window over one blip, which is strictly
+        // worse than the re-walk this cache exists to prevent.
+        //
         // Remembered under the SAME generation fence the success path uses: a
         // write that landed mid-walk may be exactly what makes this scope
         // countable again, so a failure from before it must not be installed.
-        if (this.scopedCountsGeneration === generation) {
+        if (isScopedCountWalkExhausted(error) && this.scopedCountsGeneration === generation) {
           this.scopedCountsFailureCache.set(key, { at: this.now(), error });
         }
         throw error;
