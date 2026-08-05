@@ -154,7 +154,7 @@ export function Sidebar() {
 
       <box flexGrow={1} />
       <box height={2} flexDirection="column" paddingLeft={1}>
-        <text fg={theme.textMuted}>{emails.state.loading ? "Loading" : emails.state.busyPull ? "Pulling" : "Ready"}</text>
+        <text fg={theme.textMuted}>{emails.state.loading ? "Loading" : "Ready"}</text>
         <Show when={emails.state.lastError}>
           <text fg={theme.error}>{emails.state.lastError}</text>
         </Show>

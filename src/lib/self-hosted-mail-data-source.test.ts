@@ -2830,3 +2830,294 @@ describe("SelfHostedMailDataSource — listLabelSummaries scan budget", () => {
     expect((await ds.listLabelSummaries()).map((l) => l.name)).toEqual(["archived"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// mailboxCounts: the SECOND unbounded idle walk, and the bigger one (task 90e98ccc)
+//
+// Found by adversarial review of #198, which bounded listLabelSummaries. Scoped
+// folder counts sit on the SAME Promise.all, behind the SAME 30s TUI refresh, and
+// were worse: scanScopeRows walks the cursor chain with no request bound, no
+// cache and no coalescing, and runs the whole chain TWICE for an address (the
+// to/from union). Its only bound, `seen.size > MAX_SCAN_ROWS`, counts MATCHED
+// rows — so a serve that ignores ?to=/?from= matches almost nothing per page and
+// the walk never terminates early at all.
+//
+// THE CONSTRAINT THAT MAKES THIS NOT A COPY OF #198: scanScopeRows has a second
+// caller, clear(), whose comment is explicit that "the complete cursor walk is
+// preflighted before the first destructive request". Bounding or caching the
+// shared helper would make clear() delete a partial or stale subset while
+// reporting a plausible count. The budget, cache and fence therefore live at
+// mailboxCounts, and "clear() is unaffected" is itself a test below.
+// ---------------------------------------------------------------------------
+describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => {
+  const SCOPED = "scoped@example.com";
+  const OTHER = "other@example.com";
+
+  // A deep cursor chain. Pages are deliberately tiny: the property under test is
+  // REQUEST COUNT, so few rows per page keeps the test fast while still offering
+  // an unbounded walk hundreds of pages to consume. `to_addrs` is fixed per page
+  // set so the rows match the scope under test.
+  function scopedDeepServe(
+    pageCount: number,
+    options: { to?: string; rowsPerPage?: number; label?: () => string[] } = {},
+  ): { fetchImpl: SelfHostedFetch; requests: string[]; deleted: string[] } {
+    const to = options.to ?? SCOPED;
+    const rowsPerPage = options.rowsPerPage ?? 2;
+    const requests: string[] = [];
+    const deleted: string[] = [];
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      requests.push(`${method} ${u.pathname}${u.search}`);
+      const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+      const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+      if (idMatch && method === "DELETE") {
+        const id = decodeURIComponent(idMatch[1]!);
+        deleted.push(id);
+        return ok({ deleted: true, id });
+      }
+      if (idMatch && method === "PATCH") return ok({ message: v1(decodeURIComponent(idMatch[1]!)) });
+      if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+      const cursor = u.searchParams.get("cursor") ?? "";
+      const index = cursor === "" ? 0 : Number(cursor.slice("page-".length));
+      if (!Number.isInteger(index) || index < 0 || index >= pageCount) {
+        return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+      }
+      const messages = Array.from({ length: rowsPerPage }, (_, i) => listV1(v1(`p${index}i${i}`, {
+        to_addrs: [to],
+        ...(options.label ? { labels: options.label() } : {}),
+      })));
+      return ok({ messages, next_cursor: index + 1 < pageCount ? `page-${index + 1}` : null });
+    };
+    return { fetchImpl, requests, deleted };
+  }
+
+  function source(address: string) {
+    return { address } as const;
+  }
+
+  // Deeper than any sane budget: pre-fix this is walked TWICE (to + from).
+  const DEEP_PAGES = 300;
+  // Comfortably inside the budget, so the walk completes and counts stay exact.
+  const SHALLOW_PAGES = 40;
+
+  it("bounds the scoped walk instead of following the chain to its end", async () => {
+    const serve = scopedDeepServe(DEEP_PAGES);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    // Pre-fix this resolves after 600 requests (300 pages x the to/from union).
+    // Fixed, it fails closed at the budget and says why, exactly as the sibling
+    // filtered-list walk already does (filterWalkExhausted).
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length).toBeLessThanOrEqual(201);
+    expect(serve.requests.length).toBeLessThan(DEEP_PAGES);
+  });
+
+  it("coalesces concurrent scoped counts onto one walk", async () => {
+    const serve = scopedDeepServe(SHALLOW_PAGES);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    // The shape the TUI actually produces: the 30s refresh fires a new
+    // sidebar-meta load while the previous one is still in flight.
+    const [a, b, c] = await Promise.all([
+      ds.mailboxCounts({ source: source(SCOPED) }),
+      ds.mailboxCounts({ source: source(SCOPED) }),
+      ds.mailboxCounts({ source: source(SCOPED) }),
+    ]);
+
+    // One walk is 2 filter sets x 40 pages = 80 requests. Pre-fix, three
+    // concurrent calls cost 240.
+    expect(serve.requests.length).toBeLessThanOrEqual(90);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+    expect(a.inbox).toBe(SHALLOW_PAGES * 2);
+  });
+
+  it("serves a repeat scoped call from cache instead of re-walking", async () => {
+    const serve = scopedDeepServe(SHALLOW_PAGES);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    const first = await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+    // The TUI refreshes every 30s, so the cache must outlive that gap or it buys
+    // nothing at all.
+    clock += 30_000;
+    const second = await ds.mailboxCounts({ source: source(SCOPED) });
+
+    expect(serve.requests.length).toBe(afterFirst);
+    expect(second).toEqual(first);
+  });
+
+  it("keeps a different scope off the first scope's cached counts", async () => {
+    // A store-wide cache key — which is correct for the label tally, because that
+    // tally is option-independent — would be silently WRONG here: it would serve
+    // one inbox's folder counts for another.
+    const serve = scopedDeepServe(4);
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    const scoped = await ds.mailboxCounts({ source: source(SCOPED) });
+    const other = await ds.mailboxCounts({ source: source(OTHER) });
+
+    expect(scoped.inbox).toBe(8);
+    expect(other.inbox).toBe(0);
+  });
+
+  it("still returns exact scoped counts for a store inside the budget", async () => {
+    // Anti-vacuity guard: the budget must not be satisfiable by counting nothing,
+    // and scoping must still exclude mail addressed elsewhere.
+    const serve = compactCursorServe(new Map([
+      ["", {
+        messages: [
+          v1("1", { to_addrs: [SCOPED] }),
+          v1("2", { to_addrs: [SCOPED], is_read: true, is_starred: true }),
+          v1("3", { to_addrs: [OTHER] }),
+        ],
+        nextCursor: "page-2",
+      }],
+      ["page-2", {
+        messages: [
+          v1("4", { to_addrs: [SCOPED], labels: ["archived"] }),
+          v1("5", { to_addrs: [SCOPED], direction: "outbound", from_addr: `<${SCOPED}>` }),
+        ],
+        nextCursor: null,
+      }],
+    ]));
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+    });
+
+    expect(await ds.mailboxCounts({ source: source(SCOPED) })).toEqual({
+      inbox: 2, unread: 1, starred: 1, sent: 1, archived: 1, spam: 0, trash: 0,
+    });
+  });
+
+  it("re-walks scoped counts once the cache TTL has expired", async () => {
+    // Observable in the RESULT, not merely in the request count: the store's
+    // labels change between walks, so a frozen cache returns the old folder.
+    let archived = false;
+    const serve = scopedDeepServe(2, { label: () => (archived ? ["archived"] : []) });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    expect((await ds.mailboxCounts({ source: source(SCOPED) })).inbox).toBe(4);
+    archived = true;
+    clock += 10 * 60_000;
+
+    const after = await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(after.inbox).toBe(0);
+    expect(after.archived).toBe(4);
+  });
+
+  it("drops the cached scoped counts when a write changes the mailbox", async () => {
+    let archived = false;
+    const serve = scopedDeepServe(2, { label: () => (archived ? ["archived"] : []) });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    expect((await ds.mailboxCounts({ source: source(SCOPED) })).inbox).toBe(4);
+    archived = true;
+    // The clock does NOT move: only the write may drop this entry.
+    await ds.setArchived("p0i0", true);
+
+    expect((await ds.mailboxCounts({ source: source(SCOPED) })).archived).toBe(4);
+  });
+
+  it("fences a write that lands while a scoped counts walk is already in flight", async () => {
+    // Clearing the cache is not enough on its own: a walk already in flight
+    // would still install its now-stale tally afterwards and serve it for a full
+    // TTL. The walk that started BEFORE the write must not become the cache.
+    let archived = false;
+    let pages = 0;
+    const inner = scopedDeepServe(6, { label: () => (archived ? ["archived"] : []) });
+    let onThirdPage: (() => Promise<void>) | null = null;
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const response = await inner.fetchImpl(url, init);
+      const method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET" && new URL(url).pathname === "/v1/messages") {
+        pages += 1;
+        if (pages === 3 && onThirdPage) {
+          const hook = onThirdPage;
+          onThirdPage = null;
+          await hook();
+        }
+      }
+      return response;
+    };
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+      now: () => clock,
+    });
+
+    onThirdPage = async () => {
+      archived = true;
+      await ds.setArchived("p0i0", true);
+    };
+    await ds.mailboxCounts({ source: source(SCOPED) });
+
+    // Clock unmoved: whatever this read returns came from the cache the fenced
+    // walk was allowed to install, or from a fresh post-write walk. Either way it
+    // must describe the store AFTER the write.
+    expect((await ds.mailboxCounts({ source: source(SCOPED) })).archived).toBe(12);
+  });
+
+  it("leaves the destructive clear() preflight exact, uncached and unbounded by the counts budget", async () => {
+    // THE TEST THAT REFUTES THE NAIVE COPY OF #198. clear() shares scanScopeRows
+    // with mailboxCounts and deletes what that walk returns. If the budget or the
+    // TTL cache were pushed down into the shared helper, clear() would delete a
+    // partial or stale subset of the mailbox while reporting a plausible count.
+    const serve = scopedDeepServe(SHALLOW_PAGES);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    // Warm the counts cache first, so a helper-level cache would be live.
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterCounts = serve.requests.filter((request) => request.startsWith("GET /v1/messages?")).length;
+
+    const result = await ds.clear({ source: source(SCOPED) });
+
+    // Every matching row is deleted — the full store, not a budgeted sample.
+    expect(result.cleared).toBe(SHALLOW_PAGES * 2);
+    expect(serve.deleted.length).toBe(SHALLOW_PAGES * 2);
+    // And it paid for its own complete walk rather than reading the counts cache.
+    const afterClear = serve.requests.filter((request) => request.startsWith("GET /v1/messages?")).length;
+    expect(afterClear).toBeGreaterThan(afterCounts);
+  });
+});

@@ -252,6 +252,52 @@ const MAX_LABEL_SCAN_REQUESTS = 10;
 // Must exceed the TUI's own sidebar refresh cadence (30s), or every refresh pays
 // for a fresh walk and the cache buys nothing.
 const LABEL_TALLY_TTL_MS = 60_000;
+
+// ── scoped folder counts: bounded, cached, coalesced ─────────────────────────
+//
+// Folder counts for ONE inbox sit on the same Promise.all as the label summaries
+// above (src/cli/tui-solid/context/emails-state.tsx), behind the same 30s TUI
+// refresh, and were the larger of the two walks. `scanScopeRows` follows the
+// cursor chain with no request bound, no cache and no coalescing, and follows it
+// TWICE for an address because the to/from union is two filter sets. Its only
+// bound counts MATCHED rows (`seen.size > MAX_SCAN_ROWS`), so a serve that
+// ignores ?to=/?from= matches little per page and never terminates early at all.
+//
+// THE FIX DELIBERATELY DOES NOT LIVE IN scanScopeRows. That helper is also the
+// preflight for the destructive clear(), which deletes exactly what the walk
+// returns — a budget or a TTL pushed down into it would make clear() delete a
+// partial or stale subset of a mailbox while reporting a plausible count. So the
+// counting walk is its own thing, and clear() keeps the exact, uncached,
+// complete walk its contract depends on.
+//
+// Unlike the label tally, these counts are PER SCOPE — one inbox's numbers must
+// never be served for another — so the cache is keyed rather than store-wide.
+//
+// One shared budget for the whole call across both filter sets, mirroring
+// listFilteredMailboxPage. 200 x PAGE_LIMIT is 100_000 rows: the same worst case
+// as MAX_SCAN_ROWS, which is what bounds this path today, so a store that works
+// now keeps working — the change is that the bound now counts rows SCANNED
+// rather than rows matched, which is what makes it reachable at all.
+const MAX_SCOPED_COUNT_REQUESTS = 200;
+// Must exceed the TUI's 30s sidebar refresh, for the same reason as the tally.
+const SCOPED_COUNT_TTL_MS = 60_000;
+
+function scopedCountWalkExhausted(scannedRows: number): Error {
+  return new Error(
+    `self-hosted emails: scoped folder counts scanned ${scannedRows} rows over `
+      + `${MAX_SCOPED_COUNT_REQUESTS} requests without completing. Either this server ignored `
+      + "the GET /v1/messages ?to=/?from= recipient filters, or this one address holds more "
+      + `than ${MAX_SCAN_ROWS} messages — upgrade the emails-serve deployment, or scope the `
+      + "read to a domain instead of an address.",
+  );
+}
+
+// The cache key IS the scope, so two scopes can never share an entry. Both
+// fields are already lower-cased by selfHostedScopeOf, and the separator cannot
+// occur in either, so distinct scopes cannot collide on one key.
+function scopedCountsKey(scope: SelfHostedScope): string {
+  return `a=${scope.address ?? ""} d=${scope.domain ?? ""}`;
+}
 // Hard cap on rows walked while collecting one conversation. The candidate read
 // is already narrowed server-side by the subject filter, so this only bounds a
 // pathological "everyone uses the same subject" store.
@@ -871,6 +917,11 @@ export class SelfHostedMailDataSource implements MailDataSource {
   // not enough on its own: a walk already in flight would still install its
   // now-stale result afterwards and serve it for a full TTL.
   private labelTallyGeneration = 0;
+  private scopedCountsCache = new Map<string, { at: number; counts: MailboxCounts }>();
+  private scopedCountsInFlight = new Map<string, { generation: number; promise: Promise<MailboxCounts> }>();
+  // Its own fence, moving in lockstep with the tally's but kept separate so the
+  // shipped label path is untouched by this change.
+  private scopedCountsGeneration = 0;
 
   constructor(options: SelfHostedMailDataSourceOptions) {
     const url = new URL(options.baseUrl);
@@ -1144,6 +1195,11 @@ export class SelfHostedMailDataSource implements MailDataSource {
     // the moment it finished and serve it for a full TTL.
     this.labelTallyCache = null;
     this.labelTallyGeneration += 1;
+    // Every write this class performs can move a message between folders, so the
+    // scoped counts must drop too — and any counting walk already in flight must
+    // be fenced, since its pages predate this write.
+    this.scopedCountsCache.clear();
+    this.scopedCountsGeneration += 1;
   }
 
   private async listFilteredMailboxPage(mailbox: Mailbox, scope: SelfHostedScope | undefined, opts?: MailboxListOptions): Promise<V1Message[]> {
@@ -1364,18 +1420,71 @@ export class SelfHostedMailDataSource implements MailDataSource {
     return (await this.listFilteredMailboxPage(mailbox, scope, opts)).map(v1ToTuiMessage);
   }
 
+  /**
+   * Folder counts for ONE scope, tallied as the pages arrive.
+   *
+   * Deliberately not `scanScopeRows` (see MAX_SCOPED_COUNT_REQUESTS above):
+   * that helper is the destructive clear()'s preflight and must stay exact,
+   * uncached and complete. This one also never RETAINS the rows — counting needs
+   * a tally and, for the to/from union, the ids already seen; materialising every
+   * message of a six-figure mailbox into an array was most of this path's cost.
+   */
+  private async scopedCounts(scope: SelfHostedScope): Promise<MailboxCounts> {
+    const key = scopedCountsKey(scope);
+    const generation = this.scopedCountsGeneration;
+    const cached = this.scopedCountsCache.get(key);
+    if (cached && this.now() - cached.at < SCOPED_COUNT_TTL_MS) return { ...cached.counts };
+    // Coalesce: the TUI starts a new sidebar load every 30s without awaiting the
+    // previous one, so without this the walks stack instead of replacing one
+    // another — the accumulation behind the climbing idle CPU. A walk from an
+    // OLDER generation is not joinable, because its pages predate a write.
+    const inFlight = this.scopedCountsInFlight.get(key);
+    if (inFlight && inFlight.generation === generation) return { ...(await inFlight.promise) };
+
+    const walk = (async () => {
+      const counts = emptyCounts();
+      const seen = new Set<string>();
+      let requests = 0;
+      for (const filters of scopeServerFilterSets(scope)) {
+        for await (const page of this.listPages(PAGE_LIMIT, filters)) {
+          requests += 1;
+          if (requests > MAX_SCOPED_COUNT_REQUESTS) throw scopedCountWalkExhausted(requests * PAGE_LIMIT);
+          for (const message of page) {
+            // An address scope is a union of two server reads, so the same
+            // message can arrive twice; count it once.
+            if (!scopeMatch(message, scope) || seen.has(message.id)) continue;
+            seen.add(message.id);
+            for (const folder of MAILBOXES) {
+              if (folderMatch(message, folder)) counts[folder] += 1;
+            }
+          }
+        }
+      }
+      // Only install if no write landed while this walk was running: those pages
+      // are already stale, and caching them would serve pre-write counts for a
+      // full TTL.
+      if (this.scopedCountsGeneration === generation) this.scopedCountsCache.set(key, { at: this.now(), counts });
+      return counts;
+    })();
+
+    const pending = { generation, promise: walk };
+    this.scopedCountsInFlight.set(key, pending);
+    try {
+      // Copied on the way out so a caller holding the result cannot mutate the
+      // cached entry that later callers will be served.
+      return { ...(await walk) };
+    } finally {
+      // Never clear a NEWER walk that replaced this one after an invalidate.
+      if (this.scopedCountsInFlight.get(key) === pending) this.scopedCountsInFlight.delete(key);
+    }
+  }
+
   async mailboxCounts(opts?: { source?: MailboxSource }): Promise<MailboxCounts> {
     const scope = selfHostedScopeOf(opts?.source);
+    // The whole store has an exact server-side aggregate; only a scope has to be
+    // counted client-side, because /v1/messages/counts takes no recipient filter.
     if (!scope) return (await this.serverStats()).counts;
-    const rows = await this.scanScopeRows(scope);
-    const counts = emptyCounts();
-    for (const m of rows) {
-      if (!scopeMatch(m, scope)) continue;
-      for (const folder of MAILBOXES) {
-        if (folderMatch(m, folder)) counts[folder] += 1;
-      }
-    }
-    return counts;
+    return this.scopedCounts(scope);
   }
 
   async listMailboxStatus(opts?: MailboxStatusOptions): Promise<MailboxStatusSummary> {
