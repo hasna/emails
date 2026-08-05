@@ -86,7 +86,6 @@ export interface EmailsState {
   settings: TuiSettings;
   now: number;
   loading: boolean;
-  busyPull: boolean;
   lastError: string | null;
 }
 
@@ -202,7 +201,6 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     settings,
     now: Date.now(),
     loading: false,
-    busyPull: false,
     lastError: null,
   });
 
@@ -515,8 +513,19 @@ function createEmailsStore(initialMailbox?: Mailbox) {
 	    setAddress(id: string) {
 	      setState({ selectedAddressId: id, page: 0, selectedMessageId: null });
 	      const address = state.addresses.find((item) => item.id === id);
-	      persistSetting("defaultAddress", address?.address ?? null);
-	      setState("settings", "defaultAddress", address?.address ?? null);
+	      // REMEMBERING the choice is a convenience; MAKING it is the action. Self-hosted
+	      // mode has no settings store at all — getSettings() returns the defaults and
+	      // setSetting() throws — and that throw used to land AFTER selectedAddressId had
+	      // already been committed on the line above. So the inbox stayed scoped while the
+	      // reload below never ran: the user was pinned to one inbox by an action that had
+	      // visibly failed, and every 30s tick from then on paid for a scoped counts walk.
+	      // Selecting an inbox is a view action, so a persistence failure must not abort it.
+	      try {
+	        persistSetting("defaultAddress", address?.address ?? null);
+	        setState("settings", "defaultAddress", address?.address ?? null);
+	      } catch {
+	        // No settings store in this mode. The selection still applies for this session.
+	      }
 	      reload({ preserveSelection: false });
 	    },
 	    setSource(id: string) {
@@ -635,11 +644,17 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     reload({ preserveSelection: false });
     void reloadWorkspace();
     const clock = setInterval(() => setState("now", Date.now()), CLOCK_MS);
+    // Guarded on `loading`, which reload() actually maintains, so a refresh cannot
+    // start on top of one that has not finished. The guard here used to read
+    // `busyPull` — a field initialised false and never set true anywhere in the
+    // tree, so it excluded nothing and every 30s tick stacked another reload onto
+    // the last. `loading` is set in reload()'s try and cleared in its finally, so
+    // this can skip a tick but cannot wedge.
     const refresh = setInterval(() => {
-      if (!state.busyPull) reload({ preserveSelection: true });
+      if (!state.loading) reload({ preserveSelection: true });
     }, REFRESH_MS);
     const pull = setInterval(() => {
-      if (state.settings.autoPull && !state.busyPull) void actions.pullNow();
+      if (state.settings.autoPull) void actions.pullNow();
     }, PULL_MS);
     onCleanup(() => {
       clearInterval(clock);
