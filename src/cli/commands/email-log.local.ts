@@ -20,6 +20,10 @@ import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, r
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.local.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.local.js";
 import { readableMessageText } from "../tui/format.js";
+import { resolveMailDataSource } from "../../lib/mail-data-source.js";
+// The mailbox-wide search is shared with the self-hosted surface: it reads
+// through the routed MailDataSource, so it is mode-agnostic despite its module.
+import { mailboxSearch, type MailSearchOpts } from "./email-log.remote.js";
 
 const MAX_EMAIL_EXPORT_LIMIT = 10000;
 const DEFAULT_REPLY_LIMIT = 20;
@@ -280,38 +284,22 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       } catch (e) { handleError(e); }
     });
 
-  // ─── SEARCH ─────────────────────────────────────────────────────────────────
-  program.command("search <query>").description("Search email by subject, from, or to")
+  // --- SEARCH -----------------------------------------------------------------
+  // Received AND sent (task db244cd4). This surface carried the IDENTICAL
+  // sent-only blindness as the self-hosted one, by a different route: it called
+  // `searchEmails`, which enumerates the OUTBOUND ledger. Both now run ONE
+  // implementation over the routed mail data source, because two copies of a
+  // scope rule is exactly how this defect came to exist in two places at once.
+  // `emails email search` above remains the sent-only verb.
+  program.command("search <query>")
+    .description("Search received and sent email by subject, from, or to (default folders: inbox, sent)")
+    .option("--folder <folder>", "Search one folder only: inbox, unread, starred, sent, archived, spam, trash")
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: MailSearchOpts) => {
       try {
-        const limit = parseCliPositiveIntOption(opts.limit, 20);
-        const emails = await searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
-        if (emails.length === 0) {
-          const formatted = chalk.dim(`No sent emails matching "${query}".`);
-          output([], formatted);
-          return;
-        }
-        const lines: string[] = [];
-        lines.push(chalk.bold(`${("Date").padEnd(20)}  ${("From").padEnd(30)}  ${("To").padEnd(30)}  ${("Subject").padEnd(40)}  Status`));
-        lines.push(chalk.dim("\u2500".repeat(130)));
-        for (const e of emails) {
-          const date = new Date(e.sent_at).toLocaleString();
-          const from = e.from_address.length > 30 ? e.from_address.slice(0, 27) + "..." : e.from_address;
-          const to = (e.to_addresses[0] ?? "").length > 30 ? (e.to_addresses[0] ?? "").slice(0, 27) + "..." : (e.to_addresses[0] ?? "");
-          const subj = e.subject.length > 40 ? e.subject.slice(0, 37) + "..." : e.subject;
-          let statusStr: string;
-          switch (e.status) {
-            case "delivered": statusStr = chalk.green(e.status); break;
-            case "bounced": case "complained": case "failed": statusStr = chalk.red(e.status); break;
-            default: statusStr = chalk.blue(e.status);
-          }
-          lines.push(`${date.padEnd(20)}  ${from.padEnd(30)}  ${to.padEnd(30)}  ${subj.padEnd(40)}  ${statusStr}`);
-        }
-        lines.push("");
-        output(emails, lines.join("\n"));
+        await mailboxSearch(resolveMailDataSource(), query, opts, output);
       } catch (e) { handleError(e); }
     });
 

@@ -140,8 +140,17 @@ describe("email list / log — routes to the /v1 sent log", () => {
   });
 });
 
-describe("search — routes outbound search to /v1", () => {
-  it("searches outbound mail only, ignoring matching inbound mail", async () => {
+describe("search — routes search to /v1", () => {
+  // CONTRACT REVERSED 2026-08-04, task db244cd4. This test previously read
+  // "searches outbound mail only, ignoring matching inbound mail" and asserted
+  // `["Searchable Alpha"]` — i.e. it LOCKED IN the defect: the top-level verb
+  // dropping every inbound match. The sent-only contract still exists and is
+  // still tested, on `emails email search`, whose namespace declares it.
+  //
+  // Recorded rather than quietly rewritten because the reversal is the finding:
+  // the blindness was not an oversight, it was asserted behaviour, so anyone
+  // re-reading this file needs to see that the expectation moved on purpose.
+  it("returns inbound as well as outbound matches", async () => {
     await seed([
       outbound("out-a", "Searchable Alpha", "2026-01-01T00:00:00.000Z"),
       outbound("out-b", "Other Beta", "2026-01-02T00:00:00.000Z"),
@@ -151,7 +160,7 @@ describe("search — routes outbound search to /v1", () => {
     const { data } = await runEmailLogCommand(["search", "Searchable"]);
     const rows = data as Array<Record<string, unknown>>;
 
-    expect(rows.map((row) => row.subject)).toEqual(["Searchable Alpha"]);
+    expect(rows.map((row) => row.subject)).toEqual(["Searchable Inbound", "Searchable Alpha"]);
   });
 
   it("paginates sent search results", async () => {
@@ -166,6 +175,113 @@ describe("search — routes outbound search to /v1", () => {
     const rows = data as Array<Record<string, unknown>>;
 
     expect(rows.map((row) => row.subject)).toEqual(["Searchable sent 2", "Searchable sent 1"]);
+  });
+});
+
+// ── task db244cd4 ────────────────────────────────────────────────────────────
+//
+// `emails search <q>` searched the SENT folder ONLY while calling itself
+// "Search email by subject, from, or to". On one real mailbox that is ~691
+// sent messages against ~173,000 inbound: a confident, rc=0 zero over 0.4% of
+// the corpus.
+//
+// THESE TESTS ASSERT THE LITERAL OUTCOME — that a term carried ONLY by inbound
+// mail IS RETURNED — never that some banner or marker appears. The defect
+// already printed the word "sent" in its own header ('Self-hosted sent search
+// "past due"') and that demonstrably did not save two workers on 2026-08-04, so
+// a test keyed on wording would pass against the broken build.
+//
+// THE OBVIOUS POSITIVE CONTROL PASSES ANYWAY, which is why this needs its own
+// regression: a vendor name appears in sent mail too, so searching one returns
+// hits and certifies the INSTRUMENT while it is pointed at the wrong
+// POPULATION. Every fixture below therefore carries a needle that exists on
+// exactly one side of the inbound/outbound line.
+describe("search — the top-level verb covers received mail, not just sent (db244cd4)", () => {
+  it("finds a term that exists ONLY in inbound mail", async () => {
+    await seed([
+      outbound("out-unrelated", "Quarterly plan", "2026-01-01T00:00:00.000Z"),
+      inbound("in-only", "Your account is past due", "2026-01-02T00:00:00.000Z"),
+    ]);
+
+    const { data } = await runEmailLogCommand(["search", "past due"]);
+    const rows = data as Array<Record<string, unknown>>;
+
+    // The whole defect in one assertion: this returned [] before the fix.
+    expect(rows.map((row) => row.id)).toEqual(["in-only"]);
+  });
+
+  it("returns inbound AND outbound matches together, newest first", async () => {
+    await seed([
+      outbound("out-hit", "Invoice reminder sent", "2026-01-01T00:00:00.000Z"),
+      inbound("in-hit", "Invoice reminder received", "2026-01-03T00:00:00.000Z"),
+      inbound("in-miss", "Something else entirely", "2026-01-04T00:00:00.000Z"),
+    ]);
+
+    const { data } = await runEmailLogCommand(["search", "Invoice reminder"]);
+    const rows = data as Array<Record<string, unknown>>;
+
+    expect(rows.map((row) => row.id)).toEqual(["in-hit", "out-hit"]);
+    expect(rows.map((row) => row.kind)).toEqual(["inbound", "sent"]);
+  });
+
+  it("paginates across the merged inbound+outbound result, not one side of it", async () => {
+    await seed([
+      outbound("m-0", "Merged needle 0", "2026-01-01T00:00:00.000Z"),
+      inbound("m-1", "Merged needle 1", "2026-01-01T00:01:00.000Z"),
+      outbound("m-2", "Merged needle 2", "2026-01-01T00:02:00.000Z"),
+      inbound("m-3", "Merged needle 3", "2026-01-01T00:03:00.000Z"),
+    ]);
+
+    const { data } = await runEmailLogCommand(["search", "Merged needle", "--limit", "2", "--offset", "1"]);
+    const rows = data as Array<Record<string, unknown>>;
+
+    expect(rows.map((row) => row.id)).toEqual(["m-2", "m-1"]);
+  });
+
+  it("narrows to one folder on --folder, so sent-only search stays reachable", async () => {
+    await seed([
+      outbound("f-sent", "Reconciliation thread", "2026-01-01T00:00:00.000Z"),
+      inbound("f-in", "Reconciliation thread", "2026-01-02T00:00:00.000Z"),
+    ]);
+
+    const sent = await runEmailLogCommand(["search", "Reconciliation", "--folder", "sent"]);
+    expect((sent.data as Array<Record<string, unknown>>).map((row) => row.id)).toEqual(["f-sent"]);
+
+    const inbox = await runEmailLogCommand(["search", "Reconciliation", "--folder", "inbox"]);
+    expect((inbox.data as Array<Record<string, unknown>>).map((row) => row.id)).toEqual(["f-in"]);
+  });
+
+  it("names the folders it searched when it finds nothing, so a zero is not bare", async () => {
+    await seed([inbound("z-1", "Nothing relevant", "2026-01-01T00:00:00.000Z")]);
+
+    const { data, out } = await runEmailLogCommand(["search", "no-such-string-anywhere-zzz"]);
+
+    expect(data).toEqual([]);
+    // A zero must state the population it covered — and the one it did not.
+    expect(out).toContain("inbox");
+    expect(out).toContain("sent");
+  });
+
+  it("rejects an unknown --folder by name instead of silently searching the inbox", async () => {
+    const errors = await runEmailLogCommandExpectingExit(["search", "anything", "--folder", "bogus"]);
+    expect(errors).toContain("bogus");
+  });
+});
+
+describe("email search — the namespaced verb stays sent-only (db244cd4)", () => {
+  // `emails email` is documented as "Sent email log, search, and history", so
+  // the namespace IS the scoping signal and this verb keeps its old contract.
+  // It is also the compatible escape hatch for any caller that wanted sent-only.
+  it("still ignores matching inbound mail", async () => {
+    await seed([
+      outbound("ns-out", "Searchable Alpha", "2026-01-01T00:00:00.000Z"),
+      inbound("ns-in", "Searchable Inbound", "2026-01-03T00:00:00.000Z"),
+    ]);
+
+    const { data } = await runEmailLogCommand(["email", "search", "Searchable"]);
+    const rows = data as Array<Record<string, unknown>>;
+
+    expect(rows.map((row) => row.id)).toEqual(["ns-out"]);
   });
 });
 

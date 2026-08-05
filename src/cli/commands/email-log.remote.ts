@@ -12,6 +12,7 @@ import { registerEmailSendAlias } from "./email-send-alias.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
 import { formatThreadLabel, readableMessageText } from "../tui/format.js";
+import { PARTITION_FOLDERS, parseCliFolder, type Mailbox } from "../../lib/mail-types.js";
 
 const DEFAULT_REPLY_LIMIT = 20;
 const MAX_REPLY_LIMIT = 200;
@@ -322,6 +323,88 @@ async function selfHostedSentSearch(
   output(summaries, formatSelfHostedSummaries(summaries, `Self-hosted sent search "${query}"`));
 }
 
+// ── mailbox-wide search (task db244cd4) ──────────────────────────────────────
+//
+// The folders a bare `emails search` covers. Sent AND received, because the
+// top-level verb's own contract is "Search email by subject, from, or to" —
+// the sibling that means sent-only says so in its name (`emails email search`,
+// under a namespace described as "Sent email log, search, and history").
+//
+// It searched "sent" alone until 2026-08-04. On one real mailbox that is ~691
+// messages out of ~173,000: `emails search "past due"` returned rc=0 and zero
+// rows while the same term matched 400 inbound messages. Two live
+// investigations were driven off that zero before anyone re-measured.
+//
+// Archived, spam and trash are NOT in the default set — they are the user's own
+// "not my working set" classifications. That is a deliberate axis choice, so
+// the zero-result path below NAMES them rather than leaving the gap implicit,
+// and `--folder <name>` reaches any single folder.
+const DEFAULT_SEARCH_FOLDERS: Mailbox[] = ["inbox", "sent"];
+
+function byNewestFirst(a: TuiMessage, b: TuiMessage): number {
+  return Date.parse(b.date || "") - Date.parse(a.date || "");
+}
+
+export interface MailSearchOpts {
+  since?: string;
+  limit?: string;
+  offset?: string;
+  folder?: string;
+}
+
+/**
+ * Mode-agnostic despite living in the `.remote` module: every read goes through
+ * the routed MailDataSource, which resolves to the local SQLite source or the
+ * /v1 one. `email-log.local.ts` calls THIS function rather than keeping its own
+ * copy — the sent-only blindness existed independently in both surfaces, and
+ * two copies of a fix is how one of them silently rots back.
+ */
+export async function mailboxSearch(
+  ds: MailDataSource,
+  query: string,
+  opts: MailSearchOpts,
+  output: (data: unknown, formatted: string) => void,
+): Promise<void> {
+  const folders = opts.folder === undefined ? DEFAULT_SEARCH_FOLDERS : [parseCliFolder(opts.folder)];
+  const limit = parseCliPositiveIntOption(opts.limit, 20);
+  const offset = parseCliNonNegativeIntOption(opts.offset);
+
+  // Each folder is asked for the WHOLE window (offset+limit), never for its own
+  // page of it: the merge re-orders across folders, so taking `limit` from each
+  // and slicing afterwards would drop rows that sort into the window from the
+  // other side. One request per folder, each with the server-side folder and
+  // search pushdown already applied.
+  const window = offset + limit;
+  const pages = await Promise.all(folders.map((folder) => ds.listMailbox(folder, {
+    search: query,
+    since: opts.since,
+    limit: window,
+    offset: 0,
+  })));
+
+  // inbox and sent are disjoint by construction (folderMatch keys them on
+  // direction), so this dedupe is insurance for a future folder set rather than
+  // a live need — a message counted twice would silently inflate a harvest.
+  const seen = new Set<string>();
+  const merged = pages.flat().filter((row) => (seen.has(row.id) ? false : (seen.add(row.id), true)));
+  const summaries = merged.sort(byNewestFirst).slice(offset, offset + limit).map(toSelfHostedSummary);
+
+  const searched = folders.join(" + ");
+  if (summaries.length === 0) {
+    // A ZERO STATES THE POPULATION IT COVERED, and the one it did not. The old
+    // header did carry the word "sent" — and that was not enough to stop two
+    // workers reading its zero as "not in the mailbox", so the unsearched
+    // folders are named outright instead of implied by the searched ones.
+    const skipped = PARTITION_FOLDERS.filter((folder) => !folders.includes(folder));
+    const tail = skipped.length > 0
+      ? ` Not searched: ${skipped.join(", ")} — pass --folder <name> to search one of those.`
+      : "";
+    output([], chalk.dim(`No mail matching "${query}" in ${searched}.${tail}`));
+    return;
+  }
+  output(summaries, formatSelfHostedSummaries(summaries, `Search "${query}" in ${searched}`));
+}
+
 async function selfHostedShow(
   ds: MailDataSource,
   id: string,
@@ -497,13 +580,18 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     });
 
   // ─── SEARCH ─────────────────────────────────────────────────────────────────
-  program.command("search <query>").description("Search email by subject, from, or to")
+  // Received AND sent (task db244cd4). This is the verb an operator or agent
+  // reaches for first, so it covers the mailbox; `emails email search` is the
+  // sent-only one, and `--folder` narrows this to any single folder.
+  program.command("search <query>")
+    .description("Search received and sent email by subject, from, or to (default folders: inbox, sent)")
+    .option("--folder <folder>", "Search one folder only: inbox, unread, starred, sent, archived, spam, trash")
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: MailSearchOpts) => {
       try {
-        await selfHostedSentSearch(resolveMailDataSource(), query, opts, output);
+        await mailboxSearch(resolveMailDataSource(), query, opts, output);
       } catch (e) { handleError(e); }
     });
 
