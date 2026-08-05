@@ -273,20 +273,40 @@ const LABEL_TALLY_TTL_MS = 60_000;
 // Unlike the label tally, these counts are PER SCOPE — one inbox's numbers must
 // never be served for another — so the cache is keyed rather than store-wide.
 //
-// One shared budget for the whole call across both filter sets, mirroring
-// listFilteredMailboxPage. 200 x PAGE_LIMIT is 100_000 rows: the same worst case
-// as MAX_SCAN_ROWS, which is what bounds this path today, so a store that works
-// now keeps working — the change is that the bound now counts rows SCANNED
-// rather than rows matched, which is what makes it reachable at all.
-const MAX_SCOPED_COUNT_REQUESTS = 200;
+// THE BOUND IS ON ROWS, NOT REQUESTS, and that distinction was measured rather
+// than reasoned. An earlier revision capped this walk at 200 REQUESTS on the
+// argument that 200 x PAGE_LIMIT is MAX_SCAN_ROWS "so a store that works now
+// keeps working". That is FALSE whenever pages are not full: adversarial review
+// ran two stores that resolve exactly on the current code and would have thrown
+// under the request cap —
+//
+//   300 pages x 2 rows   -> inbox=600    requests=600
+//   120 pages x 500 rows -> inbox=60000  requests=240
+//
+// Both sit far below MAX_SCAN_ROWS, so a request cap is strictly tighter than
+// the row cap it claimed to mirror. The walk is therefore bounded on rows
+// actually SCANNED, against the same MAX_SCAN_ROWS constant that bounds this
+// path today. The only change in kind is that today's bound counts rows MATCHED
+// (`seen.size`), which a serve ignoring ?to=/?from= barely grows — that is what
+// made the walk unbounded in practice.
+//
+// The request cap below is a runaway guard only. It cannot fire before the row
+// bound unless a serve averages under ten rows per page, and it exists so that a
+// serve handing back near-empty pages with fresh cursors terminates instead of
+// spinning forever (empty pages never advance the row bound).
+const MAX_SCOPED_COUNT_REQUESTS = 10_000;
 // Must exceed the TUI's 30s sidebar refresh, for the same reason as the tally.
 const SCOPED_COUNT_TTL_MS = 60_000;
 
-function scopedCountWalkExhausted(scannedRows: number): Error {
+// Both figures are the REAL ones. An earlier revision reported
+// `requests * PAGE_LIMIT`, which invented a row count — a 600-row store claimed
+// "scanned 100500 rows … holds more than 100000 messages" and so corroborated
+// the wrong one of the two causes it offers.
+function scopedCountWalkExhausted(scannedRows: number, requests: number): Error {
   return new Error(
     `self-hosted emails: scoped folder counts scanned ${scannedRows} rows over `
-      + `${MAX_SCOPED_COUNT_REQUESTS} requests without completing. Either this server ignored `
-      + "the GET /v1/messages ?to=/?from= recipient filters, or this one address holds more "
+      + `${requests} requests without completing. Either this server ignored the `
+      + "GET /v1/messages ?to=/?from= recipient filters, or this one address holds more "
       + `than ${MAX_SCAN_ROWS} messages — upgrade the emails-serve deployment, or scope the `
       + "read to a domain instead of an address.",
   );
@@ -1444,11 +1464,21 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const walk = (async () => {
       const counts = emptyCounts();
       const seen = new Set<string>();
-      let requests = 0;
       for (const filters of scopeServerFilterSets(scope)) {
+        // PER FILTER SET, not across the union. An address scope reads the same
+        // store twice (?to= then ?from=) and today's bound counts DEDUPED
+        // matches, so a store of 60_000 rows read twice is 60_000 against that
+        // bound and would be 120_000 against a shared one — which would have
+        // thrown on a store that completes today. Each set gets the same
+        // MAX_SCAN_ROWS headroom the single-scan path already has.
+        let requests = 0;
+        let scannedRows = 0;
         for await (const page of this.listPages(PAGE_LIMIT, filters)) {
           requests += 1;
-          if (requests > MAX_SCOPED_COUNT_REQUESTS) throw scopedCountWalkExhausted(requests * PAGE_LIMIT);
+          scannedRows += page.length;
+          if (scannedRows > MAX_SCAN_ROWS || requests > MAX_SCOPED_COUNT_REQUESTS) {
+            throw scopedCountWalkExhausted(scannedRows, requests);
+          }
           for (const message of page) {
             // An address scope is a union of two server reads, so the same
             // message can arrive twice; count it once.
