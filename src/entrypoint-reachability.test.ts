@@ -24,10 +24,20 @@ const SRC_ROOT = join(REPO_ROOT, "src");
 const ALLOWED_UNREACHABLE: Array<{ path: string; reason: string }> = [
   { path: "src/test-support/aws-s3-mock.ts", reason: "test-only harness, imported by *.test.ts" },
   { path: "src/test-support/v1-stub.ts", reason: "test-only out-of-process /v1 stub, imported by *.test.ts" },
+  {
+    path: "src/test-support/v1-store-api.ts",
+    reason:
+      "test-only in-process /v1 service that translates the real route contract onto an EmailStore, so the HTTP store's conformance run goes over real HTTP against a real store rather than a mock. Deliberately not shipped — it is a test double for a server, and nothing at runtime may serve requests from it.",
+  },
   { path: "src/test-support/legacy-mail-seed.ts", reason: "test-only SQL seeder for legacy tables the server still reads" },
   { path: "src/test-support/cli-refusals.ts", reason: "test-only ORACLE: parses the CLI's serverOnly()/notImplementedAnywhere() call sites so a guard can check the refusal registry against the CLI instead of against itself. Deliberately not shipped — nothing at runtime may depend on reading its own source." },
   { path: "src/test-support/mcp-http.ts", reason: "test-only MCP HTTP fixture (bearer token + guarded transport), imported by *.test.ts" },
   { path: "src/server/self-hosted/auth/test-support.ts", reason: "test-only auth deps, imported by *.test.ts" },
+  {
+    path: "src/server/self-hosted/auth/idp-test-support.ts",
+    reason:
+      "test-only Ed25519 IdP-token signer, imported by *.test.ts. Deliberately not shipped — emails only VERIFIES IdP tokens; minting belongs to the IdP, so no runtime module may sign one.",
+  },
   { path: "src/types/domains.d.ts", reason: "ambient module declaration; consumed by tsc, not by the module graph" },
 ];
 

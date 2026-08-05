@@ -92,10 +92,6 @@ function loadMailparser(): Promise<MailparserSdk> {
   return mailparserPromise;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 function normalizePrefix(prefix: string | null | undefined): string | undefined {
   const value = String(prefix ?? "").trim();
   return value.length > 0 ? value : undefined;
@@ -142,12 +138,6 @@ function readConfiguredSources(): RawMailSource[] {
   return Array.isArray(raw)
     ? raw.filter((item): item is RawMailSource => !!item && typeof item === "object" && !Array.isArray(item))
     : [];
-}
-
-function writeConfiguredSources(sources: RawMailSource[]): void {
-  const config = loadConfig();
-  config[MAIL_SOURCES_CONFIG_KEY] = sources;
-  saveConfig(config);
 }
 
 function parseConfiguredS3Source(raw: RawMailSource): S3MailSource | null {
@@ -211,73 +201,18 @@ function findUniqueS3Source(
   return null;
 }
 
-export function listS3Sources(): S3MailSource[] {
+/**
+ * The configured S3 mail sources.
+ *
+ * PRIVATE NOW, and it is the same code the collapsed `s3-sync.ts` exports. This arm keeps a copy
+ * because `resolveS3SourceForSync` below needs it and this module is deleted whole when the
+ * ingestion migrates; importing the collapsed one instead would make `s3-sync.ts` and this file a
+ * runtime import cycle for the sake of a temporary module.
+ */
+function listS3Sources(): S3MailSource[] {
   return readConfiguredSources()
     .map(parseConfiguredS3Source)
     .filter((source): source is S3MailSource => !!source);
-}
-
-export function listLiveS3Sources(): S3MailSource[] {
-  return listS3Sources().filter(sourceIsLive);
-}
-
-export function registerS3Source(input: RegisterS3SourceInput): S3MailSource {
-  const status = input.status ?? "live";
-  const timestamp = nowIso();
-  const prefix = normalizePrefix(input.prefix);
-  const next: S3MailSource = {
-    id: input.id ?? sourceId("s3", input.bucket, prefix),
-    type: "s3",
-    bucket: input.bucket,
-    prefix,
-    region: input.region ?? process.env["AWS_REGION"] ?? "us-east-1",
-    provider_id: input.providerId,
-    name: input.name,
-    status,
-    live_sync_enabled: input.liveSyncEnabled ?? status === "live",
-    created_at: timestamp,
-    updated_at: timestamp,
-    retired_at: status === "retired" ? timestamp : null,
-  };
-  const sources = readConfiguredSources();
-  const rawNext: RawMailSource = { ...next };
-  const index = sources.findIndex((source) =>
-    source["id"] === next.id ||
-    (source["type"] === "s3" &&
-      source["bucket"] === input.bucket &&
-      normalizePrefix(source["prefix"] as string | undefined) === prefix));
-  if (index >= 0) {
-    const previous = sources[index]!;
-    next.created_at = typeof previous["created_at"] === "string" ? previous["created_at"] : timestamp;
-    sources[index] = { ...previous, ...rawNext, created_at: next.created_at };
-  } else {
-    sources.push(rawNext);
-  }
-  writeConfiguredSources(sources);
-  return next;
-}
-
-export function retireS3Source(sourceIdOrBucket: string): S3MailSource {
-  const sources = readConfiguredSources();
-  const parsed = sources.map(parseConfiguredS3Source);
-  const target = findUniqueS3Source(
-    parsed.filter((source): source is S3MailSource => !!source),
-    sourceIdOrBucket,
-    (source) => source.bucket === sourceIdOrBucket,
-  );
-  const index = target ? parsed.findIndex((source) => source?.id === target.id) : -1;
-  if (index < 0 || !parsed[index]) throw new Error(`S3 source not found: ${sourceIdOrBucket}`);
-  const timestamp = nowIso();
-  const retired = {
-    ...sources[index]!,
-    status: "retired",
-    live_sync_enabled: false,
-    retired_at: timestamp,
-    updated_at: timestamp,
-  };
-  sources[index] = retired;
-  writeConfiguredSources(sources);
-  return parseConfiguredS3Source(retired)!;
 }
 
 function resolveS3SourceForSync(opts: S3SyncOptions): S3SyncOptions {

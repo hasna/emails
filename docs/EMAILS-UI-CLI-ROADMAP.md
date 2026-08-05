@@ -1,19 +1,27 @@
-# Emails UI + CLI Roadmap
+# Archived Emails UI + CLI roadmap
 
 Created: 2026-06-18
 
-## Baseline
+Status: completed historical work log for the 0.6.47–0.6.49 releases. Paths,
+package versions, test counts, and smoke commands below describe those releases
+and are not a current CLI or build contract. In particular, the current UI is
+under `src/cli/tui-solid/`, the React-era `src/cli/tui/App.tsx` is gone, and the
+old `emails sandbox` namespace is gone. See [opentui-ui-spike.md](opentui-ui-spike.md)
+and [CLI.md](CLI.md) for the current implementation.
+
+## Original baseline
 
 - `EMAILS_DB_PATH=:memory: bun test` passes: 1559 tests, 0 failures.
-- Main terminal UI is `src/cli/tui-solid/App.tsx`, loaded by `emails ui`.
-- Legacy `src/cli/tui/App.tsx` re-exports the Solid/OpenTUI app.
+- Main terminal UI was being moved to `src/cli/tui-solid/App.tsx`, loaded by
+  `emails ui`; the compatibility component named later in this log no longer
+  exists.
 - Dashboard frontend is one static file: `dashboard/index.html`.
 - Dashboard API routes are split under `src/server/routes/`.
 - Existing inbound data already stores attachment metadata and paths.
 - Existing TUI reader already renders markdown/html into readable terminal text.
 - Existing stored summaries from previous versions are readable from `email_agent_runs` / `email_triage` and preferred in `getMessageBody`.
 
-## Findings
+## Original findings
 
 - Branding still says `Emails`/`Open Emails Dashboard` in the web dashboard, while TUI uses `Emails` in a secondary line under the selected inbox.
 - TUI has `Search`, but not a broader compact filter dialog for address/read/star/label/sort.

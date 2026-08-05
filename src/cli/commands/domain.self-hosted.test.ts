@@ -54,7 +54,10 @@ async function serverDomains(): Promise<Array<Record<string, unknown>>> {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` because the collapsed warming family reaches `/v1` through the
+  // REAL HTTP store, which reads the service's published contract before any
+  // filtered list or write; a missing document is deliberately a fault there.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -128,9 +131,10 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
   });
 
   it("runs the warming lifecycle through the /v1 warming resource", async () => {
-    // Warming is NOT server-owned-only: /v1/warming exists and warming.remote.ts
-    // is a complete client, so the same six commands that work over local SQLite
-    // work here. Proven end to end against the stub's stored rows.
+    // Warming is NOT server-owned-only: /v1/warming exists and the collapsed
+    // family reaches it through the real HTTP store, so the same six commands
+    // that work over local SQLite work here. Proven end to end against the
+    // stub's stored rows.
     const created = await runDomainCommand(["domain", "warm", "ramp.example.com", "--target", "1000"]);
     expect(created.data).toMatchObject({
       schedule: { domain: "ramp.example.com", target_daily_volume: 1000, status: "active" },
@@ -186,20 +190,19 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
     expect(result.stderr).not.toContain("not available in the self-hosted client");
   });
 
-  it("blocks server-owned domain subcommands with the self-hosted client message", async () => {
-    // These have no /v1 equivalent (live DNS/provider orchestration and the
-    // server-owned lifecycle ledger) and must fail loud. Required options are
-    // supplied so commander reaches the action rather than erroring on parse.
+  it("refuses unshipped domain subcommands without claiming a server implements them", async () => {
+    // These do not ship in ANY configuration: the connect/setup orchestrations
+    // were deleted, and the lifecycle-readiness ledger is reachable only from
+    // the library export and the HTTP readiness API. `/v1` carries plain domain
+    // CRUD and no route for any of them, so the old "it runs on the self-hosted
+    // server" was false in exactly this arm, where it sounded most credible.
+    // Required options are supplied so commander reaches the action.
     const blocked = [
       ["domain", "status"],
       ["domain", "connect", "ex.com", "--provider", "x"],
-      ["domain", "dns", "ex.com"],
       ["domain", "verify", "ex.com"],
-      ["domain", "check", "ex.com"],
       ["domains", "connect", "ex.com", "--provider", "x"],
-      ["domains", "dns", "ex.com"],
       ["domains", "verify", "ex.com"],
-      ["domains", "check", "ex.com"],
       ["domains", "enable-inbound", "ex.com"],
       ["domains", "enable-outbound", "ex.com"],
       ["domains", "disable-outbound", "ex.com"],
@@ -207,10 +210,24 @@ describe("domain CLI — self-hosted (self_hosted) /v1 routing", () => {
     for (const args of blocked) {
       const result = await runDomainCommandExpectingExit(args);
       expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("is not available in the self-hosted client");
-      expect(result.stderr).toContain("it runs on the self-hosted server");
+      expect(result.stderr).toContain("is not implemented in this build");
+      expect(result.stderr).not.toContain("not available in the self-hosted client");
+      expect(result.stderr).not.toContain("runs on the self-hosted server");
     }
     // None of the blocked reads/writes reached the store.
+    expect((await serverDomains()).length).toBe(0);
+  });
+
+  it("domain dns answers from the DNS libraries, in this arm too", async () => {
+    // `dns` and `check` were in the blocked list above until they were wired to
+    // src/lib/dns.ts and src/lib/dns-check.ts, which never needed a server or a
+    // mode. `dns` resolves no network, so it is the one safe to assert here.
+    for (const noun of ["domain", "domains"]) {
+      const result = await runDomainCommand([noun, "dns", "ex.com"]);
+      expect(result.data).toMatchObject({ domain: "ex.com", provider_id: null });
+      expect(result.out).toContain("v=spf1 include:amazonses.com ~all");
+    }
+    // A read-only DNS answer writes nothing.
     expect((await serverDomains()).length).toBe(0);
   });
 

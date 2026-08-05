@@ -460,6 +460,21 @@ const tenantKeyListItemSchema = {
   ],
 } as const;
 
+/** One IdP-principal federation grant row (ADR-0001/0002 operator surface). */
+const idpPrincipalGrantSchema = {
+  type: "object",
+  properties: {
+    sub: { type: "string" },
+    tenant_id: { type: "string" },
+    idp_tid: { type: "string", nullable: true },
+    principal_type: { type: "string", enum: ["user", "service"] },
+    note: { type: "string", nullable: true },
+    created_at: { type: "string", format: "date-time" },
+    revoked_at: { type: "string", format: "date-time", nullable: true },
+  },
+  required: ["sub", "tenant_id", "idp_tid", "principal_type", "revoked_at"],
+} as const;
+
 const sendKeySchema = {
   type: "object",
   properties: {
@@ -867,6 +882,19 @@ const messageListItemSchema = {
     attachment_count: { type: "integer", description: "Attachment count; metadata and payloads come from GET /v1/messages/{id} and the attachment endpoints." },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
     send_state: { type: "string", description: "none | pending | sending | sent | failed | uncertain | blocked | cancelled" },
+    policy_denial: {
+      type: "string",
+      nullable: true,
+      description:
+        "Why an outbound policy gate refused this message (e.g. sender_unverified), or null when it was not refused. "
+        + "Mirrors headers.policy_denial. Full headers are stripped from list rows for payload size, so without this field "
+        + "a send_state of 'blocked' cannot be explained by any list consumer. "
+        + "OPTIONAL, unlike its neighbours, and deliberately so: a client that required it would refuse every list response "
+        + "from a server older than this field, turning a missing explanation into a total loss of `emails log` / "
+        + "`emails email list` across the whole installed base. Absent and null both mean 'no reason available here'; "
+        + "read it from GET /v1/messages/{id} headers.policy_denial when a list row omits it. The SERVER's obligation to "
+        + "project it is enforced by src/server/self-hosted/policy-denial-visibility.test.ts, not by the wire contract.",
+    },
     send_started_at: { type: "string", format: "date-time", nullable: true },
     created_at: { type: "string", format: "date-time" },
     updated_at: { type: "string", format: "date-time" },
@@ -1411,6 +1439,16 @@ const currentPrincipalResponseSchema = {
     {
       type: "object",
       properties: {
+        principal_type: { type: "string", enum: ["idp"] },
+        sub: { type: "string", minLength: 1 },
+        tenant: authRouteTenantReferenceSchema,
+        scopes: { type: "array", items: { type: "string" } },
+      },
+      required: ["principal_type", "sub", "tenant", "scopes"],
+    },
+    {
+      type: "object",
+      properties: {
         principal_type: { type: "string", enum: ["user"] },
         user: { ...authRouteUserSchema, nullable: true },
         tenant: authRouteTenantReferenceSchema,
@@ -1494,6 +1532,7 @@ const listParams = [
 ] as const;
 
 const idParam = [{ name: "id", in: "path", required: true, schema: { type: "string" } }] as const;
+const subParam = [{ name: "sub", in: "path", required: true, schema: { type: "string" } }] as const;
 const attachmentRepairIdParam = [{
   name: "id",
   in: "path",
@@ -1747,7 +1786,9 @@ function addRoutineErrorParity(document: EmailsOpenApiDocument): void {
         || path.startsWith("/v1/memberships/")
         || path === "/v1/invites/accept"
         || path === "/v1/keys"
-        || path.startsWith("/v1/keys/");
+        || path.startsWith("/v1/keys/")
+        || path === "/v1/idp-principals"
+        || path.startsWith("/v1/idp-principals/");
 
       if (protectedVersionedOperation) {
         setRoutineErrorResponse(
@@ -2911,6 +2952,135 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         },
       },
     },
+    "/v1/idp-principals": {
+      get: {
+        operationId: "listIdpPrincipals",
+        summary: "List this tenant's IdP-principal federation grants (revoked included); tenant operator required",
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    idp_principals: {
+                      type: "array",
+                      items: idpPrincipalGrantSchema,
+                    },
+                  },
+                  required: ["idp_principals"],
+                },
+              },
+            },
+          },
+        },
+      },
+      post: {
+        operationId: "grantIdpPrincipal",
+        summary: "Grant an IdP principal (sub) access to the caller's tenant; a re-grant never un-revokes",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  sub: { type: "string" },
+                  idp_tid: { type: "string", nullable: true },
+                  principal_type: { type: "string", enum: ["user", "service"] },
+                  note: { type: "string", nullable: true },
+                },
+                required: ["sub"],
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    grant: idpPrincipalGrantSchema,
+                    warning: { type: "string" },
+                  },
+                  required: ["grant"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}": {
+      delete: {
+        operationId: "revokeIdpPrincipal",
+        summary: "Throw the emails-side kill switch on a federation grant; tenant operator required",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["revoked", "sub"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}/revoke": {
+      post: {
+        operationId: "revokeIdpPrincipalByPost",
+        summary: "Compatibility verb for revoking a federation grant",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    revoked: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["revoked", "sub"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/idp-principals/{sub}/restore": {
+      post: {
+        operationId: "restoreIdpPrincipal",
+        summary: "Deliberately lift the kill switch on one federation grant; tenant operator required",
+        parameters: [...subParam],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    restored: trueSchema,
+                    sub: { type: "string" },
+                  },
+                  required: ["restored", "sub"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/v1/domains": {
       get: {
         operationId: "listDomains",
@@ -3542,6 +3712,94 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           "401": errorResponse("Authentication required"),
           "403": errorResponse("Tenant write scope is not authorized"),
           "413": errorResponse("Request body exceeds the service limit"),
+        },
+      },
+    },
+    // Record a message row without dispatching it. The counterpart of POST
+    // /v1/messages (inbound import only, 409 otherwise) and of POST /v1/messages/send
+    // (records AND transmits): this one is the only way to get an outbound row into the
+    // ledger without invoking a provider, and it refuses every send-ledger field so a
+    // row written here can never be confused with one the send fence produced.
+    "/v1/messages/record": {
+      post: {
+        operationId: "recordMessage",
+        summary:
+          "Record a message in either direction WITHOUT sending it. Supplying source_id makes the write idempotent. Scope emails:write.",
+        description:
+          "Persists a message row and transmits nothing. Unlike POST /v1/messages this accepts direction=outbound, and unlike POST /v1/messages/send it never invokes the configured provider. The four send-ledger fields (idempotency_key, send_payload_hash, send_state, send_started_at) are rejected with 400 send_ledger_field: only POST /v1/messages/send may write them.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  from: { type: "string" },
+                  to: { type: "array", items: { type: "string" } },
+                  cc: { type: "array", items: { type: "string" } },
+                  subject: { type: "string", nullable: true },
+                  text: { type: "string", nullable: true },
+                  html: { type: "string", nullable: true },
+                  status: { type: "string" },
+                  direction: {
+                    type: "string",
+                    enum: ["inbound", "outbound"],
+                    description:
+                      "Defaults to inbound when received_at, message_id or in_reply_to is present, and to outbound otherwise.",
+                  },
+                  received_at: { type: "string", format: "date-time", nullable: true },
+                  message_id: { type: "string", nullable: true },
+                  in_reply_to: { type: "string", nullable: true },
+                  is_read: { type: "boolean" },
+                  is_starred: { type: "boolean" },
+                  labels: { type: "array", items: { type: "string" } },
+                  headers: { type: "object", additionalProperties: true },
+                  attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+                  provider_message_id: { type: "string", nullable: true },
+                  source_id: {
+                    type: "string",
+                    description:
+                      "Stable upstream id; enables idempotent upsert. A replay writes only the fields the body carries, so local read/star/label state survives it.",
+                  },
+                },
+                required: ["from", "to"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The source_id matched an existing row, which was updated",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          "201": {
+            description: "A new row was recorded",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { message: { $ref: "#/components/schemas/Message" } },
+                  required: ["message"],
+                },
+              },
+            },
+          },
+          // Declared explicitly because this route's 400 can carry a `reason`, and the
+          // routine 400 the parity pass injects for every route with a request body is
+          // the CLOSED `{ error }` shape. Without this the service's own response would
+          // fail the generated wire contract.
+          "400": jsonResponse(
+            "The body is malformed, omits from/to, carries a direction that is neither inbound nor outbound, or names a send-ledger field",
+            closedErrorReasonSchema,
+          ),
         },
       },
     },

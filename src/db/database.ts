@@ -18,6 +18,12 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
+import { registerDatabasePath } from "./database-context.js";
+import {
+  assertProviderSecretRootKeysAvailable,
+  ensureProviderSecretsSchema,
+  migratePlaintextProviderSecrets,
+} from "./provider-secrets.js";
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:";
@@ -369,22 +375,49 @@ export function getDataDir(): string {
   return newDir;
 }
 
+// A BLANK setting is not a configured path, and the value is used TRIMMED.
+//
+// Raw truthiness accepted `"   "` as a path and opened a database file named three
+// spaces in the working directory, while every diagnostic reported the default — and a
+// trailing newline (routine when a value arrives from a file or a secret store) opened a
+// second, differently-named file beside the intended one. `src/store-resolution.ts`
+// applies the same rule, and asserts that the two agree, so "which one is configured"
+// cannot mean two things in one process.
+function configuredDbPath(key: string): string | null {
+  const trimmed = process.env[key]?.trim();
+  return trimmed === undefined || trimmed === "" ? null : trimmed;
+}
+
 function getDbPath(): string {
   // 1. Environment variable override (new)
-  if (process.env["HASNA_EMAILS_DB_PATH"]) {
-    const path = process.env["HASNA_EMAILS_DB_PATH"];
-    return isInMemoryDb(path) || process.platform === "win32"
-      ? path
-      : canonicalizeDatabasePath(path);
+  const preferred = configuredDbPath("HASNA_EMAILS_DB_PATH");
+  if (preferred !== null) {
+    return isInMemoryDb(preferred) || process.platform === "win32"
+      ? preferred
+      : canonicalizeDatabasePath(preferred);
   }
   // 2. Environment variable override (backward compat, used for tests)
-  if (process.env["EMAILS_DB_PATH"]) {
-    const path = process.env["EMAILS_DB_PATH"];
-    return isInMemoryDb(path) || process.platform === "win32"
-      ? path
-      : canonicalizeDatabasePath(path);
+  const fallback = configuredDbPath("EMAILS_DB_PATH");
+  if (fallback !== null) {
+    return isInMemoryDb(fallback) || process.platform === "win32"
+      ? fallback
+      : canonicalizeDatabasePath(fallback);
   }
-  // 3. Default: ~/.hasna/emails/emails.db
+  // 3. Default
+  return defaultDatabasePath();
+}
+
+/**
+ * The local database file used when no path is configured: `~/.hasna/emails/emails.db`.
+ *
+ * Exported so a caller that has to NAME the default — configuration resolution, a
+ * `doctor` line, an operator-facing error — reads it from here instead of re-spelling
+ * `join(getDataDir(), "emails.db")` and drifting when the directory moves.
+ *
+ * Creates and hardens the data directory as a side effect, because `getDataDir()`
+ * does; that is the same work opening the default database would do anyway.
+ */
+export function defaultDatabasePath(): string {
   return join(getDataDir(), "emails.db");
 }
 
@@ -1037,6 +1070,72 @@ function runS3MessageIdRawUrlBackfill(db: Database): void {
     if (!sql) continue;
     db.query(sql).run();
   }
+}
+
+/**
+ * Adopt the OLD S3 dedup key as the store seam's fence, once, for rows that predate it.
+ *
+ * See the call site in `ensureSchema` for why this exists and why each clause is required.
+ * Exported so a regression suite can drive it against a hand-built legacy table instead of
+ * having to reach it through a full schema bootstrap.
+ *
+ * @returns how many rows adopted a `source_id` on this call. Zero on an already-repaired
+ *   database, which is the normal steady state.
+ */
+export function backfillS3SourceIdsFromRawUrls(db: Database): number {
+  // THE PRE-CHECK IS NOT AN OPTIMISATION, IT IS WHAT MAKES THIS SAFE TO RUN ON EVERY OPEN.
+  //
+  // `ensureSchema` is not a one-shot migration path — it runs on every database open, so every
+  // CLI invocation pays whatever this costs. Measured, on an ALREADY-REPAIRED table (the steady
+  // state), the bare `UPDATE` below costs 0.23-0.35 ms at 10k inbound rows and 1.19-1.42 ms at
+  // 50k, growing linearly, because `EXPLAIN QUERY PLAN` reads:
+  //
+  //   SCAN inbound_emails | CORRELATED SCALAR SUBQUERY 1
+  //     | SEARCH taken USING COVERING INDEX idx_inbound_source_id (source_id=?)
+  //     | CORRELATED SCALAR SUBQUERY 2 | SCAN earliest | USE TEMP B-TREE FOR ORDER BY
+  //
+  // A full table scan, because `idx_inbound_source_id` is partial `WHERE source_id IS NOT NULL`
+  // and therefore cannot serve an `IS NULL` predicate. With the pre-check and its supporting
+  // index the same steady state costs 0.0004-0.009 ms and the plan is an empty index scan.
+  //
+  // WHY THE INDEX IS NARROW, and this is the correction that matters: a partial index keyed only
+  // on `WHERE source_id IS NULL` looks right and is not. Inbound rows written by the non-seam
+  // paths (`storeInboundEmail`) leave `source_id` NULL, so on a mailbox filled by webhook or
+  // IMAP that index stays fully populated and the pre-check still scans O(all those rows). Adding
+  // `AND raw_s3_url IS NOT NULL` restricts it to the actual candidate set, which is EMPTY once
+  // repaired — measured empty at 50k rows in all three mailbox shapes (all S3-sourced, half and
+  // half, none S3-sourced).
+  const pending = db
+    .query(
+      `SELECT 1 AS found FROM inbound_emails
+        WHERE source_id IS NULL AND raw_s3_url LIKE 's3://%' LIMIT 1`,
+    )
+    .get() as { found: number } | null;
+  // NOT A SILENT SKIP. There is nothing to repair, which is a different fact from "the repair
+  // did not run", and the return value says zero either way.
+  if (pending === null) return 0;
+
+  // A CORRELATED REFERENCE TO THE TABLE BEING UPDATED, by its own name rather than through an
+  // `UPDATE … AS alias`. Both are valid SQLite, and the unaliased form is the one whose meaning
+  // does not depend on the reader knowing which alias scope wins.
+  const result = db.run(
+    `UPDATE inbound_emails
+        SET source_id = raw_s3_url
+      WHERE source_id IS NULL
+        AND raw_s3_url LIKE 's3://%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_emails AS taken
+           WHERE taken.source_id = inbound_emails.raw_s3_url
+        )
+        AND id = (
+          SELECT earliest.id FROM inbound_emails AS earliest
+           WHERE earliest.raw_s3_url = inbound_emails.raw_s3_url
+             AND earliest.source_id IS NULL
+           ORDER BY earliest.created_at ASC, earliest.id ASC
+           LIMIT 1
+        )`,
+  );
+  return result.changes;
 }
 
 export function backfillLegacyS3RawUrls(sources: LegacyS3RawUrlSource[], db?: Database): number {
@@ -1938,6 +2037,28 @@ const MIGRATIONS = [
   ${RETIRED_LEGACY_INBOUND_BRIDGE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (48);
   `,
+
+  // Migration 49: provider credentials leave ordinary provider rows. The
+  // JavaScript migration below performs envelope encryption and records the
+  // sentinel in the SAME savepoint as clearing the legacy columns; this DDL
+  // intentionally does not mark 49 complete on its own.
+  `
+  CREATE TABLE IF NOT EXISTS provider_secrets (
+    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    envelope_version INTEGER NOT NULL,
+    ciphertext TEXT NOT NULL,
+    cipher_iv TEXT NOT NULL,
+    cipher_tag TEXT NOT NULL,
+    wrapped_key TEXT NOT NULL,
+    wrap_iv TEXT NOT NULL,
+    wrap_tag TEXT NOT NULL,
+    root_key_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_provider_secrets_root_key ON provider_secrets(root_key_id);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -1961,6 +2082,7 @@ export function getDatabase(dbPath?: string): Database {
   ensurePrivateDatabaseArtifacts(path, true);
 
   const db = new Database(path);
+  registerDatabasePath(db, path);
   try {
     // busy_timeout FIRST. Converting a fresh database to WAL takes an exclusive
     // lock, so when several processes open the same new database at once — which
@@ -1971,8 +2093,19 @@ export function getDatabase(dbPath?: string): Database {
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA foreign_keys = ON");
+    // Deleted/updated payload bytes must be overwritten, not left in SQLite
+    // freelist pages where a raw database or backup scan can recover them.
+    db.run("PRAGMA secure_delete = ON");
 
-    runMigrations(db);
+    const migratedProviderSecrets = runMigrations(db);
+    if (migratedProviderSecrets > 0 && !isInMemoryDb(path)) {
+      // The migration itself is atomic. Once committed, compact the old pages
+      // and truncate WAL frames so the legacy plaintext fixture is absent from
+      // both the live database and a file-level archive made afterwards.
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      db.exec("VACUUM");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
     ensurePrivateDatabaseArtifacts(path, false);
 
     _db = db;
@@ -2019,7 +2152,7 @@ function applyMigrations(db: Database): void {
 // `synchronous` downgrade), so an interrupted open still cannot observe a
 // half-applied schema. `runInTransaction` uses SAVEPOINTs, so callers nest
 // safely inside this transaction.
-function runMigrations(db: Database): void {
+function runMigrations(db: Database): number {
   // BEGIN IMMEDIATE, never a bare BEGIN. A deferred BEGIN takes only a WAL read
   // snapshot on the first statement below — `SELECT MAX(id) FROM _migrations` —
   // and each DDL then has to upgrade that read transaction to a write one. If
@@ -2044,13 +2177,18 @@ function runMigrations(db: Database): void {
   if (!batched) {
     applyMigrations(db);
     ensureSchema(db);
-    return;
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
+    return migrated;
   }
 
   try {
     applyMigrations(db);
     ensureSchema(db);
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
     db.exec("COMMIT");
+    return migrated;
   } catch {
     // The batch could not be committed. Discard it and rebuild one statement at
     // a time. The reapply is level-based on purpose: replaying from zero would
@@ -2070,6 +2208,9 @@ function runMigrations(db: Database): void {
     }
     applyMigrations(db);
     ensureSchema(db);
+    const migrated = migratePlaintextProviderSecrets(db);
+    assertProviderSecretRootKeysAvailable(db);
+    return migrated;
   }
 }
 
@@ -2083,6 +2224,46 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_refresh_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_access_token TEXT");
   ensureColumn("ALTER TABLE providers ADD COLUMN oauth_token_expiry TEXT");
+
+  // Migration 49 idempotent guarantee. Keep the legacy columns so old database
+  // files can be read and migrated, but make every post-migration write use the
+  // encrypted provider_secrets envelope.
+  ensureProviderSecretsSchema(db);
+  try {
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_providers_reject_plaintext_secrets_insert
+      BEFORE INSERT ON providers
+      WHEN NEW.api_key IS NOT NULL
+        OR NEW.access_key IS NOT NULL
+        OR NEW.secret_key IS NOT NULL
+        OR NEW.oauth_client_id IS NOT NULL
+        OR NEW.oauth_client_secret IS NOT NULL
+        OR NEW.oauth_refresh_token IS NOT NULL
+        OR NEW.oauth_access_token IS NOT NULL
+        OR NEW.oauth_token_expiry IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'provider credentials must use the encrypted provider_secrets store');
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_providers_reject_plaintext_secrets_update
+      BEFORE UPDATE OF api_key, access_key, secret_key, oauth_client_id,
+        oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry
+      ON providers
+      WHEN NEW.api_key IS NOT NULL
+        OR NEW.access_key IS NOT NULL
+        OR NEW.secret_key IS NOT NULL
+        OR NEW.oauth_client_id IS NOT NULL
+        OR NEW.oauth_client_secret IS NOT NULL
+        OR NEW.oauth_refresh_token IS NOT NULL
+        OR NEW.oauth_access_token IS NOT NULL
+        OR NEW.oauth_token_expiry IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'provider credentials must use the encrypted provider_secrets store');
+      END;
+    `);
+  } catch {
+    // A partially-created legacy providers table is repaired by the ordinary
+    // migration pass. The next open retries these guards.
+  }
 
   // Migration 19 (idempotent guarantee): provisioning fields for automated
   // domain/address provisioning. ALTER ADD COLUMN has no IF NOT EXISTS, so these
@@ -2519,6 +2700,89 @@ function ensureSchema(db: Database): void {
     WHERE provider_id IS NOT NULL AND message_id IS NOT NULL`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id) WHERE message_id IS NOT NULL");
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN attachment_paths TEXT NOT NULL DEFAULT '[]'");
+
+  // The five columns the store seam (src/store/) requires and these two tables never
+  // had. All nullable and additive, so an already-populated database is unchanged and
+  // every existing reader — each of which selects named columns or maps a fixed row
+  // shape — is unaffected.
+  //
+  //   * inbound_emails.status / .provider_message_id — writable through the seam's
+  //     updateMessageStatus. Without them a status patch would have to be accepted and
+  //     silently dropped, which is the plausible-wrong-answer failure the seam removes.
+  //   * inbound_emails.source_id — the stable upstream id upsertMessage keys on. The
+  //     FENCE is upsertMessage's own BEGIN IMMEDIATE read-then-write, which serialises
+  //     writers whether or not this index exists; the partial unique index below is a
+  //     backstop against a duplicate arriving by any other path. Said precisely because
+  //     `ensureIndex` tolerates its own failure, so a claim that the index IS the fence
+  //     would be a claim this file cannot keep.
+  //   * inbound_emails.updated_at — the table only ever stamped created_at; the record
+  //     shape needs a real mtime, and readers COALESCE back to created_at for legacy rows.
+  //   * domains.notes — the seam's DomainRecord carries free-text notes (the strongest
+  //     arm has the column) and every other field of that record already has a home here.
+  //
+  // DELIBERATELY NOT A MIGRATIONS ENTRY, and this is the interesting part. Additive
+  // columns already land here rather than in the array (`attachment_paths`, `thread_id`,
+  // the provider_* columns), and there is a second, sharper reason: `applyMigrations`
+  // replays from `MAX(_migrations.id)`, so a new sentinel RAISES that level for every
+  // database. The retired-identity regression suite seeds "a database that has not yet
+  // reached migration 48" by deleting the 48 sentinel, which only works while 48 is the
+  // highest — a 49th entry silently stops the rename bridge replaying and takes that
+  // guard with it. `ensureSchema` runs unconditionally on every open, so these columns
+  // are guaranteed without moving the replay level at all.
+  //
+  // `inbound_emails` is misnamed: since migration 36 added `is_sent` it has held BOTH
+  // directions, and it is the only mail table here with folder state and labels. That is
+  // why it, and not the provider-scoped `emails` sent-ledger, is where the seam's single
+  // message family writes.
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN status TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN provider_message_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN source_id TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN updated_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN notes TEXT");
+  ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_source_id ON inbound_emails(source_id)
+    WHERE source_id IS NOT NULL`);
+
+  // The candidate set of the S3 fence repair below, and NOTHING else. See
+  // `backfillS3SourceIdsFromRawUrls` for the measured reason this index is required and for why
+  // the obvious `WHERE source_id IS NULL` form of it would have been useless: non-seam inbound
+  // writes leave `source_id` NULL, so that index never empties. With `raw_s3_url IS NOT NULL`
+  // the index is empty on a repaired database and the repair's pre-check is an empty index scan.
+  ensureIndex(`CREATE INDEX IF NOT EXISTS idx_inbound_unfenced_s3 ON inbound_emails(raw_s3_url)
+    WHERE source_id IS NULL AND raw_s3_url IS NOT NULL`);
+
+  // ADOPT THE OLD S3 DEDUP KEY AS THE NEW FENCE. Without this, collapsing `src/lib/s3-sync`
+  // onto the store seam would have RE-INGESTED EVERY MESSAGE ALREADY PULLED FROM S3.
+  //
+  // The deleted `s3-sync.local.ts` deduplicated by SELECTing `raw_s3_url`, a column the seam
+  // does not expose. The seam's idempotency fence is `upsertMessage`'s `source_id`, added
+  // NULLABLE just above with no backfill — so on any database populated before that collapse
+  // every S3-sourced row has `raw_s3_url` set and `source_id` NULL, the fence matches nothing,
+  // and the next `emails inbox pull-s3` inserts a second copy of the entire mailbox.
+  //
+  // Both halves of the statement are load-bearing:
+  //
+  //   * `LIKE 's3://%'` — ONLY S3-sourced rows. `source_id` means "the stable upstream id",
+  //     and a row that arrived by webhook or by IMAP has no S3 object behind it; giving it one
+  //     would let a later S3 sync match a message that never came from a bucket.
+  //   * the `NOT EXISTS` correlated guard — `raw_s3_url` is NOT uniquely indexed and duplicate
+  //     values do exist in the wild (the legacy `backfillLegacyS3RawUrls` repair above DERIVES
+  //     the column from `message_id`, and nothing stops two rows deriving the same URL). A bare
+  //     `UPDATE … SET source_id = raw_s3_url` would therefore violate the partial unique index
+  //     and abort. This claims the key for exactly ONE row per URL — the earliest by
+  //     `created_at`, then by `id` for a tie, so the choice is deterministic and not
+  //     clock-dependent — and leaves the later duplicates NULL. Those keep behaving exactly as
+  //     they do today: unfenced, and re-fetched once each, which is the pre-existing duplicate
+  //     situation rather than a new one.
+  //
+  // Idempotent (the `source_id IS NULL` predicate is self-limiting) and unconditional, so it
+  // needs no migration sentinel — see the note above about why raising the replay level here
+  // would take the retired-identity regression suite with it.
+  //
+  // NOT `ensureColumn` / `ensureIndex` / `ensureTable`: all three swallow their own exception,
+  // which is right for a statement whose only expected failure is "already applied" and wrong
+  // for a data repair. A swallowed failure here leaves the fence empty and the duplicate
+  // re-ingestion happens anyway, silently — so this one is allowed to throw.
+  backfillS3SourceIdsFromRawUrls(db);
 
   // Ensure email_triage table exists
   ensureTable(`CREATE TABLE IF NOT EXISTS email_triage (

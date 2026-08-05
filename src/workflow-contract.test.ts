@@ -6,7 +6,7 @@ import { join } from "node:path";
 const workflowDir = join(import.meta.dir, "..", ".github", "workflows");
 const repositoryRoot = join(import.meta.dir, "..");
 const packageProvenanceWorkflowSha256 = "706c636d7b60059f6e8ce52229bfb723c0c9a2c61cb4a462b3d6ead24a46232f";
-const unreleasedSectionSha256 = "40e9d4fc08e67cd4f7d38b053c5c9031dd3e8e403d68bc7e40f83a87bc00ba20";
+const unreleasedSectionSha256 = "da5526d127f3a85c04d4b0d9f95bb4dd22edcbee7b34ff8999134fb180383699";
 const release132Section = `## 1.3.2 (2026-07-26)
 
 - fail closed on malformed JSON, wrong response envelopes, and missing required
@@ -82,6 +82,7 @@ describe("repository workflow safety", () => {
     const ci = readWorkflow("ci.yml");
     expect(ci.match(/bun-version:\s*1\.3\.14/g)).toHaveLength(2);
     expect(ci).not.toContain("bun-version: 1.3.13");
+    expect(ci).toContain("PATH=/usr/bin:/bin ./deploy/aws/tests/static_contract.sh");
   });
 
   it("scans the locally patched Bun base without weakening either vulnerability gate", () => {

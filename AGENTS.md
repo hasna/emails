@@ -2,6 +2,19 @@
 
 This file guides AI coding agents working with `@hasna/emails` - an email management CLI, MCP server, and library supporting Resend, AWS SES, and Cloudflare-routed inbound mail.
 
+## Naming (read before "fixing" any Mailery reference)
+
+This product is **open-emails**: repo `hasna/emails`, package `@hasna/emails`,
+bins `emails*`, env prefix `EMAILS_*`. **Mailery is a separate, unrelated
+product and is not a name for this one** (owner ruling 2026-07-27).
+
+The string `mailery` still appears in this tree on purpose. It is either a
+guard that enforces the ruling, a frozen compatibility constant (migration IDs,
+the `mailery` API-key alias slug, legacy event source, `legacy-inbound@local.mailery`),
+or a banned env selector that must stay named to be rejected. **Do not
+bulk-rename it.** Read [docs/NAMING.md](docs/NAMING.md) first — it lists what
+breaks for each one.
+
 ## What This Package Does
 
 `@hasna/emails` manages the full email lifecycle locally:
@@ -201,7 +214,7 @@ bun run dev:serve    # run HTTP server in dev mode
 ```
 src/
 ├── cli/
-│   ├── index.tsx              # thin orchestrator (~65 lines)
+│   ├── index.tsx              # thin, lazy-loading command orchestrator
 │   ├── utils.ts               # shared helpers
 │   ├── tui/                   # OpenTUI Emails UI dashboard
 │   └── commands/              # modular command files
@@ -229,18 +242,18 @@ src/
 ├── providers/                 # provider adapters
 │   ├── resend.ts, ses.ts, sandbox.ts
 │   └── interface.ts           # ProviderAdapter interface
-├── mcp/                       # MCP server, modular tools, and resources
-├── server/serve.ts            # HTTP server + REST API
+├── mcp/                       # MCP server, modular tools, contracts, and resources
+├── server/                    # local dashboard API plus self-hosted /v1 service
 └── index.ts                   # library exports
 ```
 
 ## Adding New Features
 
 The codebase follows these patterns:
-- **New DB table**: Add migration in `db/database.ts`, new CRUD file in `db/`, add `ensureTable`/`ensureIndex` in `ensureSchema`
+- **New DB table**: Add the SQLite migration/ensure-schema work in `db/database.ts`; if self-hosted, also add an immutable migration under `server/self-hosted/migrations.ts` and store/RLS coverage
 - **New CLI command**: Add to appropriate `cli/commands/*.ts` file
-- **New MCP tool**: Add `server.tool(...)` in `mcp/index.ts` before the Start section
-- **New REST endpoint**: Add route in `server/serve.ts`
+- **New MCP tool**: Add `server.tool(...)` in `mcp/tools/*.ts` and wire a new registrar from `mcp/server.ts` when needed
+- **New REST endpoint**: Add local dashboard routes under `server/routes/`; add self-hosted `/v1` routes and OpenAPI under `server/self-hosted/`
 - **New library export**: Add to `src/index.ts`
 
-Test: `EMAILS_DB_PATH=:memory: bun test` — must stay at 0 failures.
+Test: `bun run test` — the hermetic runner owns DB isolation and must stay at 0 failures.

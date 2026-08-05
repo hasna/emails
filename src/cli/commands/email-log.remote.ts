@@ -8,12 +8,14 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
-import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption } from "../utils.js";
+import { registerEmailSendAlias } from "./email-send-alias.js";
+import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import type { MessageBody, TuiMessage, TuiThreadMessage } from "../tui/data.js";
 import { formatThreadLabel, readableMessageText } from "../tui/format.js";
 
 const DEFAULT_REPLY_LIMIT = 20;
 const MAX_REPLY_LIMIT = 200;
+const MAX_EMAIL_EXPORT_LIMIT = 10000;
 
 interface ReplyPageOpts {
   limit?: string;
@@ -44,6 +46,20 @@ export interface SelfHostedEmailSummary {
    * uncertain/failed send must never serialize identically to a delivered one. */
   status: string | null;
   send_state: string | null;
+  /**
+   * Why an outbound policy gate refused this message (e.g. `sender_unverified`);
+   * null when it was not refused.
+   *
+   * A status of `blocked` is not a diagnosis. The refusal happens in
+   * evaluateOutboundPolicy before any provider call, and the reason was written
+   * only into the server's headers.policy_denial — a field this serializer used to
+   * drop, along with all other headers. So every CLI path (`emails show`,
+   * `emails log`, `emails email list`) printed the bare word `blocked`, and the
+   * only way to learn the cause was to call GET /v1/messages/{id} by hand. On
+   * 2026-07-22 that hid a refused customs-document email for a held shipment for
+   * five days, until the shipment was returned to its shipper (2026-07-27).
+   */
+  policy_denial: string | null;
   subject: string;
   date: string;
   is_read: boolean;
@@ -58,10 +74,16 @@ interface SelfHostedEmailDetail extends SelfHostedEmailSummary {
   flags: string[];
 }
 
-// Local sent-log/reporting, the local test-send and the local webhook/event
-// listener have no /v1 equivalent in this self-hosted-only client: they run on
-// the self-hosted server. These commands are kept for discoverability but fail
-// loud.
+// The local test-send and the local webhook/event listener have no /v1
+// equivalent in this self-hosted-only client: one drives the local provider
+// pipeline, the other binds a local HTTP port to receive provider callbacks that
+// are addressed to the operator's server. Both are kept for discoverability but
+// fail loud.
+//
+// `emails export` is NOT one of them: src/lib/export.ts reads through the routed
+// `db/emails.js` and `db/events.js` repositories, which are `/v1/messages` and
+// `/v1/events` clients in this mode — the same path the MCP `export_emails` /
+// `export_events` tools already take.
 function serverOnly(command: string): never {
   throw new Error(
     `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -105,6 +127,7 @@ export function toSelfHostedSummary(msg: TuiMessage): SelfHostedEmailSummary {
     cc_addresses: cc,
     status: msg.status ?? null,
     send_state: msg.send_state ?? null,
+    policy_denial: msg.policy_denial ?? null,
     subject: msg.subject,
     date: msg.date,
     is_read: msg.is_read,
@@ -148,19 +171,72 @@ function statusCell(row: SelfHostedEmailSummary): string {
   return value;
 }
 
+const STATES_THAT_NEED_NO_REASON = ["sent", "delivered", "received", "-"] as const;
+
+/**
+ * `blocked (sender_unverified)` rather than `blocked`.
+ *
+ * The state alone tells an operator that mail did not go out; the code tells them
+ * what to change. Falls back to the bare state when the row carries no reason —
+ * inventing one would be worse than the silence this fixes.
+ */
+function statusWithReason(row: SelfHostedEmailSummary): string {
+  const reason = policyDenialToShow(row);
+  const state = statusCell(row);
+  return reason ? `${state} (${reason})` : state;
+}
+
+/**
+ * The denial code worth showing for this row, or null.
+ *
+ * Shared by the table and the single-message view so they cannot disagree. A row
+ * that reached a completed state suppresses it: a stale code left on a message that
+ * ultimately sent would otherwise make delivered mail read as refused.
+ */
+function policyDenialToShow(row: SelfHostedEmailSummary): string | null {
+  const reason = row.policy_denial?.trim();
+  if (!reason) return null;
+  const state = statusCell(row);
+  if ((STATES_THAT_NEED_NO_REASON as readonly string[]).includes(state)) return null;
+  // The detail view reads send_state ?? status while the table reads the same pair;
+  // if EITHER says the send completed, treat it as completed.
+  const settled = [row.send_state, row.status]
+    .map((value) => (value ?? "").trim())
+    .filter(Boolean);
+  if (settled.some((value) => (STATES_THAT_NEED_NO_REASON as readonly string[]).includes(value))) return null;
+  return reason;
+}
+
+/** Status column width: wide enough for the widest cell actually present. */
+const MIN_STATUS_WIDTH = 10;
+const MAX_STATUS_WIDTH = 34;
+
 export function formatSelfHostedSummaries(rows: SelfHostedEmailSummary[], title: string): string {
   if (rows.length === 0) return chalk.dim(`${title}: no messages found.`);
   const lines: string[] = [];
   lines.push(chalk.bold(`\n${title} (${rows.length})`));
-  lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"Status".padEnd(10)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  Subject`));
-  lines.push(chalk.dim("─".repeat(116)));
+  // The column is sized from the rows rather than fixed at 10, because a fixed 10
+  // would truncate `blocked (sender_unverified)` to `blocked (s` — which is how a
+  // reason gets lost a second time, in the renderer instead of the serializer.
+  // Pages with no refusals keep the original width, so ordinary output is unchanged.
+  const statusWidth = Math.min(
+    MAX_STATUS_WIDTH,
+    Math.max(MIN_STATUS_WIDTH, ...rows.map((row) => statusWithReason(row).length)),
+  );
+  lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"Status".padEnd(statusWidth)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  Subject`));
+  lines.push(chalk.dim("─".repeat(106 + statusWidth)));
   for (const row of rows) {
     const date = row.date ? new Date(row.date).toLocaleString().slice(0, 20) : "";
-    const rawStatus = statusCell(row);
-    const paddedStatus = rawStatus.length > 10 ? rawStatus.slice(0, 10) : rawStatus.padEnd(10);
+    const rawStatus = statusWithReason(row);
+    // Truncate with an ellipsis, like the From/To/Subject columns. An unmarked cut
+    // produces `blocked (recipient_domain_not_veri` — a value that looks complete and
+    // is not, which is the same "reason lost in the renderer" failure one step later.
+    const paddedStatus = rawStatus.length > statusWidth
+      ? `${rawStatus.slice(0, Math.max(1, statusWidth - 3))}...`
+      : rawStatus.padEnd(statusWidth);
     // A send that is not `sent`/delivered/received must stand out — rendering
     // `uncertain`/`failed` like delivered mail is what hid the 2026-07-25 defect.
-    const ok = ["sent", "delivered", "received", "-"].includes(rawStatus);
+    const ok = (STATES_THAT_NEED_NO_REASON as readonly string[]).includes(rawStatus);
     const status = ok ? paddedStatus : chalk.yellow(paddedStatus);
     const from = row.from_address.length > 28 ? row.from_address.slice(0, 25) + "..." : row.from_address;
     const toRaw = row.to_addresses[0] ?? "";
@@ -187,6 +263,18 @@ export function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
     if (state) {
       const ok = ["sent", "delivered", "received"].includes(state);
       lines.push(`  ${chalk.dim("Status:")}   ${ok ? state : chalk.yellow(state)}`);
+    }
+    // …and the REASON on its own line, because this is the view an operator opens
+    // when a send did not arrive. `blocked` means a local outbound policy gate
+    // refused the message before any provider was contacted — it is not a provider
+    // or DNS problem, and it will not resolve on retry until the cause is fixed.
+    //
+    // Suppressed for a completed send, by the SAME rule the table uses: a row that
+    // ended up `sent` while still carrying a stale denial code must not read as
+    // refused in one view and delivered in the other. One rule, both renderers.
+    const reason = policyDenialToShow(email);
+    if (reason) {
+      lines.push(`  ${chalk.dim("Blocked by:")} ${chalk.red(reason)} ${chalk.dim("(outbound policy gate; no provider was contacted)")}`);
     }
   }
   lines.push(`  ${chalk.dim("Kind:")}     ${email.kind}`);
@@ -389,15 +477,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       } catch (e) { handleError(e); }
     });
 
-  emailCmd
-    .command("send")
-    .description("Send an email (alias of top-level `emails send`)")
-    .option("--from <email>", "Sender")
-    .option("--to <email...>", "Recipient(s)")
-    .option("--subject <subject>", "Subject")
-    .option("--body <text>", "Body")
-    .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
+  // Forwards verbatim to the real `send` command — the previous stub here
+  // accepted a fully-specified send and exited 0 without sending (task
+  // 95f66fd3). The shared helper carries the full rationale.
+  registerEmailSendAlias(emailCmd, output);
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
   program.command("log").description("Show email send log (alias: emails email list)")
@@ -485,8 +568,51 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Number of rows to skip")
     .option("--format <fmt>", "Output format: json | csv", "json")
     .option("--output <file>", "Write to file instead of stdout")
-    .action(() => {
-      try { serverOnly("emails export"); } catch (e) { handleError(e); }
+    .action(async (type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
+      try {
+        if (type !== "emails" && type !== "events") {
+          handleError(new Error("Export type must be 'emails' or 'events'"));
+        }
+
+        const { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson, EXPORT_DEFAULT_LIMIT } =
+          await import("../../lib/export.js");
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const fmt = opts.format ?? "json";
+        const hasPage = opts.limit !== undefined || opts.offset !== undefined;
+        // The fallback is the EXPORT default (1000), not 50. `--offset` alone used to
+        // flip `hasPage` and then apply a 50-row limit nobody asked for, so a no-op
+        // `--offset 0` silently cut a 120-row export to 50 while reporting success.
+        const limit = hasPage
+          ? parseCliPositiveIntOption(opts.limit, EXPORT_DEFAULT_LIMIT, MAX_EMAIL_EXPORT_LIMIT)
+          : undefined;
+        const offset = hasPage ? parseCliNonNegativeIntOption(opts.offset, 0) : undefined;
+        const page = hasPage ? { limit, offset } : {};
+        let result: string;
+
+        if (type === "emails") {
+          const filters = { provider_id: providerId, from_address: opts.from, since: opts.since, until: opts.until, ...page };
+          result = fmt === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
+        } else {
+          const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
+          result = fmt === "csv" ? await exportEventsCsv(filters) : await exportEventsJson(filters);
+        }
+
+        if (opts.output) {
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(opts.output, result, "utf-8");
+          output({ exported: type, format: fmt, output: opts.output }, chalk.green("✓ Exported " + type + " to " + opts.output));
+        } else if (fmt === "json") {
+          // output(parsed, raw) rather than console.log(raw): the export is
+          // already a JSON string, and under --json the console wrapper
+          // re-encoded it as {"output":["<entire export as one string>"]}
+          // (task 15908bba).
+          output(JSON.parse(result), result);
+        } else {
+          console.log(result);
+        }
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // ─── WEBHOOK ─────────────────────────────────────────────────────────────────

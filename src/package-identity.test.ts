@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { ServiceContractManifestSchema } from "@hasna/contracts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import contract from "../hasna.contract.json" with { type: "json" };
 import { EMAILS_MODE_ENV_KEYS, resolveEmailsModeSelection } from "./lib/mode.js";
+import { emailsSelfHostedOpenApi } from "./server/self-hosted/openapi.js";
 import { SELF_HOSTED_APP, SELF_HOSTED_APP_ALIASES } from "./server/self-hosted/env.js";
 
 const root = join(import.meta.dir, "..");
@@ -34,6 +36,22 @@ describe("published package identity", () => {
     expect(contract.name).toBe("emails");
     expect(contract.bins).toEqual(CANONICAL_BINS);
     expect(contract.metadata.migrateCommand).toEqual(["emails", "db", "migrate"]);
+  });
+
+  it("tracks a manifest accepted by the installed contracts schema", () => {
+    expect(pkg.dependencies["@hasna/contracts"]).toBe(contract.kitVersion);
+    const result = ServiceContractManifestSchema.safeParse(contract);
+    if (!result.success) throw new Error(result.error.message);
+
+    expect(contract.storage.mode).toBe("sqlite");
+    expect(contract.storage.engines).toEqual(["sqlite", "postgres"]);
+    expect(contract.serviceSurfaces.every((surface) => !("deploymentModes" in surface))).toBe(true);
+  });
+
+  it("declares the readiness probe public when OpenAPI does", () => {
+    const api = contract.serviceSurfaces.find((surface) => surface.kind === "api");
+    expect(api?.readiness).toEqual({ method: "GET", path: "/ready", public: true });
+    expect(emailsSelfHostedOpenApi.paths["/ready"]?.get?.security).toEqual([]);
   });
 
   it("asserts the canonical identity in CI", () => {

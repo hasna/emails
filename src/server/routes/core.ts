@@ -2,12 +2,13 @@
 import { createProvider, listProviderSummaries, deleteProvider, getProvider, updateProvider } from '../../db/providers.local.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.local.js';
 import { createAddress, deleteAddress } from '../../db/addresses.local.js';
-import { listEmails, getEmail, searchEmails } from '../../db/emails.local.js';
-import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.local.js';
+import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
+import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
 import { getDatabase } from '../../db/database.js';
-import { getEvent, listEventSummaries } from '../../db/events.local.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
+import { getEvent, listEventSummaries } from '../../db/events.js';
 import { getAdapter } from '../../providers/index.js';
-import { getLocalStats } from '../../lib/stats.local.js';
+import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
 import {
   getDomainLifecycleSummary,
@@ -18,6 +19,25 @@ import {
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
 
 class DomainReadinessRequestError extends Error {}
+
+/**
+ * The store the `/api/sandbox` routes read and delete through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and every other import in this file is still
+ * a local-SQLite module reading the process-wide connection. When `src/db/sandbox` collapsed
+ * onto the store seam its exports stopped naming a `Database` and started taking an
+ * `EmailStore`, so the three routes below name the SQLite store bound to that same
+ * connection rather than falling through to whatever storage the environment resolves to.
+ * Passing nothing would have silently repointed the local dashboard at an operator's API on
+ * any installation configured for one — a behaviour change dressed as a collapse.
+ *
+ * Built per request, which costs one object: the repositories are thin wrappers over the
+ * memoised connection, and holding one at module scope would open the database when this
+ * module is first imported rather than when a request needs it.
+ */
+function localSandboxStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 function enumField<T extends string>(body: Record<string, unknown>, key: string, allowed: readonly T[]): T | undefined {
@@ -133,7 +153,11 @@ if (path === "/api/domains/readiness" && method === "GET") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const page = queryPage(url, 100);
-    return json(listDomainLifecycleSummaries({ provider_id: resolvedId, ...page }));
+    // AWAITED. `json(data: unknown)` accepts a promise without complaint and serialises it
+    // as `{}`, and an un-awaited rejection escapes the `catch` below as an unhandled
+    // rejection rather than a 500. `tsc` flagged only the one of these three that reached
+    // into the result.
+    return json(await listDomainLifecycleSummaries({ provider_id: resolvedId, ...page }));
   } catch (e) { return internalError(e); }
 }
 
@@ -143,7 +167,7 @@ if (domainReadinessMatch && method === "GET") {
   const id = resolveId("domains", domainReadinessMatch[1]!);
   if (!id) return notFound();
   try {
-    return json(getDomainLifecycleSummary(id));
+    return json(await getDomainLifecycleSummary(id));
   } catch (e) { return internalError(e); }
 }
 
@@ -153,7 +177,7 @@ if (domainReadinessMatch && (method === "PATCH" || method === "POST")) {
   if (!id) return notFound();
   try {
     const body = await parseBody(req) as Record<string, unknown>;
-    return json(updateDomainLifecycleReadiness(id, domainReadinessMutation(body)).after);
+    return json((await updateDomainLifecycleReadiness(id, domainReadinessMutation(body))).after);
   } catch (e) {
     if (e instanceof DomainReadinessRequestError) return badRequest(e.message);
     return internalError(e);
@@ -235,7 +259,7 @@ if (path === "/api/addresses" && method === "GET") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const page = queryPage(url, 100);
-    return json(listEnrichedAddresses(resolvedId, page));
+    return json(await listEnrichedAddresses(resolvedId, page));
   } catch (e) { return internalError(e); }
 }
 
@@ -285,7 +309,7 @@ if (path === "/api/emails" && method === "GET") {
       limit: queryInteger(url, "limit", 50, { min: 1, max: 1000 }),
       offset: optionalQueryInteger(url, "offset", { min: 0 }),
     };
-    return json(listEmails(filter));
+    return json(await listEmails(filter));
   } catch (e) { return internalError(e); }
 }
 
@@ -297,7 +321,7 @@ if (path === "/api/emails/search" && method === "GET") {
     const since = url.searchParams.get("since") ?? undefined;
     const limit = queryInteger(url, "limit", 50, { min: 1, max: 1000 });
     const offset = optionalQueryInteger(url, "offset", { min: 0 });
-    return json(searchEmails(q, { since, limit, offset }));
+    return json(await searchEmails(q, { since, limit, offset }));
   } catch (e) { return internalError(e); }
 }
 
@@ -307,7 +331,7 @@ if (emailMatch && method === "GET") {
   const id = resolveId("emails", emailMatch[1]!);
   if (!id) return notFound();
   try {
-    const email = getEmail(id);
+    const email = await getEmail(id);
     if (!email) return notFound();
     return json(email);
   } catch (e) { return internalError(e); }
@@ -325,7 +349,7 @@ if (path === "/api/events" && method === "GET") {
       limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
       offset: queryInteger(url, "offset", 0, { min: 0 }),
     };
-    return json(listEventSummaries(filter));
+    return json(await listEventSummaries(filter));
   } catch (e) { return internalError(e); }
 }
 
@@ -335,7 +359,7 @@ if (eventMatch && method === "GET") {
   const id = resolveId("events", eventMatch[1]!);
   if (!id) return notFound("Event not found");
   try {
-    const event = getEvent(id);
+    const event = await getEvent(id);
     if (!event) return notFound("Event not found");
     return json(event);
   } catch (e) { return internalError(e); }
@@ -346,7 +370,7 @@ if (path === "/api/stats" && method === "GET") {
   try {
     const period = url.searchParams.get("period") ?? "30d";
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    const stats = getLocalStats(resolvedId, period);
+    const stats = await getLocalStats(resolvedId, period);
     return json(stats);
   } catch (e) { return internalError(e); }
 }
@@ -356,7 +380,7 @@ if (path === "/api/sandbox" && method === "GET") {
   try {
     const page = queryPage(url, 50);
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    return json(listSandboxEmailSummaries(resolvedId, page.limit, page.offset));
+    return json(await listSandboxEmailSummaries(resolvedId, page.limit, page.offset, localSandboxStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -364,9 +388,8 @@ if (path === "/api/sandbox" && method === "GET") {
 const sandboxGetMatch = path.match(/^\/api\/sandbox\/([^/]+)$/);
 if (sandboxGetMatch && method === "GET") {
   try {
-    const db = getDatabase();
     const id = resolveIdStrict("sandbox_emails", sandboxGetMatch[1]!);
-    const email = getSandboxEmail(id, db);
+    const email = await getSandboxEmail(id, localSandboxStore());
     if (!email) return notFound("Sandbox email not found");
     return json(email);
   } catch (e) { return internalError(e); }
@@ -376,8 +399,7 @@ if (sandboxGetMatch && method === "GET") {
 if (path === "/api/sandbox" && method === "DELETE") {
   try {
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    const db = getDatabase();
-    const count = clearSandboxEmails(resolvedId, db);
+    const count = await clearSandboxEmails(resolvedId, localSandboxStore());
     return json({ deleted: count });
   } catch (e) { return internalError(e); }
 }

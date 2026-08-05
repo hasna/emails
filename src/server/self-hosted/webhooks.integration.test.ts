@@ -185,12 +185,18 @@ async function json(response: Response | null): Promise<Record<string, unknown>>
 
 const alwaysVerified = async () => true;
 
+// A COLD schema rebuild plus the full migration ledger exceeds bun's DEFAULT 5s hook
+// timeout on a loaded machine — measured at ~6s — which fails the whole file with an
+// unnamed hook error rather than a test result. Stated explicitly so the suite is
+// runnable on its own and not only after another suite has warmed the schema.
+const BEFORE_ALL_TIMEOUT_MS = 120_000;
+
 beforeAll(async () => {
   if (!pgClient) return;
   await pgClient.execute("DROP SCHEMA IF EXISTS public CASCADE");
   await pgClient.execute("CREATE SCHEMA public");
   await new MigrationLedger(pgClient, emailsSelfHostedMigrations()).migrate();
-});
+}, BEFORE_ALL_TIMEOUT_MS);
 
 afterAll(async () => {
   await pgClient?.close();
@@ -357,6 +363,51 @@ describe.skipIf(!pgClient)("Resend inbound webhook lands in the operator's Postg
     expect(await count("webhook_receipts", tenantId)).toBe(1);
   });
 
+  it("a re-delivery under a NEW svix-id does not mark an already-read message unread", async () => {
+    // The receipt ledger dedupes on (provider, event_id), so a provider that re-delivers
+    // the same email under a different event id gets past it and reaches the message
+    // upsert, which keys on `source_id`. That upsert used to write its whole column set,
+    // so the replay reset the read flag, the star and the labels — and the ingest sink
+    // made it worse by stating `is_read: false` explicitly, which counts as "given" even
+    // under the conditional assignment list. This asserts the local state a reader set
+    // survives a re-delivery, which is the property the whole idempotency claim rests on.
+    const domain = "resend-inbound-reread.test";
+    const tenantId = await makeRoutedTenant("wh-resend-reread", domain);
+    const { deps } = makeDeps({ resendSecret: RESEND_SECRET });
+    const payload = {
+      type: "inbound.email.received",
+      created_at: "2026-06-03T10:00:00.000Z",
+      data: {
+        email_id: "re_int_reread",
+        from: "alice@ext.test",
+        to: [`ops@${domain}`],
+        subject: "first delivery",
+        text: "x",
+        headers: {},
+      },
+    };
+
+    const first = await json(await handleSelfHostedRequest(deps, await resendPost(payload, { id: "svix-reread-1" })));
+    const messageId = String(first["id"]);
+    const scoped = deps.store.forTenant(tenantId);
+    await scoped.updateMessageStatus(messageId, { is_read: true, is_starred: true });
+    await scoped.updateMessageStatus(messageId, { add_label: "kept" });
+
+    // A DIFFERENT event id, so the receipt ledger does not short-circuit it.
+    const second = await json(await handleSelfHostedRequest(deps, await resendPost(payload, { id: "svix-reread-2" })));
+    expect(second["id"], "the re-delivery must land on the same message row").toBe(messageId);
+    expect(await count("messages", tenantId)).toBe(1);
+
+    const reread = await scoped.getMessage(messageId);
+    expect(reread).not.toBeNull();
+    expect(reread!.is_read, "a re-delivery must not mark a read message unread").toBe(true);
+    expect(reread!.is_starred, "a re-delivery must not clear the star").toBe(true);
+    expect(reread!.labels).toContain("kept");
+    // ...and the message is still inbound, and still the tenant's.
+    expect(reread!.direction).toBe("inbound");
+    expect(reread!.source_id).toBe("resend:re_int_reread");
+  });
+
   it("a wrongly-signed payload writes nothing", async () => {
     const domain = "resend-inbound-3.test";
     const tenantId = await makeRoutedTenant("wh-resend-3", domain);
@@ -442,6 +493,25 @@ describe.skipIf(!pgClient)("delivery outcomes land in the operator's Postgres", 
     expect(first["event_id"]).toBeTruthy();
     expect(second["duplicate"]).toBe(true);
     expect(await count("events", tenantId)).toBe(1);
+  });
+
+  it("enforces provider-event uniqueness within a tenant but not across tenants", async () => {
+    const tenantA = await makeRoutedTenant("wh-event-unique-a", "event-unique-a.test");
+    const tenantB = await makeRoutedTenant("wh-event-unique-b", "event-unique-b.test");
+    const providerEventId = `provider-event-${randomUUID()}`;
+    const eventBody = {
+      provider_event_id: providerEventId,
+      type: "delivered",
+      occurred_at: "2026-07-02T11:00:00.000Z",
+    };
+
+    await new EmailsSelfHostedStore(pgClient!).forTenant(tenantA).createResource(EVENTS_SPEC, eventBody);
+    await expect(
+      new EmailsSelfHostedStore(pgClient!).forTenant(tenantA).createResource(EVENTS_SPEC, eventBody),
+    ).rejects.toThrow();
+    await expect(
+      new EmailsSelfHostedStore(pgClient!).forTenant(tenantB).createResource(EVENTS_SPEC, eventBody),
+    ).resolves.toBeDefined();
   });
 
   it("a Resend delivery event is persisted in the sending tenant's scope", async () => {

@@ -131,6 +131,8 @@ jobs:
             if (pkg.publishConfig?.registry !== "https://registry.npmjs.org") throw new Error("npm registry must be the public registry");
             if (pkg.repository?.url !== "git+https://github.com/hasna/emails.git") throw new Error("repository provenance must be hasna/emails");
           '
+      - name: Require immutable gates on future release and deployment workflows
+        run: bun run deployment:policy
       - name: Verify generated SDK is committed
         run: |
           bun run scripts/generate-selfhost-sdk.ts
@@ -141,6 +143,8 @@ jobs:
         run: |
           bun run no-cloud:source
           bun run no-cloud:pack
+      - name: Verify self-hosting release and rollback contract
+        run: PATH=/usr/bin:/bin ./deploy/aws/tests/static_contract.sh
       - name: Diff hygiene
         run: git diff --check
 
@@ -167,7 +171,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - name: Verify self-hosted Postgres migrations, tenancy, RLS, message IDs, and send semantics
+      - name: Verify self-hosted Postgres migrations, tenancy, RLS, message IDs, send semantics, and store conformance
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
@@ -190,3 +194,15 @@ jobs:
             src/server/self-hosted/send-honesty-and-reconciliation.integration.test.ts \
             src/server/self-hosted/webhooks.integration.test.ts
           bun test src/server/self-hosted/attachment-inventory.integration.test.ts
+          # store-conformance gets its OWN invocation, like attachment-inventory, and it
+          # is not a stylistic choice: every suite above drops schema `public` in its
+          # `beforeAll`, so folding this one in would make its correctness depend on
+          # `bun test` honouring the argument order — a property no assertion here checks.
+          # On its own it migrates whatever it finds and takes a fresh tenant per run, so
+          # nothing can wipe the schema out from under it.
+          #
+          # EMAILS_REQUIRE_POSTGRES_TESTS makes the suite assert its own reachability: the
+          # whole file is skipped when the connection string is absent, so without this
+          # flag a renamed variable or a broken service container would silently delete
+          # the real-service conformance evidence and leave the job green.
+          EMAILS_REQUIRE_POSTGRES_TESTS=1 bun test src/server/self-hosted/store-conformance.integration.test.ts

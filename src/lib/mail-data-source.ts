@@ -58,7 +58,9 @@ import type {
   VerificationCodeEmail,
   VerificationCodeMatch,
 } from "./verification-code.js";
-import { findVerificationCode, listVerificationCodeCandidates } from "./verification-code.local.js";
+// The FACADE, not an arm: the verification-code family has one implementation and its
+// candidate read goes through the store seam.
+import { findVerificationCode, listVerificationCodeCandidates } from "./verification-code.js";
 import {
   decodeAttachmentPayload,
   normalizeAttachmentByteLimit,
@@ -150,6 +152,13 @@ export interface MailSendInput {
   scheduledAt?: string;
   /** Stable caller-provided key used to make self-hosted sends retry-safe. */
   idempotencyKey?: string;
+  /**
+   * RFC 8058 one-click unsubscribe target: local providers inject the
+   * List-Unsubscribe / List-Unsubscribe-Post header pair. The self-hosted send
+   * contract cannot carry it, so that backend REFUSES rather than mailing
+   * without the headers.
+   */
+  unsubscribeUrl?: string;
 }
 
 export interface MailSendResult {
@@ -427,7 +436,9 @@ export class SqliteMailDataSource implements MailDataSource {
   async deleteMessage(id: string): Promise<void> { deleteInboundEmail(id); }
 
   async bulk(input: MailBulkInput): Promise<MailBulkResult> {
-    const setter = LOCAL_BULK_FLAG_ACTIONS[input.action];
+    const setter = Object.hasOwn(LOCAL_BULK_FLAG_ACTIONS, input.action)
+      ? LOCAL_BULK_FLAG_ACTIONS[input.action]
+      : undefined;
     if (!setter) throw new Error(`unsupported local bulk action '${input.action}'`);
     const ids = input.ids?.length
       ? input.ids.slice(0, LOCAL_BULK_MAX)
@@ -457,6 +468,7 @@ export class SqliteMailDataSource implements MailDataSource {
       attachments: input.attachments,
       idempotencyKey: input.idempotencyKey,
       providerId: input.providerId,
+      unsubscribeUrl: input.unsubscribeUrl,
       markdown: input.markdown,
       replyTo,
     };

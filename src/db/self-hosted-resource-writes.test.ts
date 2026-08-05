@@ -1,7 +1,7 @@
 // End-to-end proof that the resource repositories route WRITES to the selfHosted /v1
 // API in selfHosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see self-hosted-resource-routing.test.ts);
-// this covers createOwner, createGroup, and contact suppress/unsuppress, plus
+// what remains here is
 // send-key minting (which POSTs to the bespoke /v1/send-keys/mint endpoint — the
 // token/hash are server-minted and only a hash-free key summary reaches the client).
 //
@@ -12,12 +12,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { resetSelfHostedConfigCache } from "./self-hosted-store.js";
-import { createOwner, listOwners } from "./owners.js";
-import { createGroup, listGroups } from "./groups.js";
-import { suppressContact, unsuppressContact, listContacts } from "./contacts.js";
 import { createSendKey } from "./send-keys.js";
-import { createTemplate, listTemplates, getTemplate, deleteTemplate } from "./templates.js";
-import { createSequence, listSequences } from "./sequences.js";
+import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
 function captureInheritedProcessEnv(): void {
@@ -141,6 +137,13 @@ afterAll(() => proc?.kill());
 
 beforeEach(() => {
   captureInheritedProcessEnv();
+  // EXACTLY ONE STORE. The API settings below name this stub, and the collapsed send-key
+  // family resolves its store from STORAGE CONFIGURATION — so a database path left in the
+  // environment (the hermetic test harness sets one for every file) plus an API is a HARD
+  // BOOT ERROR with deliberately no precedence rule, and every call through that family
+  // would raise it. Named through the resolution's own exported list rather than copied as
+  // a literal, so this cannot go stale when the resolution learns another setting.
+  for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
   process.env.EMAILS_MODE = "self_hosted";
   process.env.EMAILS_SELF_HOSTED_URL = baseUrl;
   process.env.EMAILS_SELF_HOSTED_API_KEY = "test_key";
@@ -156,64 +159,65 @@ afterEach(() => {
 });
 
 describe("resource repos route writes to selfHosted in selfHosted mode", () => {
-  test("createOwner POSTs to /v1/owners and appears in selfHosted listOwners", () => {
-    const o = createOwner({ type: "agent", name: "Writer Agent" });
-    expect(o.id).toStartWith("o");
-    expect(o.name).toBe("Writer Agent");
-    // The registered owner is now visible via the selfHosted read path (not just a
-    // local id that never reaches the selfHosted — the split-brain symptom).
-    expect(listOwners().some((x) => x.id === o.id)).toBe(true);
-  });
+  // The owners case that used to sit here proved the OLD routing bridge sent that
+  // family's createOwner to `/v1` when the deployment word said so. The family has
+  // collapsed onto the store seam and consults no such word, so the premise is gone —
+  // and the questions that survive it (does a create land on the API dataset, does a
+  // name lookup find it past one clamped page, does the duplicate-external_id guard
+  // see the whole table?) are asked by src/db/owners.test.ts against a REAL HTTP
+  // store over the store-seam `/v1` fixture, which also validates writes against the
+  // service's own published contract, something this hand-rolled stub cannot do.
 
-  test("createGroup POSTs to /v1/groups and appears in selfHosted listGroups", () => {
-    const g = createGroup("writer-group", "desc");
-    expect(g.id).toStartWith("g");
-    expect(listGroups().some((x) => x.name === "writer-group")).toBe(true);
-  });
+  // The groups case that used to sit here proved the OLD routing bridge sent that
+  // family's writes to `/v1` when the deployment word said so. The family has collapsed
+  // onto the store seam and consults no such word, so the premise is gone — and the
+  // question that survives it (does a create land on the API dataset and come back from
+  // the API list?) is asked by src/db/groups.test.ts against a REAL HTTP store over the
+  // store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
-  test("suppressContact creates-then-suppresses on the selfHosted and shows in selfHosted list", () => {
-    suppressContact("blocked@example.com");
-    const suppressed = listContacts({ suppressed: true });
-    expect(suppressed.map((c) => c.email)).toContain("blocked@example.com");
-    // Idempotent unsuppress flips the same selfHosted record (no duplicate contact).
-    unsuppressContact("blocked@example.com");
-    expect(listContacts({ suppressed: true }).map((c) => c.email)).not.toContain("blocked@example.com");
-    expect(listContacts().filter((c) => c.email === "blocked@example.com")).toHaveLength(1);
-  });
+  // The contacts case that used to sit here proved the OLD routing bridge sent that
+  // family's suppress/unsuppress writes to `/v1` when the deployment word said so. The
+  // family has collapsed onto the store seam and consults no such word, so the premise
+  // is gone — and the questions that survive it (does a suppression land on the API
+  // dataset, flip the SAME record rather than minting a sibling, and come back from the
+  // API list?) are asked by src/db/contacts.test.ts against a REAL HTTP store over the
+  // store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
-  test("createTemplate POSTs to /v1/templates and appears in selfHosted listTemplates", () => {
-    const t = createTemplate({ name: "welcome", subject_template: "Hi {{name}}", html_template: "<p>hi</p>" });
-    expect(t.id).toStartWith("t");
-    expect(t.subject_template).toBe("Hi {{name}}");
-    expect(listTemplates().some((x) => x.name === "welcome")).toBe(true);
-  });
+  // The templates cases that used to sit here proved the OLD routing bridge sent that
+  // family's create/show/remove to `/v1` when the deployment word said so. The family
+  // has collapsed onto the store seam and consults no such word, so the premise is
+  // gone — and the questions that survive it (does a create land on the API dataset,
+  // does a name lookup find it past one clamped page, and does a remove delete the
+  // API record?) are asked by src/db/templates.test.ts against a REAL HTTP store over
+  // the store-seam `/v1` fixture, which also validates writes against the service's
+  // own published contract, something this hand-rolled stub cannot do.
 
-  test("getTemplate/deleteTemplate route show+remove to selfHosted (by name and id)", () => {
-    const t = createTemplate({ name: "farewell", subject_template: "Bye {{name}}" });
-    // show by id AND by name both resolve against the selfHosted, not the empty local DB.
-    expect(getTemplate(t.id)?.name).toBe("farewell");
-    expect(getTemplate("farewell")?.id).toBe(t.id);
-    // remove deletes the selfHosted record (resolving name -> id first).
-    expect(deleteTemplate("farewell")).toBe(true);
-    expect(getTemplate("farewell")).toBeNull();
-    expect(listTemplates().some((x) => x.name === "farewell")).toBe(false);
-  });
+  // The sequences case that used to sit here proved the OLD routing bridge sent that
+  // family's writes to `/v1` when the deployment word said so. The family has collapsed
+  // onto the store seam and consults no such word, so the premise is gone — and the
+  // question that survives it (does a create land on the API dataset and come back from
+  // the API list?) is asked by src/db/sequences.test.ts against a REAL HTTP store over
+  // the store-seam `/v1` fixture, which also validates writes against the service's own
+  // published contract, something this hand-rolled stub cannot do.
 
-  test("createSequence POSTs to /v1/sequences and appears in selfHosted listSequences", () => {
-    const s = createSequence({ name: "onboarding", description: "drip" });
-    expect(s.id).toStartWith("s");
-    expect(s.status).toBe("active");
-    expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
-  });
-
-  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", () => {
-    const owner = createOwner({ type: "agent", name: "Key Owner" });
-    const { token, key } = createSendKey(owner.id, "ci");
-    // The token is server-minted (routed to the selfHosted, not a local island).
+  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", async () => {
+    // A literal owner id: the stub's mint route binds whatever owner_id it is sent,
+    // and registering one through the collapsed owners family would need the
+    // published write contract this hand-rolled stub does not serve.
+    const ownerId = "o-key-owner";
+    // ASYNC AND RESOLVED FROM STORAGE CONFIGURATION. This family has collapsed onto the
+    // store seam, so it no longer consults the deployment word at all — it reaches this
+    // same stub because the API settings above name it, which is a STRICTLY STRONGER
+    // statement than the one this case used to make.
+    const { token, key } = await createSendKey(ownerId, "ci");
+    // The token is server-minted (it lands on the API, not on a local island).
     expect(token).toStartWith("esk_");
-    expect(key.owner_id).toBe(owner.id);
+    expect(key.owner_id).toBe(ownerId);
     expect(key.label).toBe("ci");
-    // The client never receives the secret hash.
-    expect(key.key_hash).toBe("");
+    // The client never receives the secret hash — the field is ABSENT now, where it used
+    // to be present holding a fabricated `""` that a caller could compare against.
+    expect("key_hash" in key).toBe(false);
   });
 });

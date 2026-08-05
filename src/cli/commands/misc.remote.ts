@@ -1,6 +1,15 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { handleError } from "../utils.js";
+import { cancelScheduledEmail, listScheduledEmailSummaries } from "../../db/scheduled.js";
+import { truncate } from "../../lib/format.js";
+import {
+  formatListHint,
+  handleError,
+  isCliVerboseOutput,
+  parseCliListPage,
+  resolveId,
+  parseScheduledStatusFilter,
+} from "../utils.js";
 
 export interface SchedulerTickResult {
   scheduled: { attempted: number; sent: number; failed: number; skipped: number };
@@ -13,10 +22,23 @@ interface SchedulerTickOptions {
   log?: (message: string) => void;
 }
 
-// The local scheduler/automation store, batch sender and local diagnostics have
-// no /v1 equivalent in the self-hosted client: scheduling, batching and health
-// probes are owned by the self-hosted server. These entrypoints are kept for
-// discoverability but fail loud.
+interface ScheduleListOptions {
+  status?: string;
+  limit?: string;
+  offset?: string;
+  verbose?: boolean;
+}
+
+// What is left here is genuinely server-side. The scheduler LOOP sends mail
+// through the local provider pipeline (src/lib/send.local.ts), the batch sender
+// reads a CSV and drives that same pipeline, and inbound delivery diagnosis
+// inspects local ingestion state — none of those have a client implementation in
+// this mode, so they fail loud instead of pretending.
+//
+// Reading and cancelling the schedule is NOT one of them: `GET/PATCH
+// /v1/scheduled` exists and src/db/scheduled.remote.ts is a complete client for
+// it, which is how the MCP `list_scheduled` / `cancel_scheduled` tools already
+// work over the same route.
 function serverOnly(command: string): never {
   throw new Error(
     `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -25,6 +47,25 @@ function serverOnly(command: string): never {
 
 export async function runSchedulerTick(_opts: SchedulerTickOptions = {}): Promise<SchedulerTickResult> {
   serverOnly("emails schedule run");
+}
+
+function scheduledStatusOf(opts: ScheduleListOptions) {
+  return parseScheduledStatusFilter(opts.status);
+}
+
+function colorScheduledStatus(status: string): string {
+  if (status === "pending") return chalk.blue(status);
+  if (status === "sent") return chalk.green(status);
+  if (status === "cancelled") return chalk.yellow(status);
+  return chalk.red(status);
+}
+
+async function cancelScheduled(id: string, describe: (shortId: string) => string): Promise<void> {
+  const resolvedId = resolveId("scheduled_emails", id);
+  if (!(await cancelScheduledEmail(resolvedId))) {
+    handleError(new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`));
+  }
+  console.log(chalk.green(describe(resolvedId.slice(0, 8))));
 }
 
 export function registerMiscCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -41,15 +82,50 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action(() => {
-      try { serverOnly("emails scheduled list"); } catch (e) { handleError(e); }
+    .action(async (opts: ScheduleListOptions) => {
+      try {
+        const status = scheduledStatusOf(opts);
+        const page = parseCliListPage(opts);
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError`, never a short page presented as the whole list.
+        const emails = await listScheduledEmailSummaries({
+          ...(status ? { status } : {}),
+          ...page,
+        });
+        if (emails.length === 0) {
+          output([], chalk.dim("No scheduled emails."));
+          return;
+        }
+        const lines = [chalk.bold("\nScheduled Emails:")];
+        for (const e of emails) {
+          lines.push(`  ${chalk.cyan(e.id.slice(0, 8))}  ${truncate(e.subject, 40)}  -> ${truncate(e.to_addresses.join(", "), 42)}  [${colorScheduledStatus(e.status)}]  at ${e.scheduled_at}`);
+        }
+        lines.push("");
+        lines.push(formatListHint({
+          shown: emails.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "scheduled email",
+          detailCommand: "filter with --status or adjust --limit/--offset",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(emails, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   scheduledCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action(() => {
-      try { serverOnly("emails scheduled cancel"); } catch (e) { handleError(e); }
+    .action(async (id: string) => {
+      try {
+        // Awaited so a refusal from the store reaches `handleError` instead of surfacing as
+        // an unhandled rejection after the command has already reported success.
+        await cancelScheduled(id, (shortId) => `✓ Scheduled email cancelled: ${shortId}`);
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // schedule list / cancel — same as scheduled but under unified command
@@ -60,15 +136,43 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action(() => {
-      try { serverOnly("emails schedule list"); } catch (e) { handleError(e); }
+    .action(async (opts: ScheduleListOptions) => {
+      try {
+        const status = scheduledStatusOf(opts);
+        const page = parseCliListPage(opts);
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError`, never a short page presented as the whole list.
+        const emails = await listScheduledEmailSummaries({
+          ...(status ? { status } : {}),
+          ...page,
+        });
+        if (emails.length === 0) { output([], chalk.dim("No scheduled emails.")); return; }
+        const lines = [chalk.bold("\nScheduled:")];
+        for (const e of emails) {
+          lines.push(`  ${chalk.cyan(e.id.slice(0, 8))}  ${e.scheduled_at}  [${colorScheduledStatus(e.status)}]  ${truncate(e.subject, 40)}  -> ${truncate(e.to_addresses.join(", "), 42)}`);
+        }
+        lines.push("");
+        lines.push(formatListHint({
+          shown: emails.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "scheduled email",
+          detailCommand: "filter with --status or adjust --limit/--offset",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(emails, lines.join("\n"));
+      } catch (e) { handleError(e); }
     });
 
   scheduleCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action(() => {
-      try { serverOnly("emails schedule cancel"); } catch (e) { handleError(e); }
+    .action(async (id: string) => {
+      try {
+        // Awaited so a refusal from the store reaches `handleError` instead of surfacing as
+        // an unhandled rejection after the command has already reported success.
+        await cancelScheduled(id, (shortId) => `✓ Cancelled: ${shortId}`);
+      } catch (e) { handleError(e); }
     });
 
   scheduleCmd
@@ -124,12 +228,31 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     });
 
   // ─── DOCTOR ───────────────────────────────────────────────────────────────────
+  // src/lib/doctor.ts is now ONE implementation for both command sets: it reads its
+  // resource facts through the store seam, so reachability comes from a SERVED READ
+  // rather than from a configuration that parsed. Same implementation the MCP
+  // `run_doctor` tool runs, and the same one src/cli/commands/misc.local.ts imports.
+  //
+  // It no longer probes `/health` and `/ready` — the seam has no readiness operation
+  // and reaching those endpoints would need the deployment-mode module the seam exists
+  // to remove. The report says so in a `Store readiness` check rather than dropping the
+  // subject, so the description below no longer claims the probe either.
+  //
+  // `--live` stays UNREGISTERED here. The reason it was left off this arm has widened
+  // rather than gone: it means "validate the stored per-provider credentials against the
+  // provider's API", and the store seam redacts credential columns in BOTH stores, so
+  // nothing behind either command set can honour it now. `emails provider status` does.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics")
-    .option("--live", "Validate provider credentials with live provider API calls")
+    .description("Run system diagnostics (reads through the configured store). Always exits 0 — the report is the product; gate automation on the --json check statuses, not the exit code")
     .action(async () => {
-      try { serverOnly("emails doctor"); } catch (e) { handleError(e); }
+      try {
+        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
+        const checks = await runDiagnostics();
+        output(checks, formatDiagnostics(checks));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   doctorCmd

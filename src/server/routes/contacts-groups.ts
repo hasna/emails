@@ -1,19 +1,48 @@
 // API route handlers — contacts-groups.ts
-import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.local.js';
-import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.local.js';
-import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.local.js';
-import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.local.js';
-import { getEmailContent } from '../../db/email-content.local.js';
-import { getAnalytics } from '../../lib/analytics.local.js';
+import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
+import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
+import { getDatabase } from '../../db/database.js';
+import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.js';
+import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
+import { getEmailContent } from '../../db/email-content.js';
+import { getAnalytics } from '../../lib/analytics.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId, parseBody, queryInteger, queryPage } from './helpers.js';
 
 const EXPORT_DEFAULT_LIMIT = 1000;
 const EXPORT_MAX_LIMIT = 5000;
 
-function resolveGroupRef(raw: string): { id: string } | null {
+/**
+ * The stores the `/api/contacts`, `/api/groups` and `/api/templates` routes read and
+ * write through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and the neighbouring imports in this
+ * file are still local-SQLite modules reading the process-wide connection. When each
+ * of these families collapsed onto the store seam its exports stopped requiring a
+ * `Database` and started resolving the CONFIGURED store when given nothing — so passing
+ * nothing here would have silently repointed these routes at an operator's API on any
+ * installation configured for one. They therefore name the SQLite store bound to that
+ * same connection, exactly as the `/api/sequences` routes do
+ * (src/server/routes/inbound-sequences.ts). Built per request: the repositories are
+ * thin wrappers over the memoised connection. One binding per family, so each set of
+ * routes names its own store and no collapse leans on another's local alias.
+ */
+function localContactStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+function localGroupStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+function localTemplateStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+async function resolveGroupRef(raw: string): Promise<{ id: string } | null> {
   const ref = decodeURIComponent(raw);
-  const group = getGroupByName(ref);
+  const group = await getGroupByName(ref, localGroupStore());
   if (group) return group;
   const id = resolveId("groups", ref);
   return id ? { id } : null;
@@ -30,7 +59,9 @@ if (path === "/api/contacts" && method === "GET") {
       ...(suppressedParam !== null ? { suppressed: suppressedParam === "true" } : {}),
       ...queryPage(url, 100),
     };
-    return json(listContacts(opts));
+    // Reads the store seam (async). A table it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listContacts(opts, localContactStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -38,7 +69,7 @@ if (path === "/api/contacts" && method === "GET") {
 const contactSuppressMatch = path.match(/^\/api\/contacts\/([^/]+)\/suppress$/);
 if (contactSuppressMatch && method === "POST") {
   try {
-    suppressContact(decodeURIComponent(contactSuppressMatch[1]!));
+    await suppressContact(decodeURIComponent(contactSuppressMatch[1]!), localContactStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }
@@ -47,7 +78,7 @@ if (contactSuppressMatch && method === "POST") {
 const contactUnsuppressMatch = path.match(/^\/api\/contacts\/([^/]+)\/unsuppress$/);
 if (contactUnsuppressMatch && method === "POST") {
   try {
-    unsuppressContact(decodeURIComponent(contactUnsuppressMatch[1]!));
+    await unsuppressContact(decodeURIComponent(contactUnsuppressMatch[1]!), localContactStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }
@@ -57,7 +88,10 @@ if (contactUnsuppressMatch && method === "POST") {
 // GET /api/templates
 if (path === "/api/templates" && method === "GET") {
   try {
-    return json(listTemplateSummaries(undefined, queryPage(url, 100)));
+    // Reads the store seam (async). A library it could not enumerate to the end
+    // raises, and lands on `internalError` below rather than being served as a
+    // short page.
+    return json(await listTemplateSummaries(queryPage(url, 100), localTemplateStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -67,12 +101,12 @@ if (path === "/api/templates" && method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
     if (!body.subject_template) return badRequest("subject_template is required");
-    const template = createTemplate({
+    const template = await createTemplate({
       name: String(body.name),
       subject_template: String(body.subject_template),
       html_template: body.html_template as string | undefined,
       text_template: body.text_template as string | undefined,
-    });
+    }, localTemplateStore());
     return json(template, 201);
   } catch (e) { return internalError(e); }
 }
@@ -81,7 +115,7 @@ if (path === "/api/templates" && method === "POST") {
 const templateMatch = path.match(/^\/api\/templates\/([^/]+)$/);
 if (templateMatch && method === "GET") {
   try {
-    const template = getTemplate(decodeURIComponent(templateMatch[1]!));
+    const template = await getTemplate(decodeURIComponent(templateMatch[1]!), localTemplateStore());
     if (!template) return notFound("Template not found");
     return json(template);
   } catch (e) { return internalError(e); }
@@ -90,7 +124,7 @@ if (templateMatch && method === "GET") {
 // DELETE /api/templates/:id
 if (templateMatch && method === "DELETE") {
   try {
-    const deleted = deleteTemplate(decodeURIComponent(templateMatch[1]!));
+    const deleted = await deleteTemplate(decodeURIComponent(templateMatch[1]!), localTemplateStore());
     if (!deleted) return notFound("Template not found");
     return json({ ok: true });
   } catch (e) { return internalError(e); }
@@ -101,7 +135,9 @@ if (templateMatch && method === "DELETE") {
 // GET /api/groups
 if (path === "/api/groups" && method === "GET") {
   try {
-    return json(listGroups(undefined, queryPage(url, 100)));
+    // Reads the store seam (async). A group list it could not enumerate to the end
+    // raises, and lands on `internalError` below rather than being served short.
+    return json(await listGroups(queryPage(url, 100), localGroupStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -110,7 +146,7 @@ if (path === "/api/groups" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
-    const group = createGroup(String(body.name), body.description as string | undefined);
+    const group = await createGroup(String(body.name), body.description as string | undefined, localGroupStore());
     return json(group, 201);
   } catch (e) { return internalError(e); }
 }
@@ -119,20 +155,20 @@ if (path === "/api/groups" && method === "POST") {
 const groupMembersMatch = path.match(/^\/api\/groups\/([^/]+)\/members$/);
 if (groupMembersMatch && method === "GET") {
   try {
-    const group = resolveGroupRef(groupMembersMatch[1]!);
+    const group = await resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
-    return json(listMemberSummaries(group.id, undefined, queryPage(url, 100)));
+    return json(await listMemberSummaries(group.id, queryPage(url, 100), localGroupStore()));
   } catch (e) { return internalError(e); }
 }
 
 // POST /api/groups/:id/members
 if (groupMembersMatch && method === "POST") {
   try {
-    const group = resolveGroupRef(groupMembersMatch[1]!);
+    const group = await resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.email) return badRequest("email is required");
-    const member = addMember(group.id, String(body.email), body.name as string | undefined);
+    const member = await addMember(group.id, String(body.email), body.name as string | undefined, undefined, localGroupStore());
     return json(member, 201);
   } catch (e) { return internalError(e); }
 }
@@ -141,9 +177,9 @@ if (groupMembersMatch && method === "POST") {
 const groupMemberDeleteMatch = path.match(/^\/api\/groups\/([^/]+)\/members\/([^/]+)$/);
 if (groupMemberDeleteMatch && method === "GET") {
   try {
-    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
+    const group = await resolveGroupRef(groupMemberDeleteMatch[1]!);
     if (!group) return notFound("Group not found");
-    const member = getMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
+    const member = await getMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!), localGroupStore());
     if (!member) return notFound("Member not found");
     return json(member);
   } catch (e) { return internalError(e); }
@@ -151,9 +187,9 @@ if (groupMemberDeleteMatch && method === "GET") {
 
 if (groupMemberDeleteMatch && method === "DELETE") {
   try {
-    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
+    const group = await resolveGroupRef(groupMemberDeleteMatch[1]!);
     if (!group) return notFound("Group not found");
-    const removed = removeMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
+    const removed = await removeMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!), localGroupStore());
     if (!removed) return notFound("Member not found");
     return json({ ok: true });
   } catch (e) { return internalError(e); }
@@ -163,9 +199,9 @@ if (groupMemberDeleteMatch && method === "DELETE") {
 const groupMatch = path.match(/^\/api\/groups\/([^/]+)$/);
 if (groupMatch && method === "DELETE") {
   try {
-    const group = resolveGroupRef(groupMatch[1]!);
+    const group = await resolveGroupRef(groupMatch[1]!);
     if (!group) return notFound("Group not found");
-    deleteGroup(group.id);
+    await deleteGroup(group.id, localGroupStore());
     return json({ ok: true });
   } catch (e) { return internalError(e); }
 }
@@ -180,7 +216,9 @@ if (path === "/api/scheduled" && method === "GET") {
       ...(statusParam ? { status: statusParam } : {}),
       ...queryPage(url, 100),
     };
-    return json(listScheduledEmailSummaries(opts));
+    // Reads the store seam (async). A schedule it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listScheduledEmailSummaries(opts));
   } catch (e) { return internalError(e); }
 }
 
@@ -190,7 +228,7 @@ if (scheduledMatch && method === "DELETE") {
   const id = resolveId("scheduled_emails", scheduledMatch[1]!);
   if (!id) return notFound();
   try {
-    const cancelled = cancelScheduledEmail(id);
+    const cancelled = await cancelScheduledEmail(id);
     if (!cancelled) return badRequest("Cannot cancel email (may already be sent or cancelled)");
     return json({ ok: true });
   } catch (e) { return internalError(e); }
@@ -203,7 +241,18 @@ if (path === "/api/analytics" && method === "GET") {
   try {
     const period = url.searchParams.get("period") ?? "30d";
     const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    return json(getAnalytics(resolvedId, period));
+    // A `provider_id` is REFUSED rather than ignored: the store seam cannot scope
+    // messages to a provider, so three of the four sections would cover every provider
+    // while the response claimed one. The refusal is a 400, not a 500, because the
+    // request is the thing that is wrong.
+    if (resolvedId) {
+      return badRequest(
+        "provider_id is not supported: the store seam cannot scope messages to a provider, so a " +
+          "provider-scoped report would cover every provider in its volume, recipient and hour " +
+          "sections. Omit provider_id.",
+      );
+    }
+    return json(await getAnalytics(undefined, period));
   } catch (e) { return internalError(e); }
 }
 
@@ -215,7 +264,12 @@ if (emailContentMatch && method === "GET") {
   const id = resolveId("emails", emailContentMatch[1]!);
   if (!id) return notFound();
   try {
-    const content = getEmailContent(id);
+    // NULL NOW MEANS "NO SUCH MESSAGE" AND ONLY THAT. It used to also mean "the message is
+    // here but carries no body row", which answered 404 for a message this route had just
+    // resolved an id for. A message with an empty body is now a 200 whose html and text are
+    // null; a store that REFUSED raises and is answered by `internalError` below, because a
+    // refusal is not a not-found.
+    const content = await getEmailContent(id);
     if (!content) return notFound("Email content not found");
     return json(content);
   } catch (e) { return internalError(e); }
@@ -235,11 +289,11 @@ if (path === "/api/export/emails" && method === "GET") {
     const offset = queryInteger(url, "offset", 0, { min: 0 });
     const filters = { provider_id: providerId, from_address: fromAddress, since, until, limit, offset };
     if (format === "csv") {
-      return new Response(exportEmailsCsv(filters), {
+      return new Response(await exportEmailsCsv(filters), {
         headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
-    return new Response(exportEmailsJson(filters), {
+    return new Response(await exportEmailsJson(filters), {
       headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }
@@ -256,11 +310,11 @@ if (path === "/api/export/events" && method === "GET") {
     const offset = queryInteger(url, "offset", 0, { min: 0 });
     const filters = { provider_id: providerId, since, until, limit, offset };
     if (format === "csv") {
-      return new Response(exportEventsCsv(filters), {
+      return new Response(await exportEventsCsv(filters), {
         headers: { "Content-Type": "text/csv", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
-    return new Response(exportEventsJson(filters), {
+    return new Response(await exportEventsJson(filters), {
       headers: { "Content-Type": "application/json", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }

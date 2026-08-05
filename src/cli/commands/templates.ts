@@ -19,7 +19,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--text <text>", "Inline text template")
     .option("--html-file <path>", "Read HTML template from file")
     .option("--text-file <path>", "Read text template from file")
-    .action((name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
+    .action(async (name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
       try {
         let htmlTemplate = opts.html;
         let textTemplate = opts.text;
@@ -31,13 +31,15 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           textTemplate = readFileSync(opts.textFile, "utf-8");
         }
 
-        const template = createTemplate({
+        // The collapsed templates family is async and resolves its store from
+        // storage configuration; a duplicate name is the store's own refusal.
+        const template = await createTemplate({
           name,
           subject_template: opts.subject,
           html_template: htmlTemplate,
           text_template: textTemplate,
         });
-        console.log(chalk.green(`✓ Template created: ${template.name} (${template.id.slice(0, 8)})`));
+        output(template, chalk.green(`✓ Template created: ${template.name} (${template.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
       }
@@ -49,10 +51,13 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--limit <n>", "Maximum templates to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of templates to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const templates = listTemplateSummaries(page);
+        // Enumerates the whole library and windows locally, so the page shown is the
+        // page that exists — a listing it could not finish is a refusal, not a short
+        // answer.
+        const templates = await listTemplateSummaries(page);
         if (templates.length === 0) {
           output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
           return;
@@ -81,21 +86,25 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("show <name>")
     .description("Show template details")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const template = getTemplate(name);
+        const template = await getTemplate(name);
         if (!template) handleError(new Error(`Template not found: ${name}`));
-        console.log(chalk.bold(`\nTemplate: ${template!.name}`));
-        console.log(`  ID:      ${template!.id}`);
-        console.log(`  Subject: ${template!.subject_template}`);
+        // output(row, prose) rather than console.log prose: under --json this
+        // command emitted display lines wrapped as {"output":[...]}, forcing
+        // consumers to screen-scrape the subject/body (task 15908bba).
+        const lines = [chalk.bold(`\nTemplate: ${template!.name}`)];
+        lines.push(`  ID:      ${template!.id}`);
+        lines.push(`  Subject: ${template!.subject_template}`);
         if (template!.html_template) {
-          console.log(`  HTML:    ${truncate(template!.html_template, 60)}`);
+          lines.push(`  HTML:    ${truncate(template!.html_template, 60)}`);
         }
         if (template!.text_template) {
-          console.log(`  Text:    ${truncate(template!.text_template, 60)}`);
+          lines.push(`  Text:    ${truncate(template!.text_template, 60)}`);
         }
-        console.log(`  Created: ${template!.created_at}`);
-        console.log();
+        lines.push(`  Created: ${template!.created_at}`);
+        lines.push("");
+        output(template, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -104,51 +113,64 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("remove <name>")
     .description("Remove a template")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const deleted = deleteTemplate(name);
+        const deleted = await deleteTemplate(name);
         if (!deleted) handleError(new Error(`Template not found: ${name}`));
-        console.log(chalk.green(`✓ Template removed: ${name}`));
+        output({ removed: true, name }, chalk.green(`✓ Template removed: ${name}`));
       } catch (e) {
         handleError(e);
       }
     });
 
   // ─── PREVIEW ─────────────────────────────────────────────────────────────────
-  program.command("preview <template-name>").description("Preview a template with sample variables")
+  // The description is EXACT about placeholders: a `{{var}}` with no value in
+  // `--vars` stays raw in the preview rather than being replaced with an invented
+  // sample. That passthrough is pinned contract (src/db/templates.ts, divergence 6) —
+  // the raw placeholder shows the operator which variables the template still needs,
+  // where a fabricated sample would hide them. The command used to claim "sample
+  // variables" it never supplied; the claim was fixed, not the behaviour.
+  program.command("preview <template-name>")
+    .description("Preview a template, rendering {{var}} placeholders from --vars (a placeholder without a value stays as {{var}})")
     .option("--vars <json>", "Template variables as JSON string")
     .option("--open", "Open rendered HTML in browser")
-    .action((templateName: string, opts: { vars?: string; open?: boolean }) => {
+    .action(async (templateName: string, opts: { vars?: string; open?: boolean }) => {
       try {
-        const template = getTemplate(templateName);
+        const template = await getTemplate(templateName);
         if (!template) handleError(new Error(`Template not found: ${templateName}`));
         const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
 
+        // Rendered ONCE into a structured document AND the display lines, so
+        // --json consumers get the rendered fields instead of prose wrapped as
+        // {"output":[...]} (task 15908bba).
         const renderedSubject = renderTemplate(template!.subject_template, vars);
-        console.log(chalk.bold("\nSubject:"));
-        console.log(`  ${renderedSubject}`);
+        const renderedHtml = template!.html_template ? renderTemplate(template!.html_template, vars) : null;
+        const renderedText = template!.text_template ? renderTemplate(template!.text_template, vars) : null;
+        const lines = [chalk.bold("\nSubject:"), `  ${renderedSubject}`];
 
-        if (template!.html_template) {
-          const renderedHtml = renderTemplate(template!.html_template, vars);
-          console.log(chalk.bold("\nHTML Body:"));
-          console.log(renderedHtml);
+        if (renderedHtml !== null) {
+          lines.push(chalk.bold("\nHTML Body:"));
+          lines.push(renderedHtml);
 
           if (opts.open) {
             const tmpPath = pathJoin(tmpdir(), `emails-preview-${templateName}.html`);
             writeFileSync(tmpPath, renderedHtml, "utf-8");
             const opened = openLocalTarget(tmpPath);
             const message = opened.ok ? `Opened preview in browser: ${tmpPath}` : `Saved preview: ${tmpPath}`;
-            console.log(chalk.dim(`\n${message}`));
+            lines.push(chalk.dim(`\n${message}`));
           }
         }
 
-        if (template!.text_template) {
-          const renderedText = renderTemplate(template!.text_template, vars);
-          console.log(chalk.bold("\nText Body:"));
-          console.log(renderedText);
+        if (renderedText !== null) {
+          lines.push(chalk.bold("\nText Body:"));
+          lines.push(renderedText);
         }
 
-        console.log();
+        lines.push("");
+        output(
+          { template: template!.name, subject: renderedSubject, html: renderedHtml, text: renderedText },
+          lines.join("\n"),
+        );
       } catch (e) { handleError(e); }
     });
 }

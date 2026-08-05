@@ -29,14 +29,6 @@ async function assertSelfHostedApiRouteReady(toolName: string): Promise<void> {
   }
 }
 
-async function assertSequenceSubledgerAllowed(toolName: string, reason: string): Promise<void> {
-  if (!(await isSelfHostedRuntimeMode())) return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
-      "Use the self-hosted Emails API for server-owned sequence state, or set EMAILS_MODE=local only for an explicit local sequence ledger.",
-  );
-}
-
 export function registerSequenceTools(server: McpServer): void {
 // ─── SEQUENCES ────────────────────────────────────────────────────────────────
 
@@ -51,7 +43,7 @@ export function registerSequenceTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("list_sequences");
       const { listSequences } = await import("../../db/sequences.js");
-      const sequences = listSequences({ limit: limit ?? 100, offset: offset ?? 0 });
+      const sequences = await listSequences({ limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(sequences, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -70,7 +62,7 @@ export function registerSequenceTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("create_sequence");
       const { createSequence } = await import("../../db/sequences.js");
-      const sequence = createSequence({ name, description });
+      const sequence = await createSequence({ name, description });
       return { content: [{ type: "text", text: JSON.stringify(sequence, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -78,6 +70,12 @@ export function registerSequenceTools(server: McpServer): void {
   },
 );
 
+  // Sequence steps and enrollments are repository resources in every configuration
+  // (local SQLite, `/v1/sequence-steps` and `/v1/sequence-enrollments` on the
+  // self-hosted server), and src/db/sequences.remote.ts is a complete client for
+  // both. The four step/enrollment tools below therefore carry no mode guard — they
+  // are the MCP twins of `emails sequence step add|enroll|unenroll|enrollments`,
+  // which already perform the same operations over the same route.
   server.tool(
   "add_sequence_step",
   "Add a step to an email sequence",
@@ -91,11 +89,10 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, step_number, delay_hours, template_name, from_address, subject_override }) => {
     try {
-      await assertSequenceSubledgerAllowed("add_sequence_step", "it writes local sequence step rows");
       const { getSequence, addStep } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const step = addStep({
+      const step = await addStep({
         sequence_id: seq.id,
         step_number,
         delay_hours,
@@ -120,11 +117,10 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email, provider_id }) => {
     try {
-      await assertSequenceSubledgerAllowed("enroll_contact", "it writes local sequence enrollment rows");
       const { getSequence, enroll } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const enrollment = enroll({ sequence_id: seq.id, contact_email, provider_id });
+      const enrollment = await enroll({ sequence_id: seq.id, contact_email, provider_id });
       return { content: [{ type: "text", text: JSON.stringify(enrollment, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -141,11 +137,10 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email }) => {
     try {
-      await assertSequenceSubledgerAllowed("unenroll_contact", "it writes local sequence enrollment rows");
       const { getSequence, unenroll } = await import("../../db/sequences.js");
-      const seq = getSequence(sequence_id);
+      const seq = await getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
-      const removed = unenroll(seq.id, contact_email);
+      const removed = await unenroll(seq.id, contact_email);
       return { content: [{ type: "text", text: removed ? "Contact unenrolled" : "Contact was not actively enrolled" }] };
     } catch (e) {
       return toolError(e);
@@ -164,15 +159,14 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, status, limit, offset }) => {
     try {
-      await assertSequenceSubledgerAllowed("list_enrollments", "it reads local sequence enrollment rows");
       const { getSequence, listEnrollments } = await import("../../db/sequences.js");
       let resolvedSequenceId: string | undefined;
       if (sequence_id) {
-        const seq = getSequence(sequence_id);
+        const seq = await getSequence(sequence_id);
         if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
         resolvedSequenceId = seq.id;
       }
-      const enrollments = listEnrollments({
+      const enrollments = await listEnrollments({
         sequence_id: resolvedSequenceId,
         status,
         limit: limit ?? 100,
@@ -195,16 +189,30 @@ export function registerSequenceTools(server: McpServer): void {
     limit: z.number().int().positive().max(MAX_MCP_REPLY_LIMIT).optional().describe("Maximum replies to return (default 20, max 100)"),
     offset: z.number().int().min(0).optional().describe("Number of replies to skip"),
   },
-  async () => {
-    // Reply tracking reads local inbound reply tables; there is no API-backed
-    // replies implementation in the self-hosted client (rule 6). Fail loud.
-    return {
-      content: [{
-        type: "text",
-        text: "Error: list_replies is not available in the self-hosted client; inbound reply tracking runs on the self-hosted server.",
-      }],
-      isError: true,
-    };
+  async ({ email_id, limit, offset }) => {
+    try {
+      // This refused unconditionally, in EVERY mode, claiming "inbound reply
+      // tracking runs on the self-hosted server" and that no API-backed
+      // implementation existed. Both halves were false: src/db/inbound.ts routes
+      // `listReplySummaries`/`getReplyCount` to inbound.remote.ts, which serves them
+      // from the `/v1/messages` list+get routes, and the CLI twin
+      // `emails replies <id>` (src/cli/commands/email-log.remote.ts) has always run
+      // in self_hosted mode over the same data. A refusal in front of a working
+      // route in BOTH modes is strictly worse than the mode-conditional guards —
+      // those at least told the truth in local mode.
+      const { listReplySummaries, getReplyCount } = await import("../../db/inbound.js");
+      const effectiveLimit = limit ?? 20;
+      const effectiveOffset = offset ?? 0;
+      const replies = listReplySummaries(email_id, { limit: effectiveLimit, offset: effectiveOffset });
+      return { content: [{ type: "text", text: JSON.stringify({
+        replies,
+        total: getReplyCount(email_id),
+        limit: effectiveLimit,
+        offset: effectiveOffset,
+      }, null, 2) }] };
+    } catch (e) {
+      return toolError(e);
+    }
   },
 );
 

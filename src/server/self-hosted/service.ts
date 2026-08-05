@@ -7,7 +7,7 @@
 // All data operations hit the operator-owned Postgres via the
 // store, which wraps the product-owned storage utilities' typed client.
 
-import type { ApiKeyVerifier } from "@hasna/contracts/auth";
+import { hasAllScopes, type ApiKeyVerifier } from "@hasna/contracts/auth";
 import { createHash } from "node:crypto";
 import { migrationAcceptsChecksum, type TypedQueryClient, type Migration } from "../../storage-kit/index.js";
 import { checkHealth } from "../../storage-kit/index.js";
@@ -25,8 +25,10 @@ import {
   decodeAttachmentsCursor,
   MAX_ATTACHMENT_BATCH_IDS,
   MESSAGE_FOLDERS,
+  policyDenialOf,
   type MessageFolder,
   type TenantScopedStore,
+  type MessageInput,
   type MessageListRecord,
   type MessageRecord,
   type DomainProvisioningPatch,
@@ -59,8 +61,10 @@ import {
   isTenantOperator,
   resolveRequestContext,
   handleAuthRoutes,
+  type IdpAuthAuditEvent,
   type RequestContext,
 } from "./auth/service.js";
+import type { IdpTokenAuthenticator } from "./auth/idp-token.js";
 import type { AuthStore } from "./auth/store.js";
 import type { RateLimiter } from "./auth/rate-limit.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
@@ -135,6 +139,10 @@ export interface SelfHostedServiceDeps {
   rateLimiter: RateLimiter;
   mailer: AuthMailerConfig;
   env?: NodeJS.ProcessEnv;
+  /** Idp-token verifier (ADR-0001 Phase 1); absent ⇒ class refused, typed. */
+  idpAuthenticator?: IdpTokenAuthenticator | null;
+  /** Audit hook for idp auth decisions; unset ⇒ silent (tests). */
+  idpAudit?: (event: IdpAuthAuditEvent) => void;
   /** Test/embedding seam; production falls back to the canonical S3 adapter. */
   attachmentRepair?: {
     processPage(
@@ -214,12 +222,17 @@ function publicMessageListItem(record: MessageRecord | MessageListRecord): Messa
     body_html: _bodyHtml,
     idempotency_key: _key,
     send_payload_hash: _hash,
-    headers: _headers,
+    headers,
     attachments,
     snippet: providedSnippet,
     attachment_count: providedAttachmentCount,
+    policy_denial: providedPolicyDenial,
     ...safe
-  } = record as MessageRecord & { snippet?: string | null; attachment_count?: number };
+  } = record as MessageRecord & {
+    snippet?: string | null;
+    attachment_count?: number;
+    policy_denial?: string | null;
+  };
   const rawSnippet = typeof providedSnippet === "string"
     ? providedSnippet
     : typeof bodyText === "string"
@@ -232,7 +245,16 @@ function publicMessageListItem(record: MessageRecord | MessageListRecord): Messa
       : Array.isArray(attachments)
         ? attachments.length
         : 0;
-  return { ...safe, snippet: snippet || null, attachment_count } as MessageListRecord;
+  // `headers` still never reaches a list item — but the ONE field inside it that a
+  // list consumer cannot live without does. A row projected from a full
+  // MessageRecord has no policy_denial column, so derive it from the headers we are
+  // about to drop; a row from the list query already carries it. Without this,
+  // stripping headers is what made `blocked` unexplainable on every list path
+  // (2026-07-27).
+  const policy_denial = providedPolicyDenial !== undefined
+    ? policyDenialOf(providedPolicyDenial)
+    : policyDenialOf((headers as Record<string, unknown> | undefined)?.["policy_denial"]);
+  return { ...safe, snippet: snippet || null, attachment_count, policy_denial } as MessageListRecord;
 }
 
 function sendPayloadHash(value: Record<string, unknown>): string {
@@ -502,6 +524,98 @@ function asArray(value: unknown): unknown[] | undefined {
 /** Optional string|null passthrough: undefined stays undefined. */
 function asOptStringOrNull(value: unknown): string | null | undefined {
   return value === undefined ? undefined : (value as string | null);
+}
+
+/**
+ * The four message columns only the send path may write.
+ *
+ * They are the send ledger: the idempotency fence, the payload hash the fence is
+ * computed over, and the claim state and lease instant that make a send exactly-once.
+ * A row carrying an `idempotency_key` is also undeletable
+ * (`SendIntentDeletionForbiddenError`), so accepting one on a plain write would strand
+ * the row as well as fabricate a fence.
+ */
+export const SEND_LEDGER_FIELDS = [
+  "idempotency_key",
+  "send_payload_hash",
+  "send_state",
+  "send_started_at",
+] as const;
+
+/**
+ * The only two directions a message row may carry.
+ *
+ * Validated rather than passed through, because until the record route existed EVERY
+ * write path pinned this: `POST /v1/messages` answers 409 for anything that is not
+ * exactly `inbound`, `reserveSendIntent` forces `outbound`, and the webhook sinks set
+ * `inbound` themselves. A route that accepts the value from a caller is the first one
+ * that can store a typo, and a typo is not merely cosmetic: every reader classifies a
+ * row as inbound with `lower(coalesce(direction,'')) <> 'outbound'`, while the outbound
+ * daily-quota query compares `direction = 'outbound'` exactly — so `"outbund"` would be
+ * filed as received mail AND excluded from the sender's quota, and an upsert would write
+ * it over a good row.
+ */
+const MESSAGE_DIRECTIONS = ["inbound", "outbound"] as const;
+
+/**
+ * Map a request body onto a message write, or name the field that is missing.
+ *
+ * ONE parser for both write routes (`POST /v1/messages` and `POST /v1/messages/record`)
+ * so they cannot drift on how a field is spelled, how a direction is inferred, or what
+ * a status defaults to. The routes differ in exactly one decision — whether a
+ * non-inbound row may be recorded without being dispatched — and that decision stays
+ * at the call site rather than being smuggled in here.
+ */
+function messageWriteInput(body: Record<string, unknown>): { input: MessageInput } | { error: string } {
+  const from = String(body.from ?? body.from_addr ?? "").trim();
+  if (!from) return { error: "from is required" };
+  const rawTo = body.to ?? body.to_addrs;
+  const to = Array.isArray(rawTo)
+    ? rawTo.map((v) => String(v))
+    : typeof rawTo === "string" && rawTo.trim()
+      ? [rawTo.trim()]
+      : [];
+  if (to.length === 0) return { error: "to is required" };
+
+  // Direction defaults to outbound in the store; any inbound signal marks it inbound so
+  // the same body records both sent and received mail.
+  const receivedAt = asOptStringOrNull(body.received_at);
+  const directionRaw = body.direction === undefined ? undefined : String(body.direction);
+  if (directionRaw !== undefined && !(MESSAGE_DIRECTIONS as readonly string[]).includes(directionRaw)) {
+    return { error: `direction must be one of ${MESSAGE_DIRECTIONS.join(", ")}` };
+  }
+  const direction = directionRaw ?? (receivedAt || body.message_id || body.in_reply_to ? "inbound" : undefined);
+
+  // An EMPTY source_id is not a fence and must not be stored as one. Left as `""` it
+  // lands in the column, where the partial unique index `(tenant_id, source_id) WHERE
+  // source_id IS NOT NULL` makes the SECOND such write a unique violation — a 500 for a
+  // caller who asked for a plain create. `undefined` stores NULL, which is what "no
+  // fence" means, and matches the client's own guard.
+  const sourceId = body.source_id === undefined ? undefined : String(body.source_id) || undefined;
+
+  return {
+    input: {
+      from_addr: from,
+      to_addrs: to,
+      cc_addrs:
+        body.cc === undefined && body.cc_addrs === undefined ? undefined : asStringArray(body.cc ?? body.cc_addrs),
+      subject: asOptStringOrNull(body.subject),
+      body_text: body.text === undefined ? asOptStringOrNull(body.body_text) : asOptStringOrNull(body.text),
+      body_html: body.html === undefined ? asOptStringOrNull(body.body_html) : asOptStringOrNull(body.html),
+      status: body.status ? String(body.status) : undefined,
+      provider_message_id: asOptStringOrNull(body.provider_message_id),
+      direction,
+      message_id: asOptStringOrNull(body.message_id),
+      in_reply_to: asOptStringOrNull(body.in_reply_to),
+      received_at: receivedAt,
+      is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
+      is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
+      labels: body.labels === undefined ? undefined : asStringArray(body.labels),
+      headers: asObject(body.headers),
+      attachments: asArray(body.attachments),
+      source_id: sourceId,
+    },
+  };
 }
 
 /** Coerce a body value to string|null (null preserved) for a provisioning column. */
@@ -1008,10 +1122,14 @@ export async function handleSelfHostedRequest(
           providerMessageId: providerMessageId || null,
           evidence,
           // Who asserted the outcome — an opaque principal reference, never a
-          // credential. `kid` is the API key id, not the key material.
+          // credential. `kid` is the API key id, not the key material; `sub`
+          // is the IdP principal id. Naming the actual class matters: the
+          // fallthrough used to file IdP principals as 'apikey:unknown'.
           resolvedBy: auth.ctx.principalType === "user"
             ? `user:${auth.ctx.userId ?? "unknown"}`
-            : `apikey:${auth.ctx.kid ?? "unknown"}`,
+            : auth.ctx.principalType === "idp"
+              ? `idp:${auth.ctx.sub ?? "unknown"}`
+              : `apikey:${auth.ctx.kid ?? "unknown"}`,
         });
       } catch (error) {
         return json(400, { error: error instanceof Error ? error.message : "reconciliation rejected" });
@@ -1227,8 +1345,16 @@ export async function handleSelfHostedRequest(
         from,
         recipients: [...to, ...cc, ...bcc],
         sendKeyToken: sendKeyToken || null,
+        // Tenant-wide send authority: API keys carry it structurally, tenant
+        // owner/admin sessions carry it by role, and an IdP-federated principal
+        // carries it when its (already tenant-scoped) grant includes the
+        // ordinary write scope — IdP principals have no role and no path to a
+        // send key (minting is operator-gated), so omitting the class here
+        // made every federated send an unfixable 403 send_key_required.
         allowTenantWideSend:
-          auth.ctx.principalType === "apikey" || auth.ctx.role === "owner" || auth.ctx.role === "admin",
+          auth.ctx.principalType === "apikey" ||
+          (auth.ctx.principalType === "idp" && hasAllScopes(auth.ctx.scopes, ["emails:write"])) ||
+          auth.ctx.role === "owner" || auth.ctx.role === "admin",
       });
       if (!policy.allowed) {
         const blocked = await auth.store.markSendBlocked(reserved.record.id, policy.code).catch(() => null);
@@ -1416,40 +1542,23 @@ export async function handleSelfHostedRequest(
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
         const body = await readJsonBody(req);
-        const from = String(body.from ?? body.from_addr ?? "").trim();
-        if (!from) return json(400, { error: "from is required" });
-        const rawTo = body.to ?? body.to_addrs;
-        const to = Array.isArray(rawTo) ? rawTo.map((v) => String(v)) : typeof rawTo === "string" && rawTo.trim() ? [rawTo.trim()] : [];
-        if (to.length === 0) return json(400, { error: "to is required" });
+        const parsed = messageWriteInput(body);
+        if ("error" in parsed) return json(400, { error: parsed.error });
+        const input = parsed.input;
 
-        // Direction defaults to outbound; any inbound signal marks it inbound so
-        // the same POST route records both sent and received mail.
-        const receivedAt = asOptStringOrNull(body.received_at);
-        const directionRaw = body.direction === undefined ? undefined : String(body.direction);
-        const direction =
-          directionRaw ?? (receivedAt || body.message_id || body.in_reply_to ? "inbound" : undefined);
-
-        const input = {
-          from_addr: from,
-          to_addrs: to,
-          cc_addrs: body.cc === undefined && body.cc_addrs === undefined ? undefined : asStringArray(body.cc ?? body.cc_addrs),
-          subject: asOptStringOrNull(body.subject),
-          body_text: body.text === undefined ? asOptStringOrNull(body.body_text) : asOptStringOrNull(body.text),
-          body_html: body.html === undefined ? asOptStringOrNull(body.body_html) : asOptStringOrNull(body.html),
-          status: body.status ? String(body.status) : undefined,
-          provider_message_id: asOptStringOrNull(body.provider_message_id),
-          direction,
-          message_id: asOptStringOrNull(body.message_id),
-          in_reply_to: asOptStringOrNull(body.in_reply_to),
-          received_at: receivedAt,
-          is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
-          is_starred: typeof body.is_starred === "boolean" ? body.is_starred : undefined,
-          labels: body.labels === undefined ? undefined : asStringArray(body.labels),
-          headers: asObject(body.headers),
-          attachments: asArray(body.attachments),
-          source_id: body.source_id === undefined ? undefined : String(body.source_id),
-        };
-
+        // KNOWN AND DELIBERATELY UNCHANGED: this route still ACCEPTS AND DROPS the four
+        // send-ledger fields, where /v1/messages/record refuses them. Now that both share
+        // `messageWriteInput` the refusal is one line from covering both, and it should —
+        // "accepted and dropped" is the exact failure this program exists to delete. It is
+        // not done here because it is a contract change to a route that has shipped for
+        // some time, which belongs in its own change with its own 400 declared on the
+        // published document, not as a side effect of adding a different route.
+        //
+        // THE INBOUND-ONLY GUARD, and it stays. This route may not create an outbound
+        // row, because an outbound row that never went through the send path has no
+        // provider invocation behind it and this route cannot make one. A caller that
+        // means "record a row without sending it" has POST /v1/messages/record;
+        // loosening this condition instead would make the send path bypassable.
         if (input.direction !== "inbound") {
           return json(409, { error: "outbound messages must be sent through POST /v1/messages/send" });
         }
@@ -1464,6 +1573,55 @@ export async function handleSelfHostedRequest(
         return json(201, { message: publicMessage(created) });
       }
       return json(405, { error: "method not allowed" });
+    }
+
+    // /v1/messages/record — RECORD a message row in either direction WITHOUT
+    // dispatching it.
+    //
+    // THE GAP THIS CLOSES. Until this route existed there was no way to record an
+    // outbound message at all: POST /v1/messages answers 409 for anything not inbound,
+    // and POST /v1/messages/send mails what it records. So a caller importing mail that
+    // was already sent elsewhere, reconciling a provider's log, or seeding a mailbox had
+    // no surface — and the store seam's `createMessage`/`upsertMessage` are UNGATED, so
+    // no capability could be declared false and no refusal was legal. An operation with
+    // neither a route nor a legal refusal is the one shape the seam has no answer for.
+    //
+    // IT IS NOT A WAY AROUND THE SEND GUARD, and the two properties that keep it honest
+    // are here rather than in a comment on the guard:
+    //   * it never touches `deps.sender`, so nothing is transmitted;
+    //   * it REFUSES all four send-ledger fields, so a row recorded here can never carry
+    //     the fence a real send produces, and can never be mistaken for one.
+    // POST /v1/messages keeps its 409 unchanged.
+    //
+    // Registered BEFORE the `/v1/messages/{id}` matcher below, which would otherwise
+    // read "record" as an abbreviated message id.
+    if (path === "/v1/messages/record") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, write);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      // Refused, not dropped. A caller who sets one of these and reads a 201 believes a
+      // fence was recorded when none was — and a row carrying an idempotency_key cannot
+      // be deleted, so a dropped field would be the kinder half of the outcome.
+      const ledgerFields = SEND_LEDGER_FIELDS.filter((field) => field in body);
+      if (ledgerFields.length > 0) {
+        return json(400, {
+          error: `${ledgerFields.join(", ")} may only be written by POST /v1/messages/send`,
+          reason: "send_ledger_field",
+        });
+      }
+      const parsed = messageWriteInput(body);
+      if ("error" in parsed) return json(400, { error: parsed.error });
+      // TENANCY: `auth.store` is already bound to the caller's tenant and stamps
+      // `tenant_id` on the insert from its own scope — never from the body, and the
+      // upsert's conflict target is `(tenant_id, source_id)`, so a replay can never
+      // match another tenant's row.
+      if (parsed.input.source_id) {
+        const { record, inserted } = await auth.store.upsertMessage(parsed.input);
+        return json(inserted ? 201 : 200, { message: publicMessage(record) });
+      }
+      const created = await auth.store.createMessage(parsed.input);
+      return json(201, { message: publicMessage(created) });
     }
 
     const attachmentMatch = path.match(/^\/v1\/messages\/([^/]+)\/attachments\/(\d+)$/);

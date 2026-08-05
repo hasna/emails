@@ -17,18 +17,19 @@ import {
   addInboundLabelSummary, removeInboundLabelSummary,
   getInboundEmail,
 } from "../../db/inbound.local.js";
-import { getEmail } from "../../db/emails.local.js";
-import { getEmailContent } from "../../db/email-content.local.js";
+import { getEmail } from "../../db/emails.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, getThreadMessages, setInboundThreadId } from "../../db/threads.local.js";
 import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.local.js";
 import { listDomains } from "../../db/domains.local.js";
 import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains } from "../../db/addresses.local.js";
-import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.local.js";
+import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
+import { createSqliteEmailStore } from "../../store-sqlite/index.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
 import { resolveEmailsMode } from "../../lib/mode.js";
-import { listS3Sources } from "../../lib/s3-sync.local.js";
+import { listS3Sources } from "../../lib/s3-sync.js";
 import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.local.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";
@@ -860,7 +861,14 @@ function fallbackMessageSummary(subject: string, text: string | null | undefined
   return `About ${topic}.`;
 }
 
-export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | null {
+/**
+ * ASYNC BECAUSE THE CONTENT FAMILY IS. `src/db/email-content.ts` reads through the store
+ * seam, whose operations are all promises, and this function is the only reader of it here.
+ * The `MailDataSource` contract this feeds already declared `Promise<MessageBody | null>`
+ * (src/lib/mail-data-source.ts) and every caller outside this module already awaited it, so
+ * the change is invisible past this file.
+ */
+export async function getMessageBody(msg: TuiMessage, db?: Database): Promise<MessageBody | null> {
   const d = db || getDatabase();
   if (msg.kind === "inbound") {
     const e = d.query(
@@ -909,9 +917,20 @@ export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | nu
       attachments: mergeAttachments(parseJsonArray(e.attachments_json), parseJsonArray(e.attachment_paths)),
     };
   }
-  const e = getEmail(msg.id, d);
+  const e = await getEmail(msg.id);
   if (!e) return null;
-  const content = getEmailContent(e.id, d);
+  // NO DATABASE HANDLE. The content family takes a store and resolves it from
+  // configuration; the handle used to select an arm, and passing one here would have
+  // reached a mode branch rather than a database. A refusal from the store RAISES out of
+  // this function — it is not rendered as a message with no body.
+  //
+  // CONSEQUENCE, STATED BECAUSE IT IS A REAL SEAM IN THIS FUNCTION: `db` now governs only PART
+  // of what this function reads. The inbound branch above queries the handle it was given; this
+  // sent branch reads whichever store the installation configured. No production caller passes a
+  // non-default handle (`src/lib/mail-data-source.ts` passes none), so today the two are the same
+  // database — but a caller supplying a SECOND one would get its bodies from the first. The fix
+  // is for the whole function to take a store, which belongs to this module's own collapse.
+  const content = await getEmailContent(e.id);
   const triage = d.query(
     `SELECT summary
        FROM email_triage
@@ -986,7 +1005,7 @@ export interface ConversationBodyOptions {
 }
 
 /** The full conversation with bodies, oldest first. Falls back to the selected message. */
-export function getConversationBodies(msg: TuiMessage, db?: Database, opts?: ConversationBodyOptions): TuiThreadBody[] {
+export async function getConversationBodies(msg: TuiMessage, db?: Database, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
   const d = db || getDatabase();
   const conversation = getConversation(msg, d);
   const allItems = conversation.length > 0
@@ -1001,10 +1020,15 @@ export function getConversationBodies(msg: TuiMessage, db?: Database, opts?: Con
     }];
   const limit = opts?.limit ? positiveInt(opts.limit, 100) : undefined;
   const items = limit && allItems.length > limit ? allItems.slice(-limit) : allItems;
-  return items.map((item) => ({
-    item,
-    body: getMessageBody(threadItemToMessage(item, msg), d),
-  }));
+  // SEQUENTIAL, not `Promise.all`. Every read goes to the same store, the sent-message
+  // branch below it is a SQLite query on one shared connection, and a conversation is
+  // bounded by `opts.limit`; fanning the reads out would buy nothing here and would make an
+  // ordering bug in the store's cursor invisible.
+  const bodies: TuiThreadBody[] = [];
+  for (const item of items) {
+    bodies.push({ item, body: await getMessageBody(threadItemToMessage(item, msg), d) });
+  }
+  return bodies;
 }
 
 // ── mutations (inbound only; sent messages are immutable) ──────────────────────
@@ -1255,6 +1279,8 @@ export interface ComposeInput {
   attachments?: Array<{ filename: string; content: string; content_type: string }>;
   idempotencyKey?: string;
   providerId?: string;
+  /** RFC 8058 one-click unsubscribe target; the provider injects the header pair. */
+  unsubscribeUrl?: string;
   markdown?: boolean;
   replyTo?: TuiMessage;
 }
@@ -1316,7 +1342,7 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
       threadId = inbound?.thread_id ?? parent.thread_id ?? uuid();
       if (inbound && !inbound.thread_id) setInboundThreadId(inbound.id, threadId, d);
     } else {
-      const sent = getEmail(parent.id, d);
+      const sent = await getEmail(parent.id);
       const threading = sent ? getEmailThreading(sent.id, d) : null;
       parentMsgId = threading?.message_id ?? (sent?.provider_message_id ? `<${sent.provider_message_id}>` : null);
       parentRefs = threading?.references ?? [];
@@ -1344,6 +1370,7 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
     ...(html ? { html } : {}),
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
     ...(input.idempotencyKey ? { idempotency_key: input.idempotencyKey } : {}),
+    ...(input.unsubscribeUrl ? { unsubscribe_url: input.unsubscribeUrl } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
   const { sendWithFailover } = await import("../../lib/send.local.js");
@@ -1457,9 +1484,13 @@ export interface ListDomainSummaryOptions {
   offset?: number;
 }
 
-export function listDomainSummaries(db?: Database): DomainSummary[];
-export function listDomainSummaries(opts?: ListDomainSummaryOptions, db?: Database): DomainSummary[];
-export function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Database, maybeDb?: Database): DomainSummary[] {
+// ASYNC BECAUSE THE PROVISIONING READS ARE. `src/db/provisioning` reaches the store seam,
+// where every operation returns a promise. The self-hosted twin is async for the same
+// reason: a routed export whose return type depends on the deployment word — a promise in
+// one configuration, an array in the other — is the split this programme removes.
+export function listDomainSummaries(db?: Database): Promise<DomainSummary[]>;
+export function listDomainSummaries(opts?: ListDomainSummaryOptions, db?: Database): Promise<DomainSummary[]>;
+export async function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Database, maybeDb?: Database): Promise<DomainSummary[]> {
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const page = pageFromOptions(opts, 50);
@@ -1468,8 +1499,11 @@ export function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Databa
   const domainNames = domains.map((domain) => domain.domain);
   const providers = listProviderNamesByIds(domains.map((domain) => domain.provider_id), d);
   const addressCountByDomain = listActiveAddressCountsByDomains(domainNames, d);
-  const provisioningById = listDomainProvisioningByIds(domainIds, d);
-  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, d);
+  // Built from the handle this arm already holds, so every fact on one row comes from one
+  // dataset.
+  const store = createSqliteEmailStore({ database: d, detail: "SQLite (tui domain summaries)" });
+  const provisioningById = await listDomainProvisioningByIds(domainIds, store);
+  const readyAddressesByDomain = await listReadyAddressCountsByDomains(domainIds, store);
   const countsByDomain = allDomainMailCounts(d, domains.map((domain) => domain.domain));
   const mode = resolveEmailsMode();
   return domains
@@ -1544,16 +1578,28 @@ export interface ListInboxAddressOptions {
   search?: string;
 }
 
+/**
+ * A configured mailbox row, including the provisioning column this arm reads DIRECTLY.
+ *
+ * It used to come from `listAddressProvisioningByIds` — a second read, keyed by id, over the
+ * same table this query already scans. That family now reaches the store seam and is
+ * asynchronous, and these two functions feed a SYNCHRONOUS Solid memo
+ * (`emails-state.tsx` -> `resolveAddressChoice` -> `currentAddress`) that renders on every
+ * frame. Selecting the column here keeps them synchronous AND removes a whole extra query:
+ * `provisioning_status` is `NOT NULL DEFAULT 'none'` on `addresses` (migration 19), which is
+ * the same column and the same default the deleted read went through.
+ */
 interface ConfiguredInboxAddress {
   id: string;
   email: string;
   provider_id: string;
+  provisioning_status: string;
 }
 
 function listConfiguredInboxAddresses(db: Database, opts?: ListInboxAddressOptions): ConfiguredInboxAddress[] {
   if (!opts) {
     return db
-      .query("SELECT id, email, provider_id FROM addresses WHERE COALESCE(status, 'active') = 'active' ORDER BY created_at DESC, email ASC")
+      .query("SELECT id, email, provider_id, provisioning_status FROM addresses WHERE COALESCE(status, 'active') = 'active' ORDER BY created_at DESC, email ASC")
       .all() as ConfiguredInboxAddress[];
   }
   const limit = positiveInt(opts.limit, 200);
@@ -1563,7 +1609,7 @@ function listConfiguredInboxAddresses(db: Database, opts?: ListInboxAddressOptio
   if (q) params.push(`%${q}%`);
   params.push(limit);
   return db
-    .query(`SELECT id, email, provider_id FROM addresses WHERE COALESCE(status, 'active') = 'active'${searchSql} ORDER BY created_at DESC, email ASC LIMIT ?`)
+    .query(`SELECT id, email, provider_id, provisioning_status FROM addresses WHERE COALESCE(status, 'active') = 'active'${searchSql} ORDER BY created_at DESC, email ASC LIMIT ?`)
     .all(...params) as ConfiguredInboxAddress[];
 }
 
@@ -1641,18 +1687,16 @@ export function listInboxAddresses(optsOrDb?: ListInboxAddressOptions | Database
   const byAddress = new Map<string, InboxAddressChoice>();
   const configured = listConfiguredInboxAddresses(d, opts);
   const providerNames = listProviderNamesByIds(configured.map((address) => address.provider_id), d);
-  const provisioningByAddress = listAddressProvisioningByIds(configured.map((address) => address.id), d);
 
   for (const item of configured) {
     const address = extractEmail(item.email);
     if (address) {
-      const provisioning = provisioningByAddress.get(item.id);
       upsertAddressChoice(byAddress, address, {
         configured: true,
         domain: address.split("@")[1],
         providerId: item.provider_id,
         provider: providerNames.get(item.provider_id) ?? item.provider_id,
-        receiveStatus: provisioning?.provisioning_status ?? "none",
+        receiveStatus: item.provisioning_status || "none",
       });
     }
   }
@@ -1675,7 +1719,7 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
   if (!normalized) return ALL_ADDRESSES;
   const d = db || getDatabase();
   const configured = d
-    .query("SELECT id, email, provider_id FROM addresses WHERE email = ? COLLATE NOCASE AND COALESCE(status, 'active') = 'active' LIMIT 1")
+    .query("SELECT id, email, provider_id, provisioning_status FROM addresses WHERE email = ? COLLATE NOCASE AND COALESCE(status, 'active') = 'active' LIMIT 1")
     .get(normalized) as ConfiguredInboxAddress | null;
   const observed = d
     .query(
@@ -1689,7 +1733,6 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
     .get(normalized) as { email: string } | null;
   if (configured || observed) {
     const provider = configured ? listProviderNamesByIds([configured.provider_id], d).get(configured.provider_id) ?? configured.provider_id : undefined;
-    const provisioning = configured ? listAddressProvisioningByIds([configured.id], d).get(configured.id) : undefined;
     return {
       id: `a:${normalized}`,
       label: configured?.email ?? observed?.email ?? normalized,
@@ -1697,7 +1740,7 @@ export function addressChoiceByAddress(address: string | null | undefined, db?: 
       domain: normalized.split("@")[1],
       providerId: configured?.provider_id,
       provider,
-      receiveStatus: provisioning?.provisioning_status ?? (configured ? "none" : undefined),
+      receiveStatus: configured ? (configured.provisioning_status || "none") : undefined,
       configured: !!configured,
       observed: !!observed,
     };

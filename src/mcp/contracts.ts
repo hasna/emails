@@ -28,6 +28,13 @@ function flag(input: unknown, key: string, name = key.replace(/_/g, "-")): strin
   return value ? ` --${name} ${value}` : "";
 }
 
+/** True when the caller supplied per-member template vars (which the CLI cannot take). */
+function hasVars(input: unknown): boolean {
+  const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const vars = obj["vars"];
+  return !!vars && typeof vars === "object" && Object.keys(vars as Record<string, unknown>).length > 0;
+}
+
 function enabled(input: unknown, key: string, name = key.replace(/_/g, "-")): string {
   const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
   return obj[key] === true ? ` --${name}` : "";
@@ -56,7 +63,18 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     list_domains: () => `emails domain list${provider ? ` --provider ${provider}` : ""}${flag(input, "limit")}${flag(input, "offset")} --json`,
     list_usable_domains: () => `emails domain usable${provider ? ` --provider ${provider}` : ""}${enabled(input, "send")}${enabled(input, "receive")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     add_domain: () => `emails domain add ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"} --json`,
-    get_dns_records: () => `emails domain dns ${domain ?? id ?? "<domain-or-id>"} --json`,
+    // The note is load-bearing, not decoration. `get_dns_records` is guarded in
+    // self_hosted mode for ONE reason — with a `/v1/providers` row of type `ses` the
+    // adapter resolves credentials from the CALLER's ambient AWS environment, and an
+    // MCP client's environment is not the operator's shell. `emails domain dns` runs,
+    // and for a provider-backed domain it takes that same adapter path. Handing an
+    // agent the bare command therefore routed it straight around the guard by
+    // following the guard's own advice. Say so instead: the command is still the right
+    // one to name, because for a domain with no provider it is pure local computation.
+    get_dns_records: () => `emails domain dns ${domain ?? id ?? "<domain-or-id>"} --json`
+      + " # note: for a domain backed by a credentialed provider this reads the provider account with"
+      + " the AMBIENT credentials of whoever runs it — the exact call this tool is guarded against;"
+      + " it is pure local computation only for a domain with no provider",
     verify_domain: () => `emails domain verify ${domain ?? id ?? "<domain-or-id>"} --json`,
     remove_domain: () => `emails domain remove ${id ?? domain ?? "<domain-or-id>"} --yes --json`,
     provision_domain: () => `emails provision domain ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"}${enabled(input, "add_mx")}${enabled(input, "force_mx_switch")} --json`,
@@ -72,7 +90,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     remove_address: () => `emails address remove ${email ?? id ?? "<address-or-id>"} --yes --json`,
     suspend_address: () => `emails address suspend ${email ?? id ?? "<address-or-id>"} --json`,
     activate_address: () => `emails address activate ${email ?? id ?? "<address-or-id>"} --json`,
-    set_address_quota: () => `emails address quota ${email ?? id ?? "<address-or-id>"} ${arg(input, "quota", "daily_quota") ?? "<quota>"} --json`,
+    set_address_quota: () => `emails address quota ${email ?? id ?? "<address-or-id>"} ${(input as Record<string, unknown> | undefined)?.["per_day"] === null ? "none" : arg(input, "per_day", "quota", "daily_quota") ?? "<quota>"} --json`,
     provision_address: () => `emails address provision ${email ?? "<email>"} --provider ${provider ?? "<provider-id>"} --json`,
     suggest_address: () => `emails address suggest --domain ${domain ?? "<domain>"} --json`,
     get_address_owner: () => `emails address owner ${email ?? id ?? "<address-or-id>"} --json`,
@@ -84,8 +102,8 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     add_alias: () => `emails alias add ${arg(input, "alias") ?? "<alias>"} ${arg(input, "target") ?? "<target>"} --json`,
     add_catch_all: () => `emails alias catch-all ${domain ?? "<domain>"} ${arg(input, "target") ?? "<target>"} --json`,
     list_aliases: () => `emails alias list${flag(input, "domain")}${flag(input, "limit")}${flag(input, "offset")} --json`,
-    remove_alias: () => `emails alias remove ${arg(input, "alias") ?? "<alias>"} --json`,
-    resolve_alias: () => `emails alias resolve ${email ?? "<email>"} --json`,
+    remove_alias: () => `emails alias remove ${arg(input, "alias_id") ?? arg(input, "alias") ?? "<alias-id>"} --json`,
+    resolve_alias: () => `emails alias resolve ${arg(input, "recipient") ?? email ?? "<recipient>"} --json`,
     create_send_key: () => `emails sendkey create ${arg(input, "owner") ?? arg(input, "owner_id") ?? "<owner>"} --json`,
     list_send_keys: () => `emails sendkey list${flag(input, "owner_id", "owner")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     revoke_send_key: () => `emails sendkey revoke ${id ?? "<key-id>"} --json`,
@@ -134,7 +152,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
 
     list_sequences: () => `emails sequence list${flag(input, "limit")}${flag(input, "offset")} --json`,
     create_sequence: () => `emails sequence create ${arg(input, "name") ?? "<name>"} --json`,
-    add_sequence_step: () => `emails sequence step add ${id ?? "<sequence-id>"} --json`,
+    add_sequence_step: () => `emails sequence step add ${id ?? "<sequence>"} --step ${arg(input, "step_number") ?? "<step-number>"} --delay ${arg(input, "delay_hours") ?? "<delay-hours>"} --template ${arg(input, "template_name") ?? "<template>"}${flag(input, "from_address", "from")}${flag(input, "subject_override", "subject")} --json`,
     enroll_contact: () => `emails sequence enroll ${id ?? "<sequence-id>"} ${email ?? "<email>"} --json`,
     unenroll_contact: () => `emails sequence unenroll ${id ?? "<sequence-id>"} ${email ?? "<email>"} --json`,
     list_enrollments: () => `emails sequence enrollments${id ? ` ${id}` : ""}${flag(input, "status")}${flag(input, "limit")}${flag(input, "offset")} --json`,
@@ -143,9 +161,10 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     list_groups: () => `emails group list${flag(input, "limit")}${flag(input, "offset")} --json`,
     create_group: () => `emails group create ${arg(input, "name") ?? "<name>"} --json`,
     delete_group: () => `emails group delete ${id ?? "<group-id>"} --json`,
-    add_group_member: () => `emails group add ${id ?? "<group-id>"} ${email ?? "<email>"} --json`,
-    remove_group_member: () => `emails group remove-member ${id ?? "<group-id>"} ${email ?? "<email>"} --json`,
+    add_group_member: () => `emails group add ${arg(input, "group_name") ?? id ?? "<group>"} ${email ?? "<email>"}${flag(input, "name")} --json${hasVars(input) ? " # note: per-member vars have no CLI equivalent; this command adds the member WITHOUT them" : ""}`,
+    remove_group_member: () => `emails group remove-member ${arg(input, "group_name") ?? id ?? "<group>"} ${email ?? "<email>"} --json`,
     list_group_members: () => `emails group members ${arg(input, "group_name", "group_id", "id") ?? "<group-name>"}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    get_group_member: () => `emails group members ${arg(input, "group_name", "group_id", "id") ?? "<group-name>"} --json # note: lists the group's members WITHOUT per-member vars; no CLI command returns a single member with them`,
     list_sandbox_emails: () => "emails sandbox list --json",
     get_sandbox_email: () => `emails sandbox show ${id ?? "<sandbox-id>"} --json`,
     clear_sandbox_emails: () => "emails sandbox clear --json",
@@ -171,6 +190,14 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string, cliEquivalent: string): string[] {
   const lower = message.toLowerCase();
+  // These are SUBSTRING matches over an error message, so a word appearing inside a
+  // format hint hijacks the routing. `createAlias` on a malformed address throws
+  // "Invalid email address (expected local@domain): bad", whose literal "domain"
+  // sent the operator to `emails domain list` to debug a bad ALIAS argument. The
+  // caller's own command is the fix here, so short-circuit before the keyword scan.
+  // (Newly load-bearing: add_alias/add_catch_all only became reachable in
+  // self_hosted mode when their mode guard was deleted.)
+  if (lower.includes("invalid email address")) return [cliEquivalent, "emails alias list --json", "emails address list --json"];
   if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help", cliEquivalent];
   if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help", cliEquivalent];
   if (lower.includes("address")) return ["emails address list --json", "emails address provision --help", cliEquivalent];

@@ -1,11 +1,30 @@
 import { getProvider } from "../db/providers.local.js";
 import { getAdapter } from "../providers/index.js";
 import { getFailoverProviderIds } from "./config.js";
-import { getAddressSendability } from "../db/address-lifecycle.local.js";
-import { assertSendAuthorized } from "../db/send-keys.local.js";
+// The FACADE, not an arm. This module used to import `address-lifecycle.local.js`
+// directly, which pinned the send gate to one arm's dataset regardless of where this
+// installation actually keeps its addresses. That family is collapsed: there is one
+// implementation, it reads through the store seam, and it is async.
+import { getAddressSendability } from "../db/address-lifecycle.js";
+// The FACADE, not an arm, for the same reason as the line above: that family is collapsed,
+// there is one implementation, it reads through the store seam, and it is async.
+import { assertSendAuthorized } from "../db/send-keys.js";
 import { canonicalSender } from "./email-address.js";
-import { getWarmingSchedule } from "../db/warming.local.js";
+// The FACADE'S SUCCESSOR, not an arm. This module used to import `warming.local.js`
+// directly, which pinned the send cap to one arm's dataset regardless of where this
+// installation actually keeps its schedules. That family is collapsed: there is one
+// implementation, it reads through the store seam, and it is async. The `db` handle
+// this gate already threads is forwarded — the collapsed family binds a SQLite store
+// to exactly that connection — so a local configuration reads exactly the rows it
+// read before; with no handle it resolves the CONFIGURED store, so an installation
+// configured for an API gates sends on the schedules that API holds rather than on a
+// local island holding none.
+import { getWarmingSchedule } from "../db/warming.js";
 import { getDomainByName } from "../db/domains.local.js";
+// NOT an arm reach-past: the sent ledger has no facade and no second implementation —
+// this module IS the local send path, and the fence has to read the same ledger the
+// send it fences writes to.
+import { findSentEmailByIdempotencyKey } from "./sent-ledger.local.js";
 import { resolveEmailsMode } from "./mode.js";
 import { getTodayLimit, getTodaySentCount } from "./warming.js";
 import type { Provider, SendEmailOptions } from "../types/index.js";
@@ -37,15 +56,15 @@ export function validateSendAttachments(attachments: SendEmailOptions["attachmen
   }
 }
 
-export function assertWarmingLimit(opts: SendEmailOptions, db?: Database): void {
+export async function assertWarmingLimit(opts: SendEmailOptions, db?: Database): Promise<void> {
   if (opts.bypass_warming) return;
   const fromDomain = canonicalSender(opts.from)?.split("@")[1] ?? opts.from.split("@")[1];
   if (!fromDomain) return;
-  const warmingSchedule = getWarmingSchedule(fromDomain, db);
+  const warmingSchedule = await getWarmingSchedule(fromDomain, db);
   if (!warmingSchedule) return;
   const limit = getTodayLimit(warmingSchedule);
   if (limit === null) return;
-  const sent = getTodaySentCount(fromDomain);
+  const sent = await getTodaySentCount(fromDomain);
   if (sent >= limit) {
     throw new Error(`Warming limit reached for ${fromDomain}: ${sent}/${limit} emails sent today. Use bypass_warming for a trusted local override or wait until tomorrow.`);
   }
@@ -113,20 +132,59 @@ export async function sendWithFailover(
   opts: SendEmailOptions,
   db?: Database,
 ): Promise<SendResult> {
+  // Idempotency fence, BEFORE any provider is invoked. `--idempotency-key` promises
+  // "returns existing email if key was used before"; the only fence used to sit inside
+  // `createSentEmailLedger`, which runs AFTER the provider call — so a repeated key
+  // deduplicated the ledger row while the recipient received a second copy, and the
+  // second delivery's provider message id was recorded nowhere. A key whose send is
+  // already ledgered returns that FIRST outcome and touches nothing. Checked ahead of
+  // the warming/lifecycle gates on purpose: a replay sends no new mail, so there is
+  // nothing for those gates to gate.
+  if (opts.idempotency_key) {
+    const existing = findSentEmailByIdempotencyKey(opts.idempotency_key, db);
+    if (existing) {
+      return {
+        // `provider_message_id` can be legitimately NULL on a ledger row; an empty
+        // messageId is "the first send recorded no provider id", never a fabricated one.
+        messageId: existing.provider_message_id ?? "",
+        // The row type declares `provider_id` nullable even though every write path
+        // sets it; the caller's primary id is the only honest stand-in for a row
+        // that somehow lacks one.
+        providerId: existing.provider_id ?? primaryProviderId,
+        usedFailover: false,
+      };
+    }
+  }
+
   validateSendAttachments(opts.attachments);
-  assertWarmingLimit(opts, db);
+  await assertWarmingLimit(opts, db);
 
   // Scoped-auth guard: when an auth_token (send key) is supplied, the sender
   // must own or administer the From address. No token = trusted local caller.
+  //
+  // NO `db` HANDLE IS FORWARDED, for the reason spelled out at the sendability check
+  // below: the collapsed family's injectable is a STORE, not a database handle, and it
+  // defaults to the one this installation's storage configuration names. A send key's
+  // scope is a property of the installation, not of whichever connection a command
+  // happened to open.
   if (opts.auth_token) {
-    assertSendAuthorized(opts.auth_token, opts.from, db);
+    await assertSendAuthorized(opts.auth_token, opts.from);
   }
 
   // Lifecycle guard: a suspended or over-quota sender address is blocked before
   // any provider is touched.
   if (opts.from) {
     const senderEmail = canonicalSender(opts.from) ?? opts.from;
-    const s = getAddressSendability(senderEmail, db);
+    // NO `db` HANDLE IS FORWARDED, and that is the one behaviour change here. The
+    // collapsed family's injectable is a STORE, not a database handle, and it defaults to
+    // the one this installation's storage configuration names. Every production caller of
+    // `sendWithFailover` passes `getDatabase()` — the same process-wide connection the
+    // SQLite store opens — so a local configuration reads exactly the rows it read before.
+    // A caller that hands in some OTHER database now has its sends gated against the
+    // configured store rather than against that handle, which is the correct answer to
+    // "may this address send": suspension and quota are properties of the installation,
+    // not of whichever connection a command happened to open.
+    const s = await getAddressSendability(senderEmail);
     if (!s.sendable) throw new Error(`Send blocked: ${s.reason}`);
   }
 

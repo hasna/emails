@@ -420,7 +420,16 @@ export function listMailboxSources(opts?: ListMailboxSourcesOptions): MailboxSou
 
 // ── message body / conversation ─────────────────────────────────────────────
 
-export function getMessageBody(msg: TuiMessage): MessageBody | null {
+/**
+ * ASYNC TO MATCH THE OTHER ARM, and it is a signature alignment rather than a behaviour
+ * change: this body is unchanged and awaits nothing. `data.local.getMessageBody` became a
+ * promise when the email-content family collapsed onto the store seam, and the facade in
+ * `data.ts` casts one arm's module shape onto the other's — so two arms that disagree about
+ * whether this returns a promise make that cast unsound rather than merely ugly. The
+ * consumer contract (`MailDataSource` in src/lib/mail-data-source.ts) has always declared a
+ * promise here, and every caller already awaits.
+ */
+export async function getMessageBody(msg: TuiMessage): Promise<MessageBody | null> {
   const row = getMessageRow(msg.id);
   if (!row) return null;
   const isRead = cbool(row["is_read"]);
@@ -458,7 +467,8 @@ export function getConversation(msg: TuiMessage): TuiThreadMessage[] {
     .map(v1RowToThreadMessage);
 }
 
-export function getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): TuiThreadBody[] {
+/** Async for the same reason as `getMessageBody` above. */
+export async function getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]> {
   const conversation = getConversation(msg);
   const allItems = conversation.length > 0
     ? conversation
@@ -472,10 +482,11 @@ export function getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOp
     }];
   const limit = opts?.limit ? positiveInt(opts.limit, 100) : undefined;
   const items = limit && allItems.length > limit ? allItems.slice(-limit) : allItems;
-  return items.map((item) => ({
-    item,
-    body: getMessageBody(threadItemToMessage(item, msg)),
-  }));
+  const bodies: TuiThreadBody[] = [];
+  for (const item of items) {
+    bodies.push({ item, body: await getMessageBody(threadItemToMessage(item, msg)) });
+  }
+  return bodies;
 }
 
 // ── mutations (inbound only; sent messages are immutable) ──────────────────────
@@ -638,7 +649,10 @@ export interface ListDomainSummaryOptions {
   offset?: number;
 }
 
-export function listDomainSummaries(opts?: ListDomainSummaryOptions): DomainSummary[] {
+// ASYNC TO MATCH THE LOCAL TWIN, which reaches the store seam for its provisioning columns
+// and therefore cannot stay synchronous. Nothing in THIS arm needs to await; the keyword is
+// here so the routed export has ONE return type instead of one per deployment word.
+export async function listDomainSummaries(opts?: ListDomainSummaryOptions): Promise<DomainSummary[]> {
   const page = pageFromOptions(opts, 50);
   try {
     const domains = listDomains(undefined, page);

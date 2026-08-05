@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
+import { createAddress, findAddressesByEmail, listAddresses, deleteAddress, getAddress, getAddressByEmail, markVerified } from "../../db/addresses.js";
 import { suspendAddress, activateAddress, setAddressQuota } from "../../db/address-lifecycle.js";
+import { recordProvisioningEvent } from "../../db/provisioning.js";
 import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
-import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, MAX_CLI_PAGE_LIMIT, parseCliListPage, resolveId } from "../utils.js";
 import {
   enrichAddresses,
   getAddressOwnershipDetail,
@@ -14,18 +15,30 @@ import {
   unassignAddressOwnerByRef,
 } from "../../lib/address-ownership.js";
 
-// The local address PROVISIONING orchestration (S3/SES receive setup, the
-// provisioning ledger) is owned by the self-hosted server and has no client-side
-// equivalent, so `address provision` is kept for discoverability but fails loud.
+// `address provision` used to throw "is not available in the self-hosted client;
+// it runs on the self-hosted server". Both halves were false: the throw was
+// unconditional, so it fired in local mode too, and there is no server route for
+// it to run on — `openapi.ts` exposes plain CRUD for `/v1/addresses` and no
+// provisioning route, and the container runs no reconciler. The orchestrator
+// this command wrapped was deleted as unreachable dead code, and nothing
+// replaced it in any configuration.
 //
-// Address ownership is NOT in that category: `src/db/owners.ts` routes every
-// ownership read/write to `src/db/owners.remote.ts`, which serves them from
-// `/v1/owners`, `/v1/addresses/<id>` (owner_id/administrator_id) and
-// `/v1/address-ownership-events`. Those subcommands run against the API in both
-// modes.
-function serverOnly(command: string): never {
+// So the refusal now says exactly that and names the two commands that DO the
+// work, matching the wording `emails provision *` and the MCP provisioning tools
+// already settled on. It must not name a deployment mode.
+//
+// Address ownership is NOT in this category: `src/db/owners.ts` has collapsed onto
+// the store seam, so its subcommands read and write whichever store this
+// installation's STORAGE configuration names — owner rows through the `owners`
+// repository, the ownership columns through `addresses`/`addressLifecycle`, and the
+// audit trail through the address-ownership ledger.
+function notImplementedAnywhere(command: string): never {
   throw new Error(
-    `${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
+    `${command} is not implemented in this build: there is no address provisioning ` +
+      `orchestrator and no route that performs one. Create the address with ` +
+      `'emails address add <email> --provider <id>', record who owns it with ` +
+      `'emails address set-owner <email> --owner <name>', and wire the domain's inbound ` +
+      `route with 'emails aws setup-inbound --domain <domain>'.`,
   );
 }
 
@@ -34,8 +47,8 @@ const MAX_OWNER_HISTORY_LIMIT = 100;
 
 /**
  * Provider label for display. The /v1 address entity carries no provider
- * association, so an empty provider_id means "served by the self-hosted server"
- * rather than "unknown provider".
+ * association, so an empty provider_id is reported as `self_hosted` — the
+ * DomainType value it corresponds to, not a claim about where it is served.
  */
 function providerLabel(address: { provider_name: string | null; provider_id: string }): string {
   return address.provider_name ?? (address.provider_id || "self_hosted");
@@ -56,8 +69,12 @@ function describeOwnership(detail: { address: { owner: { name: string; type: str
 function resolveSelfHostedAddressId(ref: string): string {
   const exact = getAddress(ref);
   if (exact) return exact.id;
+  // Matches the EMAIL as well as an id prefix: sibling address verbs (owner,
+  // verify, set-owner) accept the email, and `address list` prints it (task
+  // 55c19dde).
+  const wanted = ref.trim().toLowerCase();
   const matches = listAddresses(undefined, { limit: 1000 })
-    .filter((address) => address.id.startsWith(ref));
+    .filter((address) => address.id.startsWith(ref) || address.email.toLowerCase() === wanted);
   if (matches.length === 1) return matches[0]!.id;
   if (matches.length > 1) {
     handleError(new Error(`Address ID is ambiguous: ${matches.map((address) => address.id.slice(0, 8)).join(", ")}`));
@@ -65,18 +82,56 @@ function resolveSelfHostedAddressId(ref: string): string {
   handleError(new Error(`Address not found: ${ref}`));
 }
 
+/**
+ * Persist the operator's verification assertion before enabling the sender.
+ *
+ * The provisioning-event ledger is append-only in both stores and already owns
+ * domain/address readiness history. Recording the authorization first means an
+ * audit failure leaves the address safely unverified; a later PATCH failure may
+ * leave an attempted authorization event, but can never leave an unaudited sender
+ * enabled.
+ */
+async function markVerifiedWithAudit(
+  address: { id: string; email: string; verified: boolean },
+  audit: { actor: string; reason: string; command: string },
+) {
+  const event = await recordProvisioningEvent(
+    "address",
+    address.id,
+    address.verified ? "verified" : "unverified",
+    "verification_authorized",
+    {
+      action: "set_verified",
+      actor: audit.actor,
+      reason: audit.reason,
+      command: audit.command,
+      requested_verified: true,
+    },
+  );
+  return { address: markVerified(address.id), event };
+}
+
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
-  const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+  const listAddressesAction = async (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean; unverified?: boolean }) => {
     try {
       const page = parseCliListPage(opts);
-      // Hydrate owner/administrator/provider_name from the mode-routed repos
-      // instead of hardcoding nulls: an owned address must never be reported as
-      // unowned, in the table or in --json.
-      const addresses = enrichAddresses(listAddresses(opts.provider, page));
+      // Hydrate owner/administrator/provider_name instead of hardcoding nulls: an
+      // owned address must never be reported as unowned, in the table or in --json.
+      // Filter BEFORE applying the requested page. Otherwise a page containing
+      // verified rows can print "No addresses" even though unverified senders are
+      // present later in the registry — precisely the default-page blind spot this
+      // option exists to remove. The address family has a documented 1,000-row CLI
+      // ceiling, so use that same bounded scan rather than an unbounded read.
+      const listed = opts.unverified
+        ? listAddresses(opts.provider, { limit: MAX_CLI_PAGE_LIMIT, offset: 0 })
+            .filter((address) => !address.verified)
+            .slice(page.offset, page.offset + page.limit)
+        : listAddresses(opts.provider, page);
+      const addresses = await enrichAddresses(listed);
       if (addresses.length === 0) {
-        output([], chalk.dim("No addresses configured."));
+        output([], chalk.dim(opts.unverified ? "No unverified addresses." : "No addresses configured."));
         return;
       }
       const verbose = opts.verbose || isCliVerboseOutput();
@@ -140,6 +195,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--unverified", "Show only addresses whose verified flag is false")
     .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
@@ -148,17 +204,42 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Add a sender address")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--name <displayName>", "Display name")
-    .action(async (email: string, opts: { provider: string; name?: string }) => {
+    .option("--verified", "Assert ownership and add the address as verified (allows outbound mail)")
+    .option("--actor <actor>", "Actor recorded in the verification audit log", "cli")
+    .option("--reason <reason>", "Reason recorded in the verification audit log", "operator asserted sender ownership")
+    .action(async (email: string, opts: { provider: string; name?: string; verified?: boolean; actor: string; reason: string }) => {
       try {
         // Addresses are created directly on the app's /v1/addresses API. Providers
         // are a label carried through (the /v1 API exposes no /v1/providers), so we
         // do NOT resolve a local provider row or invoke a provider adapter.
         const existing = getAddressByEmail(opts.provider, email);
         if (existing) {
+          if (opts.verified && !existing.verified) {
+            const verified = await markVerifiedWithAudit(existing, {
+              actor: opts.actor,
+              reason: opts.reason,
+              command: "emails address add --verified",
+            });
+            output(
+              verified.address,
+              chalk.green(`✓ Existing address verified: ${email} (${existing.id.slice(0, 8)}; audit ${verified.event.id.slice(0, 8)})`),
+            );
+            return;
+          }
           output(existing, chalk.green(`✓ Address already exists: ${email} (${existing.id.slice(0, 8)})`));
           return;
         }
-        const addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
+        let addr = createAddress({ provider_id: opts.provider, email, display_name: opts.name });
+        if (opts.verified) {
+          const verified = await markVerifiedWithAudit(addr, {
+            actor: opts.actor,
+            reason: opts.reason,
+            command: "emails address add --verified",
+          });
+          addr = verified.address;
+          output(addr, chalk.green(`✓ Verified address added: ${email} (${addr.id.slice(0, 8)}; audit ${verified.event.id.slice(0, 8)})`));
+          return;
+        }
         output(addr, chalk.green(`✓ Address added: ${email} (${addr.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
@@ -171,15 +252,16 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--unverified", "Show only addresses whose verified flag is false")
     .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
   addressCmd
     .command("owner <email-or-id>")
     .description("Show owner and administering agent for an address")
-    .action((ref: string) => {
+    .action(async (ref: string) => {
       try {
-        const detail = getAddressOwnershipDetail(ref);
+        const detail = await getAddressOwnershipDetail(ref);
         const owner = detail.address.owner;
         const administrator = detail.address.administrator;
         const lines = [chalk.bold(`\n${detail.address.email}`)];
@@ -208,9 +290,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Assign address ownership; human owners require an agent administrator")
     .requiredOption("--owner <name-or-id>", "Owner name, ID, or ID prefix")
     .option("--administrator <name-or-id>", "Administering agent name, ID, or ID prefix")
-    .action((ref: string, opts: { owner: string; administrator?: string }) => {
+    .action(async (ref: string, opts: { owner: string; administrator?: string }) => {
       try {
-        const detail = setAddressOwnerByRef(ref, opts.owner, opts.administrator);
+        const detail = await setAddressOwnerByRef(ref, opts.owner, opts.administrator);
         output(detail, chalk.green(`✓ ${detail.address.email} ${describeOwnership(detail)}`));
       } catch (e) {
         handleError(e);
@@ -227,9 +309,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { owner: string; administrator?: string; reason: string; actor?: string; yes?: boolean }) => {
       try {
-        const before = getAddressOwnershipDetail(ref);
+        const before = await getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Transfer owner for ${before.address.email} to ${opts.owner}?`, opts.yes);
-        const detail = transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
+        const detail = await transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
         output(detail, chalk.green(`✓ ${detail.address.email} transferred — ${describeOwnership(detail)}`));
       } catch (e) {
         handleError(e);
@@ -244,9 +326,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { reason: string; actor?: string; yes?: boolean }) => {
       try {
-        const before = getAddressOwnershipDetail(ref);
+        const before = await getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Clear owner/admin assignment for ${before.address.email}?`, opts.yes);
-        const detail = unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
+        const detail = await unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
         output(detail, chalk.green(`✓ ${detail.address.email} is now unowned`));
       } catch (e) {
         handleError(e);
@@ -257,10 +339,10 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("owner-history <email-or-id>")
     .description("Show ownership/admin change history for an address")
     .option("--limit <n>", "Maximum events to show", "20")
-    .action((ref: string, opts: { limit: string }) => {
+    .action(async (ref: string, opts: { limit: string }) => {
       try {
         const limit = Math.max(1, Math.min(MAX_OWNER_HISTORY_LIMIT, Number.parseInt(opts.limit, 10) || 20));
-        const detail = getAddressOwnershipHistoryByRef(ref, limit);
+        const detail = await getAddressOwnershipHistoryByRef(ref, limit);
         const lines = [chalk.bold(`\nOwnership history: ${detail.address.email}`)];
         if (detail.history.length === 0) {
           lines.push(chalk.dim("  No ownership changes recorded."));
@@ -296,7 +378,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
 
   addressCmd
     .command("provision <email>")
-    .description("Create an email address on a provisioned domain (alias of the address provisioning workflow)")
+    .description("Create an email address on a provisioned domain (NOT IMPLEMENTED in this build; use emails address add)")
     .requiredOption("--provider <id>", "Provider ID")
     .option("--domain <id>", "Domain ID (defaults to the address's domain if registered)")
     .option("--receive <strategy>", "Receive strategy: ses-s3 | cf-routing | resend-webhook", "ses-s3")
@@ -309,12 +391,23 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
     .action(async () => {
-      try { serverOnly("emails address provision"); } catch (e) { handleError(e); }
+      try { notImplementedAnywhere("emails address provision"); } catch (e) { handleError(e); }
     });
 
+  // `verify` READS. `set-verified` WRITES. They are separate commands, and this one
+  // says which it is.
+  //
+  // A command named `verify` that cannot verify is a usability trap: an operator whose
+  // send was refused with `sender_unverified` runs `emails address verify <email>`,
+  // gets "⚠ … is not yet verified", and reasonably concludes the tool has told them
+  // what to do next — when in fact this command has no write path at all and, before
+  // `set-verified` and `address add --verified` existed, neither did any other.
+  // `address provision` still refuses in every mode, so the only route left at the
+  // time was a hand-rolled PATCH /v1/addresses/{id}. The name is kept for
+  // compatibility; the description and output name the command that writes.
   addressCmd
     .command("verify <email>")
-    .description("Check verification status of an address")
+    .description("Check verification status of an address (READ-ONLY; use 'address set-verified' to change it)")
     .option("--provider <id>", "Provider ID")
     .action(async (email: string, opts: { provider?: string }) => {
       try {
@@ -329,7 +422,64 @@ export function registerAddressCommands(program: Command, output: (data: unknown
           console.log(chalk.green(`✓ ${email} is verified`));
         } else {
           console.log(chalk.yellow(`⚠ ${email} is not yet verified`));
+          // Say what "not verified" COSTS, and how to change it. Without this the
+          // reader learns a flag is false and nothing else — and an unverified sender
+          // is refused before any provider is contacted, so the send simply never
+          // happens and the ledger row says only `blocked`.
+          console.log(chalk.dim(
+            `  Sends from ${email} are refused by the outbound policy gate (policy_denial: sender_unverified)\n`
+            + "  before any provider is contacted. This command only READS the flag.\n"
+            + `  To set it: emails address set-verified ${email}`,
+          ));
         }
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  addressCmd
+    .command("set-verified <email-or-id>")
+    .description("Mark a sender address as verified (allows outbound mail from it)")
+    .option("--actor <actor>", "Actor recorded in the verification audit log", "cli")
+    .option("--reason <reason>", "Reason recorded in the verification audit log", "operator asserted sender ownership")
+    .option("--yes", "Skip confirmation prompt")
+    .action(async (ref: string, opts: { actor: string; reason: string; yes?: boolean }) => {
+      try {
+        // Accept an email or an id: an operator arriving from a `sender_unverified`
+        // refusal has the ADDRESS in hand, not its uuid, and `verify` takes an email —
+        // taking only an id here would make the pair inconsistent at the worst moment.
+        const byEmail = findAddressesByEmail(ref);
+        if (byEmail.length > 1) {
+          handleError(new Error(
+            `${ref} matches ${byEmail.length} address records (${byEmail.map((a) => a.id.slice(0, 8)).join(", ")}). `
+            + "Pass the id instead.",
+          ));
+        }
+        const resolvedId = byEmail.length === 1 ? byEmail[0]!.id : resolveSelfHostedAddressId(ref);
+        const before = getAddress(resolvedId);
+        if (!before) handleError(new Error(`Address not found: ${ref}`));
+        if (before!.verified) {
+          output(before, chalk.dim(`${before!.email} is already verified — nothing to do.`));
+          return;
+        }
+        // Confirmed by default. Marking an address verified asserts that this
+        // deployment controls that mailbox and unblocks outbound mail from it, so it
+        // is an operator decision, not a routine edit. --yes for automation.
+        await confirmDestructiveAction(
+          `Mark ${before!.email} as verified? This allows outbound mail to be sent from it.`,
+          opts.yes,
+        );
+        const verified = await markVerifiedWithAudit(before!, {
+          actor: opts.actor,
+          reason: opts.reason,
+          command: "emails address set-verified",
+        });
+        output(
+          verified.address,
+          chalk.green(
+            `✓ ${verified.address.email} is now verified — outbound mail from it is no longer refused (audit ${verified.event.id.slice(0, 8)})`,
+          ),
+        );
       } catch (e) {
         handleError(e);
       }
@@ -355,11 +505,11 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("suspend <id>")
     .description("Suspend a sender address (blocks sending until reactivated)")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
-        const a = suspendAddress(resolvedId);
+        const a = await suspendAddress(resolvedId);
         output(a, chalk.yellow(`⏸ Suspended ${a.email} — sending blocked`));
       } catch (e) {
         handleError(e);
@@ -369,11 +519,10 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("activate <id>")
     .description("Reactivate a suspended sender address")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
-        const resolvedId = resolveId("addresses", id);
-        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
-        const a = activateAddress(resolvedId);
+        const resolvedId = resolveSelfHostedAddressId(id);
+        const a = await activateAddress(resolvedId);
         output(a, chalk.green(`✓ Activated ${a.email} — sending allowed`));
       } catch (e) {
         handleError(e);
@@ -383,15 +532,14 @@ export function registerAddressCommands(program: Command, output: (data: unknown
   addressCmd
     .command("quota <id> <perDay>")
     .description("Set a daily send quota for an address (use 'none' to clear)")
-    .action((id: string, perDay: string) => {
+    .action(async (id: string, perDay: string) => {
       try {
-        const resolvedId = resolveId("addresses", id);
-        if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
+        const resolvedId = resolveSelfHostedAddressId(id);
         const quota = /^(none|null|unlimited|0?)$/i.test(perDay) && perDay !== "0"
           ? null
           : Number.parseInt(perDay, 10);
         if (quota !== null && Number.isNaN(quota)) handleError(new Error(`Invalid quota: ${perDay}`));
-        const a = setAddressQuota(resolvedId, quota);
+        const a = await setAddressQuota(resolvedId, quota);
         output(a, a.daily_quota === null
           ? chalk.green(`✓ Cleared daily quota for ${a.email}`)
           : chalk.green(`✓ Daily quota for ${a.email}: ${a.daily_quota}/day`));

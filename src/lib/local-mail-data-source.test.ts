@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.local.js";
-import { getSandboxCount } from "../db/sandbox.local.js";
+import { getSandboxCount } from "../db/sandbox.js";
 import { storeInboundEmail } from "../db/inbound.local.js";
 import { resetMailDataSource, resolveMailDataSource, SqliteMailDataSource } from "./mail-data-source.js";
 
@@ -164,6 +164,15 @@ describe("SqliteMailDataSource", () => {
     expect(updated?.labels).toContain("Action Required");
   });
 
+  it("rejects inherited object keys as bulk actions", async () => {
+    const stored = seedInbound();
+    const source = resolveMailDataSource();
+
+    await expect(source.bulk({ action: "constructor", ids: [stored.id] }))
+      .rejects.toThrow("unsupported local bulk action 'constructor'");
+    expect((await source.getMessage(stored.id))?.is_read).toBe(false);
+  });
+
   it("finds verification codes from the local recipient index", async () => {
     const stored = seedInbound();
     const found = await resolveMailDataSource().findLatest("ops@example.test");
@@ -315,6 +324,6 @@ describe("SqliteMailDataSource", () => {
     });
     expect(result.id).toBeTruthy();
     expect(result.messageId).toBeTruthy();
-    expect(getSandboxCount(provider.id)).toBe(1);
+    expect(await getSandboxCount(provider.id)).toBe(1);
   });
 });

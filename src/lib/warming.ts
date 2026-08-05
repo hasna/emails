@@ -90,15 +90,19 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
 /**
  * Count today's sent mail per sending domain in ONE ledger read.
  *
- * Sent mail is a `/v1`-backed resource (the emails repo routes to the operator's
- * API), so this fetches today's outbound messages once and buckets them by From
- * domain — filtering client-side over the bounded superset the repo returns (the
- * same pattern the other self-hosted repos use). Listing N schedules therefore
- * costs one request, not N.
+ * The read takes the WHOLE UTC-day window — deliberately no row cap. This used to
+ * pass `limit: 1000`, believing it a defensive clamp over a bounded superset; by the
+ * time `listEmails` collapsed onto the store seam that argument had become a
+ * client-side newest-first WINDOW across ALL domains. One busy sibling domain then
+ * crowded a warming domain's sends out of the window, this function answered 0, and
+ * `assertWarmingLimit` — which gates every local send on that number — never tripped
+ * the ramp cap. `listEmails` enumerates the whole filtered stream and REFUSES when it
+ * cannot finish, so the numbers returned here are totals, never lower bounds: a count
+ * this function cannot establish throws instead of under-reporting.
  *
  * Every requested domain is present in the result, zero included.
  */
-export function getTodaySentCountsByDomain(domains: readonly string[]): Map<string, number> {
+export async function getTodaySentCountsByDomain(domains: readonly string[]): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
   for (const domain of domains) {
     const key = domain.trim().toLowerCase();
@@ -110,7 +114,7 @@ export function getTodaySentCountsByDomain(domains: readonly string[]): Map<stri
   const start = `${today}T00:00:00.000Z`;
   const tomorrow = new Date(start);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  for (const email of listEmails({ since: start, until: tomorrow.toISOString(), limit: 1000 })) {
+  for (const email of await listEmails({ since: start, until: tomorrow.toISOString() })) {
     const sender = (email.from_address ?? "").toLowerCase().split("@")[1]?.trim();
     if (sender !== undefined && counts.has(sender)) counts.set(sender, counts.get(sender)! + 1);
   }
@@ -118,8 +122,8 @@ export function getTodaySentCountsByDomain(domains: readonly string[]): Map<stri
 }
 
 /** Get how many emails have been sent from a single domain today. */
-export function getTodaySentCount(domain: string): number {
-  return getTodaySentCountsByDomain([domain]).get(domain.trim().toLowerCase()) ?? 0;
+export async function getTodaySentCount(domain: string): Promise<number> {
+  return (await getTodaySentCountsByDomain([domain])).get(domain.trim().toLowerCase()) ?? 0;
 }
 
 export interface WarmingProgress {
@@ -143,7 +147,7 @@ export interface WarmingProgress {
  * batched via getTodaySentCountsByDomain instead of paying one ledger read
  * per row.
  */
-export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: number): WarmingProgress {
+export async function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: number): Promise<WarmingProgress> {
   // An unusable start date reports day 1 (with a 0 limit from getTodayLimit)
   // rather than propagating NaN into JSON output and rendered tables.
   const currentDay = Math.max(1, warmingDayIndex(schedule.start_date) ?? 1);
@@ -156,7 +160,7 @@ export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: n
     total_days: totalDays,
     progress_percent: Math.min(100, Math.round((currentDay / totalDays) * 100)),
     today_limit: getTodayLimit(schedule),
-    today_sent: todaySent ?? getTodaySentCount(schedule.domain),
+    today_sent: todaySent ?? (await getTodaySentCount(schedule.domain)),
   };
 }
 
@@ -164,10 +168,19 @@ export function describeWarmingProgress(schedule: WarmingSchedule, todaySent?: n
  * Format warming schedule status for terminal display. Callers that already
  * computed progress pass it in so the sent-mail read is not repeated.
  */
-export function formatWarmingStatus(
+export async function formatWarmingStatus(
   schedule: WarmingSchedule,
-  progress: WarmingProgress = describeWarmingProgress(schedule),
-): string {
+  progress?: WarmingProgress,
+): Promise<string> {
+  // The default is resolved HERE rather than in the parameter list: a default parameter
+  // cannot be awaited, and awaiting the promise instead of the value would have rendered
+  // `[object Promise]` into an operator-facing line.
+  const resolved = progress ?? (await describeWarmingProgress(schedule));
+  return formatWarmingProgress(schedule, resolved);
+}
+
+/** The pure half, so a caller that already has a progress record pays no read. */
+function formatWarmingProgress(schedule: WarmingSchedule, progress: WarmingProgress): string {
   return [
     `Domain: ${schedule.domain}`,
     `Status: ${schedule.status} | Day ${progress.current_day}/${progress.total_days} (${progress.progress_percent}% complete)`,

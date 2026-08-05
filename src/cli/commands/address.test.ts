@@ -1,9 +1,10 @@
-// Self-hosted-ONLY: the address repo routes every read/write to `/v1/addresses`,
-// so these tests drive the REAL command against an out-of-process /v1 stub (see
-// src/test-support/v1-stub.ts). No local SQLite exists anymore. Ownership routes
-// over /v1 too (`/v1/owners`, owner_id/administrator_id on `/v1/addresses/<id>`,
-// `/v1/address-ownership-events`) and is covered below. Only the local
-// provisioning orchestration is server-owned and still fails loud.
+// Self-hosted-ONLY for the address repo: it routes every read/write to
+// `/v1/addresses`, so these tests drive the REAL command against an out-of-process
+// /v1 stub (see src/test-support/v1-stub.ts). No local SQLite exists anymore.
+// Ownership is served by the COLLAPSED owners family, which resolves the same stub
+// from storage configuration and reaches it through the REAL HTTP store — which
+// reads the service's published contract before any write, hence `openapi: true`.
+// Only the local provisioning orchestration is server-owned and still fails loud.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { createAddress } from "../../db/addresses.js";
@@ -56,7 +57,10 @@ async function runAddressCommandExpectingExit(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // Verification writes an append-only `/v1/provisioning` audit event through
+  // the store seam, whose fail-closed writer validates writable columns against
+  // the service contract before sending the request.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -128,6 +132,51 @@ describe("address list command", () => {
     expect(result.data).toEqual([]);
     expect(result.out).toContain("No addresses configured.");
   });
+
+  it("filters unverified addresses before applying the requested page", async () => {
+    const addresses = [];
+    for (let i = 1; i <= 25; i++) {
+      const stamp = `2026-01-${String(i).padStart(2, "0")}T00:00:00.000Z`;
+      addresses.push({
+        id: crypto.randomUUID(),
+        email: `sender-${String(i).padStart(2, "0")}@example.com`,
+        provider_id: "prov-1",
+        status: "active",
+        // The newest default page is entirely verified. Filtering a page that
+        // was already cut would therefore miss all five risky senders.
+        verified: i > 5,
+        created_at: stamp,
+        updated_at: stamp,
+      });
+    }
+    await stub.seed({ addresses });
+
+    const result = await runAddressCommand(["address", "list", "--unverified", "--limit", "2"]);
+
+    expect(result.data).toHaveLength(2);
+    expect(result.data).toMatchObject([
+      { email: "sender-05@example.com", verified: false },
+      { email: "sender-04@example.com", verified: false },
+    ]);
+    expect(result.out).not.toContain("sender-25@example.com");
+  });
+
+  it("reports when the unverified filter has no matches", async () => {
+    await stub.seed({
+      addresses: [{
+        id: crypto.randomUUID(),
+        email: "ready@example.com",
+        status: "active",
+        verified: true,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    const result = await runAddressCommand(["address", "list", "--unverified"]);
+    expect(result.data).toEqual([]);
+    expect(result.out).toContain("No unverified addresses.");
+  });
 });
 
 describe("address add / verify / suggest commands", () => {
@@ -141,6 +190,31 @@ describe("address add / verify / suggest commands", () => {
     const again = await runAddressCommand(["address", "add", "ops@example.com", "--provider", "prov-1"]);
     expect(again.out).toContain("already exists");
     expect((await stub.list("addresses")).filter((a) => a["email"] === "ops@example.com")).toHaveLength(1);
+  });
+
+  it("can add a verified address and records the ownership assertion first", async () => {
+    const added = await runAddressCommand([
+      "address", "add", "trusted@example.com", "--provider", "prov-1", "--verified",
+      "--actor", "operator@example.com", "--reason", "SES identity confirmed",
+    ]);
+
+    expect(added.data).toMatchObject({ email: "trusted@example.com", verified: true });
+    expect(added.out).toContain("Verified address added");
+    const events = await stub.list("provisioning");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_type: "address",
+      entity_id: (added.data as { id: string }).id,
+      from_state: "unverified",
+      to_state: "verification_authorized",
+      detail_json: {
+        action: "set_verified",
+        actor: "operator@example.com",
+        reason: "SES identity confirmed",
+        command: "emails address add --verified",
+        requested_verified: true,
+      },
+    });
   });
 
   it("reports verification status from the /v1 record", async () => {
@@ -218,10 +292,15 @@ describe("address server-only lifecycle commands still block", () => {
   ];
 
   for (const [label, args] of blocked) {
-    it(`${label} exits with the self-hosted-server message`, async () => {
+    it(`${label} says it is unimplemented and names what to run instead`, async () => {
       const result = await runAddressCommandExpectingExit(args);
       expect(result.error).toBe("process.exit:1");
-      expect(result.stderr).toContain("is not available in the self-hosted client; it runs on the self-hosted server.");
+      expect(result.stderr).toContain(`${label} is not implemented in this build`);
+      expect(result.stderr).toContain("emails address add <email> --provider <id>");
+      // The message that shipped named a server route that does not exist, and
+      // named it unconditionally — so it lied in local mode too.
+      expect(result.stderr).not.toContain("not available in the self-hosted client");
+      expect(result.stderr).not.toContain("runs on the self-hosted server");
     });
   }
 });
@@ -229,8 +308,8 @@ describe("address server-only lifecycle commands still block", () => {
 describe("address ownership commands over /v1", () => {
   async function seedOwnedAddress() {
     const address = createAddress({ provider_id: "prov-1", email: "svc@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
     return { address, human, agent };
   }
 
@@ -267,7 +346,7 @@ describe("address ownership commands over /v1", () => {
 
   it("transfer-owner records the new owner plus an audit event", async () => {
     await seedOwnedAddress();
-    createOwner({ type: "agent", name: "successor-bot" });
+    await createOwner({ type: "agent", name: "successor-bot" });
     await runAddressCommand(["address", "set-owner", "svc@example.com", "--owner", "ada", "--administrator", "ops-bot"]);
 
     const result = await runAddressCommand([
@@ -329,9 +408,9 @@ describe("address ownership commands over /v1", () => {
 describe("address list reports real ownership", () => {
   it("hydrates owner/administrator in the table and in --json", async () => {
     const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
-    assignAddressOwner(address.id, human.id, agent.id);
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
+    await assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runAddressCommand(["address", "list"]);
 
@@ -343,9 +422,9 @@ describe("address list reports real ownership", () => {
 
   it("--verbose shows owner and administrator instead of ignoring the flag", async () => {
     const address = createAddress({ provider_id: "prov-1", email: "owned@example.com" });
-    const human = createOwner({ type: "human", name: "ada" });
-    const agent = createOwner({ type: "agent", name: "ops-bot" });
-    assignAddressOwner(address.id, human.id, agent.id);
+    const human = await createOwner({ type: "human", name: "ada" });
+    const agent = await createOwner({ type: "agent", name: "ops-bot" });
+    await assignAddressOwner(address.id, human.id, agent.id);
 
     const result = await runAddressCommand(["address", "list", "--verbose"]);
 
@@ -359,5 +438,111 @@ describe("address list reports real ownership", () => {
     const result = await runAddressCommand(["address", "list"]);
 
     expect(result.data).toMatchObject([{ email: "free@example.com", owner: null, administrator: null }]);
+  });
+});
+
+// THE MISSING WRITE PATH (2026-07-27).
+//
+// An unverified sender is refused by evaluateOutboundPolicy with
+// policy_denial "sender_unverified" BEFORE any provider is contacted, so the mail
+// simply never happens. That state was reachable and diagnosable but NOT FIXABLE
+// from this CLI: an exhaustive walk of `emails address` (add, list, owner,
+// set-owner, transfer-owner, unassign-owner, owner-history, suggest, provision,
+// verify, remove, suspend, activate, quota) found no verb that sets the flag.
+//   * `verify` only READS it — the name is the trap,
+//   * `add` had no --verified option,
+//   * `activate` reactivates a SUSPENDED address, a different field,
+//   * `provision` refuses in every mode.
+// The only route left was a hand-rolled PATCH /v1/addresses/{id}. Every layer
+// beneath the CLI already supported the write (db/addresses.ts markVerified, routed
+// to both arms, and the generated SDK's updateAddress) — only the verb was missing.
+describe("address set-verified command", () => {
+  it("sets the flag, so a blocked sender can actually be unblocked", async () => {
+    const created = createAddress({ email: "blocked@example.com", provider_id: "p1" });
+    expect(created.verified).toBe(false);
+
+    const { data, out } = await runAddressCommand(["address", "set-verified", "blocked@example.com", "--yes"]);
+    expect((data as { verified: boolean }).verified).toBe(true);
+    expect(out).toContain("blocked@example.com");
+    // The confirmation has to state the CONSEQUENCE. "Updated address" would leave
+    // the operator unsure whether the thing that was refusing their mail is fixed.
+    expect(out).toContain("no longer refused");
+  });
+
+  it("records who authorized the verification and why", async () => {
+    const created = createAddress({ email: "audited@example.com", provider_id: "p1" });
+
+    await runAddressCommand([
+      "address", "set-verified", created.id, "--yes",
+      "--actor", "on-call", "--reason", "domain ownership reviewed",
+    ]);
+
+    const events = await stub.list("provisioning");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_type: "address",
+      entity_id: created.id,
+      from_state: "unverified",
+      to_state: "verification_authorized",
+      detail_json: {
+        action: "set_verified",
+        actor: "on-call",
+        reason: "domain ownership reviewed",
+        command: "emails address set-verified",
+        requested_verified: true,
+      },
+    });
+  });
+
+  it("accepts an id as well as an email", async () => {
+    const created = createAddress({ email: "byid@example.com", provider_id: "p1" });
+    const { data } = await runAddressCommand(["address", "set-verified", created.id, "--yes"]);
+    expect((data as { id: string; verified: boolean }).id).toBe(created.id);
+    expect((data as { verified: boolean }).verified).toBe(true);
+  });
+
+  it("is idempotent and says so instead of pretending to have changed something", async () => {
+    const created = createAddress({ email: "already@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "set-verified", "already@example.com", "--yes"]);
+    const { data, out } = await runAddressCommand(["address", "set-verified", "already@example.com", "--yes"]);
+    expect((data as { verified: boolean }).verified).toBe(true);
+    expect(out).toContain("already verified");
+    expect(created.email).toBe("already@example.com");
+  });
+
+  it("refuses an unknown address rather than silently creating one", async () => {
+    const { error } = await runAddressCommandExpectingExit([
+      "address", "set-verified", "nobody@example.com", "--yes",
+    ]);
+    expect(error).toContain("process.exit:1");
+  });
+});
+
+describe("address verify command is read-only and says so", () => {
+  it("names the command that performs the change when the address is unverified", async () => {
+    createAddress({ email: "pending@example.com", provider_id: "p1" });
+    const { out } = await runAddressCommand(["address", "verify", "pending@example.com"]);
+    expect(out).toContain("not yet verified");
+    // The three things an operator needs and previously had to guess: what it costs,
+    // that this command will not fix it, and what will.
+    expect(out).toContain("sender_unverified");
+    expect(out).toContain("READS");
+    expect(out).toContain("emails address set-verified pending@example.com");
+  });
+
+  it("does NOT mutate — the flag is unchanged after a verify", async () => {
+    const created = createAddress({ email: "untouched@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "verify", "untouched@example.com"]);
+    const { data } = await runAddressCommand(["address", "list", "--verbose"]);
+    const row = (data as Array<{ id: string; verified: boolean }>).find((a) => a.id === created.id);
+    expect(row?.verified).toBe(false);
+  });
+
+  it("stays quiet about the remedy once the address is verified", async () => {
+    createAddress({ email: "done@example.com", provider_id: "p1" });
+    await runAddressCommand(["address", "set-verified", "done@example.com", "--yes"]);
+    const { out } = await runAddressCommand(["address", "verify", "done@example.com"]);
+    expect(out).toContain("is verified");
+    expect(out).not.toContain("set-verified done@example.com");
   });
 });

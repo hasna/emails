@@ -7,14 +7,15 @@
  */
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { listEmails, getEmail, searchEmails, resolveEmailId } from "../../db/emails.local.js";
-import { getEmailContent } from "../../db/email-content.local.js";
+import { listEmails, getEmail, searchEmails, resolveEmailId } from "../../db/emails.js";
+import { getEmailContent } from "../../db/email-content.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.local.js";
 import { getPreferredActiveAddressEmail } from "../../db/addresses.local.js";
 import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db/database.js";
 import { getDefaultProviderId } from "../../lib/config.js";
 import { colorStatus } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
+import { registerEmailSendAlias } from "./email-send-alias.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.local.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.local.js";
@@ -84,12 +85,14 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
-    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
+    // ASYNC because the sent ledger reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
-        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
+        const emails = await listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
         if (emails.length === 0) { output([], chalk.dim("No sent emails found.")); return; }
         const lines: string[] = [];
         lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  ${"Subject".padEnd(36)}  Status`));
@@ -113,9 +116,9 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
-        const emails = searchEmails(query, {
+        const emails = await searchEmails(query, {
           since: opts.since,
           limit: parseCliPositiveIntOption(opts.limit, 20),
           offset: parseCliNonNegativeIntOption(opts.offset),
@@ -134,15 +137,16 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   emailCmd
     .command("show <id>")
     .description("Show full details and body of a sent email")
-    .action((id: string) => {
+    // ASYNC because the content family reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (id: string) => {
       // Re-use existing show logic
       try {
-        const db = getDatabase();
-        const resolvedId = resolveEmailId(id, db);
+        const resolvedId = await resolveEmailId(id);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
-        const emailRecord = getEmail(resolvedId!, db);
+        const emailRecord = await getEmail(resolvedId!);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const content = getEmailContent(resolvedId!, db);
+        const content = await getEmailContent(resolvedId!);
         console.log(chalk.bold(`\nEmail: ${emailRecord!.id}`));
         console.log(`  ${chalk.dim("Subject:")}  ${emailRecord!.subject}`);
         console.log(`  ${chalk.dim("From:")}     ${emailRecord!.from_address}`);
@@ -191,7 +195,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
         let threadId: string | null = null;
         const sentId = resolvePartialId(db, "emails", id);
-        const sent = sentId ? getEmail(sentId, db) : null;
+        const sent = sentId ? await getEmail(sentId) : null;
         if (sent) threadId = getEmailThreading(sent.id, db)?.thread_id ?? null;
         if (!threadId) {
           const inboundId = resolvePartialId(db, "inbound_emails", id);
@@ -233,15 +237,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
       } catch (e) { handleError(e); }
     });
 
-  emailCmd
-    .command("send")
-    .description("Send an email (alias of top-level `emails send`)")
-    .option("--from <email>", "Sender")
-    .option("--to <email...>", "Recipient(s)")
-    .option("--subject <subject>", "Subject")
-    .option("--body <text>", "Body")
-    .option("--provider <id>", "Provider ID")
-    .action(() => { console.log(chalk.dim("Use: emails send --from ... --to ... --subject ... --body ...")); });
+  // Forwards verbatim to the real `send` command — the previous stub here
+  // accepted a fully-specified send and exited 0 without sending (task
+  // 95f66fd3). The shared helper carries the full rationale.
+  registerEmailSendAlias(emailCmd, output);
 
   // ─── LOG ─────────────────────────────────────────────────────────────────────
   program.command("log").description("Show email send log (alias: emails email list)")
@@ -251,12 +250,14 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
-    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
+    // ASYNC because the sent ledger reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
-        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
+        const emails = await listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
         if (emails.length === 0) { output([], chalk.dim("No sent emails found.")); return; }
         const logLines: string[] = [];
         logLines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  ${"Subject".padEnd(40)}  Status`));
@@ -284,10 +285,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
         const limit = parseCliPositiveIntOption(opts.limit, 20);
-        const emails = searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
+        const emails = await searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
         if (emails.length === 0) {
           const formatted = chalk.dim(`No sent emails matching "${query}".`);
           output([], formatted);
@@ -316,21 +317,26 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   // ─── SHOW EMAIL ──────────────────────────────────────────────────────────────
   program.command("show <id>").description("Show full email details including body content")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolveEmailId(id, db);
+        const resolvedId = await resolveEmailId(id);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
-        const emailRecord = getEmail(resolvedId!, db);
+        const emailRecord = await getEmail(resolvedId!);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const content = getEmailContent(resolvedId!, db);
+        const content = await getEmailContent(resolvedId!);
 
         console.log(chalk.bold(`\nEmail: ${emailRecord!.id}`));
         console.log(`  ${chalk.dim("Subject:")}  ${emailRecord!.subject}`);
         console.log(`  ${chalk.dim("From:")}     ${emailRecord!.from_address}`);
         console.log(`  ${chalk.dim("To:")}       ${emailRecord!.to_addresses.join(", ")}`);
         if (emailRecord!.cc_addresses.length > 0) console.log(`  ${chalk.dim("CC:")}       ${emailRecord!.cc_addresses.join(", ")}`);
-        if (emailRecord!.bcc_addresses.length > 0) console.log(`  ${chalk.dim("BCC:")}      ${emailRecord!.bcc_addresses.join(", ")}`);
+        // `bcc_addresses` is null when the store does not record a bcc list, which is a
+        // different fact from "there were no bcc recipients" — printing nothing for both
+        // would publish the absence as the negative.
+        const bcc = emailRecord!.bcc_addresses;
+        if (bcc === null) console.log(`  ${chalk.dim("BCC:")}      ${chalk.dim("not recorded by this store")}`);
+        else if (bcc.length > 0) console.log(`  ${chalk.dim("BCC:")}      ${bcc.join(", ")}`);
         if (emailRecord!.reply_to) console.log(`  ${chalk.dim("Reply-To:")} ${emailRecord!.reply_to}`);
         console.log(`  ${chalk.dim("Status:")}   ${colorStatus(emailRecord!.status)}`);
         console.log(`  ${chalk.dim("Sent:")}     ${emailRecord!.sent_at}`);
@@ -338,20 +344,24 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const replyCount = getReplyCount(resolvedId!, db);
         if (replyCount > 0) console.log(`  ${chalk.dim("Replies:")}  ${chalk.cyan(String(replyCount))} (use 'emails replies ${id}' to view)`);
 
-        if (content) {
-          const headers = content.headers;
-          if (Object.keys(headers).length > 0) {
-            console.log(chalk.bold("\n  Headers:"));
-            for (const [k, v] of Object.entries(headers)) {
-              console.log(`    ${chalk.dim(k + ":")} ${v}`);
-            }
+        const headers = content?.headers ?? {};
+        if (Object.keys(headers).length > 0) {
+          console.log(chalk.bold("\n  Headers:"));
+          for (const [k, v] of Object.entries(headers)) {
+            console.log(`    ${chalk.dim(k + ":")} ${v}`);
           }
+        }
 
-          if (content.text_body || content.html) {
-            console.log(chalk.bold("\n  Body:"));
-            console.log(readableMessageText(content.text_body, content.html).split("\n").map((l: string) => `    ${l}`).join("\n"));
-          }
+        if (content?.text_body || content?.html) {
+          console.log(chalk.bold("\n  Body:"));
+          console.log(readableMessageText(content.text_body, content.html).split("\n").map((l: string) => `    ${l}`).join("\n"));
         } else {
+          // KEYED ON THE BODY, NOT ON THE RECORD. This branch used to be `else` to
+          // `if (content)`, i.e. it fired only when the reader returned null — which it did
+          // when the content ROW was missing. Null now means "no such message" and nothing
+          // else, so a message with an empty body returns a record whose fields are null and
+          // this notice would never have printed again. The condition is the one the operator
+          // cares about either way: is there a body to show.
           console.log(chalk.dim("\n  No body content stored for this email."));
         }
         console.log();
@@ -380,11 +390,13 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
     .option("--limit <n>", "Max reply bodies", String(DEFAULT_REPLY_LIMIT))
     .option("--offset <n>", "Skip first N replies", "0")
-    .action((id: string, opts: ReplyPageOpts) => {
+    // ASYNC because the sent ledger reads through the store seam. Commander awaits an
+    // action's promise, so a rejection still reaches the same `handleError` path.
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
-        const emailRecord = getEmail(resolvedId, db);
+        const emailRecord = await getEmail(resolvedId);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
         const { limit, offset } = parseReplyPage(opts);
         const total = getReplyCount(resolvedId, db);
@@ -476,7 +488,8 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Number of rows to skip")
     .option("--format <fmt>", "Output format: json | csv", "json")
     .option("--output <file>", "Write to file instead of stdout")
-    .action((type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
+    // ASYNC because the email export reads the sent ledger through the store seam.
+    .action(async (type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
       try {
         if (type !== "emails" && type !== "events") {
           handleError(new Error("Export type must be 'emails' or 'events'"));
@@ -493,16 +506,22 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
         if (type === "emails") {
           const filters = { provider_id: providerId, from_address: opts.from, since: opts.since, until: opts.until, ...page };
-          result = fmt === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+          result = fmt === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
         } else {
           const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
-          result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
+          result = fmt === "csv" ? await exportEventsCsv(filters) : await exportEventsJson(filters);
         }
 
         if (opts.output) {
           const { writeFileSync } = require("node:fs");
           writeFileSync(opts.output, result, "utf-8");
-          console.log(chalk.green("✓ Exported " + type + " to " + opts.output));
+          output({ exported: type, format: fmt, output: opts.output }, chalk.green("✓ Exported " + type + " to " + opts.output));
+        } else if (fmt === "json") {
+          // output(parsed, raw) rather than console.log(raw): the export is
+          // already a JSON string, and under --json the console wrapper
+          // re-encoded it as {"output":["<entire export as one string>"]}
+          // (task 15908bba).
+          output(JSON.parse(result), result);
         } else {
           console.log(result);
         }
@@ -520,7 +539,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID to associate events with")
     .action(async (opts: { port?: string; provider?: string }) => {
       try {
-        const { createWebhookServer } = await import("../../lib/webhook.local.js");
+        const { createWebhookServer } = await import("../../lib/webhook.js");
         const port = parseInt(opts.port ?? "9877", 10);
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         createWebhookServer(port, providerId);

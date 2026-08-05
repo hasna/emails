@@ -133,7 +133,9 @@ async function ensureS3Bucket(s3: S3Client, s3Sdk: S3Sdk, bucket: string, region
  * domain's grant — only the last-adopted domain can receive; all others bounce
  * with "recipient error" because SES can't write their objects. Granting the
  * shared base makes the policy identical for every domain → idempotent, no
- * clobbering.
+ * clobbering. (Statements this module does NOT own are protected separately:
+ * {@link mergeSesBucketPolicy} upserts only `AllowSESPuts` into the fetched
+ * policy — this builder's output is never Put wholesale.)
  *
  * The aws:SourceAccount condition must be the REAL account id — a literal "*"
  * with StringEquals never matches, which denies SES
@@ -156,11 +158,127 @@ export function buildSesBucketPolicy(bucket: string, prefix: string, accountId?:
   return { Version: "2012-10-17", Statement: [statement] };
 }
 
+/**
+ * Thrown when a bucket's EXISTING policy cannot be parsed into statements whose
+ * Sids we can read. `PutBucketPolicy` replaces the whole document, so writing
+ * over a policy we could not read would silently destroy statements we never
+ * saw — exactly the failure that froze prod ingestion on 2026-07-28 (incident
+ * d226ac44). Fail closed: surface the document, never overwrite it.
+ */
+export class BucketPolicyParseError extends Error {
+  constructor(
+    readonly bucket: string,
+    detail: string,
+  ) {
+    super(
+      `Refusing to update the policy on bucket "${bucket}": the existing policy could not be parsed (${detail}). ` +
+        `PutBucketPolicy replaces the whole document, so writing now would destroy statements we cannot see. ` +
+        `Inspect and repair the bucket policy, then re-run.`,
+    );
+    this.name = "BucketPolicyParseError";
+  }
+}
+
+/** The one statement Sid this module owns inside a shared inbound bucket policy. */
+const OWNED_SES_PUTS_SID = "AllowSESPuts";
+
+/**
+ * Merge the SES grant into a bucket's existing policy document.
+ *
+ * `PutBucketPolicy` REPLACES the entire policy, and shared inbound buckets carry
+ * statements this module does not own (e.g. cross-account read/list grants for
+ * ingest workers). The 2026-07-28 outage was a wholesale Put of
+ * `buildSesBucketPolicy`'s AllowSESPuts-only document wiping those grants and
+ * freezing prod ingestion for 86 minutes. So: upsert ONLY the statement this
+ * module owns, keyed by its exact Sid.
+ *
+ * Contract (pure + testable):
+ * - No existing document → exactly `buildSesBucketPolicy`'s output.
+ * - Foreign statements (any other Sid, or no Sid) are preserved verbatim and in
+ *   their original order; foreign top-level fields (Version, Id, …) are kept.
+ * - An existing `AllowSESPuts` is replaced IN PLACE; extra occurrences are
+ *   dropped; absent → appended. Never duplicated. Two runs → byte-identical.
+ * - A document that cannot be parsed into Sid-readable statements throws
+ *   {@link BucketPolicyParseError}; callers must not write anything.
+ */
+export function mergeSesBucketPolicy(existingPolicyJson: string | undefined, bucket: string, prefix: string, accountId?: string): string {
+  const fresh = buildSesBucketPolicy(bucket, prefix, accountId) as { Version: string; Statement: [Record<string, unknown>] };
+  const owned = fresh.Statement[0];
+  if (existingPolicyJson === undefined || existingPolicyJson.trim() === "") {
+    return JSON.stringify(fresh);
+  }
+
+  let doc: unknown;
+  try {
+    doc = JSON.parse(existingPolicyJson);
+  } catch (e: unknown) {
+    throw new BucketPolicyParseError(bucket, e instanceof Error ? e.message : "invalid JSON");
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) {
+    throw new BucketPolicyParseError(bucket, "the policy document is not a JSON object");
+  }
+  const record = doc as Record<string, unknown>;
+
+  // AWS's policy grammar allows Statement to be a lone statement object as well
+  // as an array; normalize to an array without touching the statements themselves.
+  const rawStatement = record["Statement"];
+  let statements: unknown[];
+  if (rawStatement === undefined || rawStatement === null) statements = [];
+  else if (Array.isArray(rawStatement)) statements = rawStatement;
+  else if (typeof rawStatement === "object") statements = [rawStatement];
+  else throw new BucketPolicyParseError(bucket, "Statement is neither an array nor an object");
+  for (const statement of statements) {
+    if (typeof statement === "object" && statement !== null && !Array.isArray(statement)) continue;
+    // A statement whose Sid cannot be read cannot be safely classified as
+    // owned-vs-foreign — refuse rather than guess.
+    throw new BucketPolicyParseError(bucket, "a policy statement is not a JSON object");
+  }
+
+  let replaced = false;
+  const merged: unknown[] = [];
+  for (const statement of statements) {
+    const sid = (statement as Record<string, unknown>)["Sid"];
+    if (sid === OWNED_SES_PUTS_SID) {
+      // Replace the first owned occurrence in place (order-stable); drop any
+      // later duplicates so the owned statement is never doubled.
+      if (!replaced) {
+        merged.push(owned);
+        replaced = true;
+      }
+    } else {
+      merged.push(statement); // foreign — preserved verbatim, original order
+    }
+  }
+  if (!replaced) merged.push(owned);
+
+  record["Version"] ??= fresh.Version;
+  record["Statement"] = merged;
+  return JSON.stringify(record);
+}
+
+/**
+ * Get → merge-by-Sid → Put. Never a blind Put: the current policy is fetched
+ * first (NoSuchBucketPolicy = start empty), the owned statement is upserted by
+ * {@link mergeSesBucketPolicy}, and every foreign statement survives. Any other
+ * failure to read the policy propagates — an unread policy must never be
+ * overwritten.
+ */
 async function attachSesBucketPolicy(s3: S3Client, s3Sdk: S3Sdk, bucket: string, prefix: string, accountId?: string): Promise<void> {
-  const { PutBucketPolicyCommand } = s3Sdk;
+  const { GetBucketPolicyCommand, PutBucketPolicyCommand } = s3Sdk;
+  let existing: string | undefined;
+  try {
+    const current = await s3.send(new GetBucketPolicyCommand({ Bucket: bucket }));
+    existing = current.Policy ?? undefined;
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === "NoSuchBucketPolicy") {
+      existing = undefined; // no policy yet — start from empty
+    } else {
+      throw e;
+    }
+  }
   await s3.send(new PutBucketPolicyCommand({
     Bucket: bucket,
-    Policy: JSON.stringify(buildSesBucketPolicy(bucket, prefix, accountId)),
+    Policy: mergeSesBucketPolicy(existing, bucket, prefix, accountId),
   }));
 }
 

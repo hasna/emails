@@ -4,7 +4,7 @@
 
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { handleError } from "../utils.js";
+import { handleError, resolveId } from "../utils.js";
 
 export function registerAwsCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const awsCmd = program.command("aws").description("AWS infrastructure setup for email (S3, SES receipt rules)");
@@ -20,12 +20,90 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
     .option("--prefix <prefix>", "S3 key prefix (default: inbound/<domain>/)")
     .option("--catch-all", "Also catch subdomains (*.example.com)")
     .option("--profile <profile>", "AWS profile name (uses env vars if not set)")
-    .option("--provider <id>", "SES provider id for local source provenance")
-    .action(async () => {
+    .option("--provider <id>", "SES provider id recorded on the registered S3 source")
+    // Runs against the operator's OWN AWS credentials, exactly like the sibling
+    // `aws status` and like the SES/S3 leg of `emails domain adopt` — which has
+    // been calling `setupInboundEmail` + `addInboundBucket` + `registerS3Source`
+    // in every configuration all along. There is no deployment mode in which
+    // this needs a server: SES receipt rules live in AWS, not in `/v1`, and
+    // `openapi.ts` exposes no inbound-setup route for a server to answer with.
+    // The previous unconditional throw therefore refused a capability the
+    // process could perform, and blamed a mode for it.
+    .action(async (opts: {
+      domain: string; bucket?: string; region?: string;
+      prefix?: string; catchAll?: boolean; profile?: string; provider?: string;
+    }) => {
       try {
-        throw new Error(
-          "emails aws setup-inbound is not available in the self-hosted client; it runs on the self-hosted server.",
-        );
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const inbound = getInboundConfig();
+        const profile = opts.profile ?? inbound.profile;
+        if (profile) process.env["AWS_PROFILE"] = profile;
+        const bucket = opts.bucket ?? inbound.bucket;
+        const region = opts.region ?? inbound.region;
+        if (!bucket) {
+          handleError(new Error(
+            // Points at mechanisms that exist: there is no `emails config set`
+            // command (task 0d03f185).
+            "No S3 bucket for inbound mail: pass --bucket, or set EMAILS_INBOUND_S3_BUCKET "
+            + "(equivalently the inbound_s3_bucket config key, which `emails domain adopt` records).",
+          ));
+          return;
+        }
+        // Resolved BEFORE any AWS call so a bad --provider fails without leaving
+        // a half-created bucket behind.
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+
+        const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
+        console.log(chalk.dim(`Setting up inbound email for ${opts.domain}...`));
+        console.log(chalk.dim(`  [1/3] Setting up S3 bucket: ${bucket}`));
+        const result = await setupInboundEmail({
+          domain: opts.domain,
+          bucket,
+          region,
+          prefix: opts.prefix,
+          catchAll: opts.catchAll,
+        });
+        console.log(chalk.green(result.bucket_created
+          ? `  ✓ S3 bucket created: ${result.bucket}`
+          : `  ✓ S3 bucket already exists: ${result.bucket}`));
+
+        console.log(chalk.dim("  [2/3] Configuring SES receipt rules..."));
+        console.log(chalk.green(result.rule_set_created
+          ? `  ✓ Receipt rule set created: ${result.rule_set}`
+          : `  ✓ Using rule set: ${result.rule_set}`));
+        console.log(chalk.green(result.rule_created
+          ? `  ✓ Receipt rule created: ${result.rule_name}`
+          : `  ✓ Receipt rule already exists: ${result.rule_name}`));
+
+        // Register the bucket + source so `inbox sync-s3` / the watcher pick the
+        // mail up; without this the receipt rule delivers into a bucket nothing
+        // reads. Same two calls `domain adopt` makes.
+        console.log(chalk.dim("  [3/3] Registering the bucket for inbound sync..."));
+        const [{ addInboundBucket, setConfigValue }, { registerS3Source }] = await Promise.all([
+          import("../../lib/config.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
+        if (profile) setConfigValue("inbound_s3_profile", profile);
+        addInboundBucket(result.bucket, region, providerId);
+        const source = registerS3Source({
+          bucket: result.bucket,
+          prefix: result.s3_prefix,
+          region,
+          providerId,
+          name: `${opts.domain} SES/S3 inbound`,
+          status: "live",
+          liveSyncEnabled: true,
+        });
+        console.log(chalk.green(`  ✓ Source registered: ${source.id}`));
+
+        console.log(chalk.bold("\nSetup complete!"));
+        console.log(`\n  Emails to ${chalk.cyan(`*@${opts.domain}`)} → ${chalk.cyan(`s3://${result.bucket}/${result.s3_prefix}`)}\n`);
+        console.log(chalk.bold("  Required DNS record (publish it yourself — this command writes no DNS):"));
+        console.log(chalk.yellow(`\n    MX  ${opts.domain}  ${result.mx_record}\n`));
+        console.log(chalk.dim("  To sync received emails:"));
+        console.log(chalk.dim(`    emails inbox sync-s3 --source ${source.id}\n`));
+
+        output({ ...result, source }, "");
       } catch (e) { handleError(e); }
     });
 

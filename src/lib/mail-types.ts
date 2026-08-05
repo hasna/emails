@@ -97,6 +97,15 @@ export interface TuiMessage {
   status?: string;
   /** Send-intent state (self-hosted ledger); undefined when unreported. */
   send_state?: string;
+  /**
+   * Why an outbound policy gate refused this message (e.g. `sender_unverified`);
+   * undefined when it was not refused. `send_state = "blocked"` on its own says a
+   * send was stopped but not why, and the reason lived only in the server's
+   * headers.policy_denial — invisible on every CLI path. A blocked row that cannot
+   * state its cause is why a refused customs email read as the bare word "blocked"
+   * for five days (2026-07-27).
+   */
+  policy_denial?: string;
 }
 
 export interface TuiThreadMessage {
@@ -520,6 +529,8 @@ export interface ComposeInput {
   attachments?: Array<{ filename: string; content: string; content_type: string }>;
   idempotencyKey?: string;
   providerId?: string;
+  /** RFC 8058 one-click unsubscribe target; the provider injects the header pair. */
+  unsubscribeUrl?: string;
   markdown?: boolean;
   replyTo?: TuiMessage;
 }

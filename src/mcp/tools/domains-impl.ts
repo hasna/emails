@@ -7,7 +7,7 @@ import { suspendAddress, activateAddress, setAddressQuota } from '../../db/addre
 import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
 import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from '../../db/send-keys.js';
 import { getProvider } from '../../db/providers.js';
-import { getAdapter } from '../../providers/index.js';
+import { getAdapter, providerDnsPublishing } from '../../providers/index.js';
 import { assessDomainReadiness } from '../../lib/domain-readiness.js';
 import { resolveEmailsMode } from '../../lib/mode.js';
 import { formatError, resolveId, DomainNotFoundError, AddressNotFoundError, ProviderNotFoundError } from '../helpers.js';
@@ -78,14 +78,36 @@ function resolveSelfHostedAddressRef(ref: string): EmailAddress {
   throw new AddressNotFoundError(trimmed);
 }
 
-function assertAliasLocalStateAllowed(toolName: string): void {
-  if (resolveEmailsMode().mode !== "self_hosted") return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because it reads or writes local alias routing state. ` +
-      "Use the self-hosted Emails API for server-owned alias routing, or set EMAILS_MODE=local only for an explicit local alias store.",
-  );
-}
-
+/**
+ * Refuse a tool that NO mode can serve, naming the reason.
+ *
+ * The only two left are `get_dns_records` and `verify_domain`. They do not read a
+ * row — they call a provider adapter (`getAdapter(provider).getDnsRecords` /
+ * `.verifyDomain`), and in self_hosted mode `getProvider` returns a `/v1/providers`
+ * row whose credential columns do not exist server-side, so the adapter would fall
+ * back to the CLIENT's own ambient AWS or Cloudflare credentials. That credential
+ * fallback is the whole reason, and it stands on its own: neither tool has a `/v1`
+ * route, so this is not a guard in front of a working one.
+ *
+ * The CLI twins are NOT symmetric with it, and saying so is the point:
+ *
+ *   * `emails domain verify` refuses (`notImplementedAnywhere`) — wiring a WRITE
+ *     to `.verifyDomain` behind ambient credentials is the decision nobody made.
+ *   * `emails domain dns` RUNS in both configurations. It is a read, and its
+ *     no-provider path (the generic SPF/DMARC pair from `src/lib/dns.ts`) needs no
+ *     credentials at all; only a resolved provider reaches the adapter. An agent
+ *     that hits this refusal should be told to run that command — which is why
+ *     `cliEquivalentForTool` still maps the tool to it.
+ *
+ * So do not "restore symmetry" by re-refusing the CLI command or by deleting this
+ * guard on the strength of the CLI running: the two surfaces differ because an MCP
+ * client's ambient environment is not the operator's shell.
+ *
+ * Every other tool that used to call this (and the alias-specific variant beside
+ * it) had a working `/v1` route, a complete client arm in `src/db/*.remote.ts`, and
+ * a CLI twin that already performed the same operation over the same route. Those
+ * guards were the only thing refusing and are gone.
+ */
 function assertMcpLocalStateAllowed(toolName: string, reason: string): void {
   if (resolveEmailsMode().mode !== "self_hosted") return;
   throw new Error(
@@ -221,7 +243,12 @@ export function registerDomainTools(server: McpServer): void {
       const adapter = getAdapter(provider);
       const records = await adapter.getDnsRecords(domain);
       const { formatDnsTable } = await import("../../lib/dns.js");
-      return { content: [{ type: "text", text: formatDnsTable(records) }] };
+      // Sandbox returns [] by design, so the empty case must not read as a failed
+      // lookup. Asked only when it can matter: a provider type `getAdapter()`
+      // accepts but `providerDnsPublishing()` does not would otherwise turn a
+      // perfectly good table into an error.
+      const support = records.length === 0 ? providerDnsPublishing(provider) : undefined;
+      return { content: [{ type: "text", text: formatDnsTable(records, support) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -278,7 +305,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain_id }) => {
     try {
-      assertMcpLocalStateAllowed("remove_domain", "it mutates local domain rows");
       const id = resolveId("domains", domain_id);
       const domain = getDomain(id);
       if (!domain) throw new DomainNotFoundError(id);
@@ -399,11 +425,11 @@ export function registerDomainTools(server: McpServer): void {
 
   // ─── ADDRESS OWNERSHIP ────────────────────────────────────────────────────────
   // These five tools are NOT local-state tools. `src/lib/address-ownership.ts`
-  // reads and writes through `src/db/owners.ts`, which routes to
-  // `src/db/owners.remote.ts` in self_hosted mode: owners come from `/v1/owners`,
-  // owner_id/administrator_id are patched on `/v1/addresses/<id>`, and the audit
-  // trail is `/v1/address-ownership-events`. So they run in BOTH modes and carry
-  // no self_hosted guard.
+  // reads and writes through `src/db/owners.ts`, which has collapsed onto the store
+  // seam: owner rows go through the `owners` repository, owner_id/administrator_id
+  // through `addresses`/`addressLifecycle`, and the audit trail through the
+  // address-ownership ledger — all against whichever store this installation's
+  // STORAGE configuration names, so they carry no self_hosted guard.
   server.tool(
   "get_address_owner",
   "Show owner and administering agent for an address by email or ID.",
@@ -413,7 +439,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address }) => {
     try {
       const { getAddressOwnershipDetail } = await import('../../lib/address-ownership.js');
-      const detail = getAddressOwnershipDetail(address);
+      const detail = await getAddressOwnershipDetail(address);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address owner ${address} --json`,
@@ -435,7 +461,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, owner, administrator }) => {
     try {
       const { setAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = setAddressOwnerByRef(address, owner, administrator);
+      const detail = await setAddressOwnerByRef(address, owner, administrator);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address set-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --json`,
@@ -459,7 +485,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, owner, administrator, reason, actor }) => {
     try {
       const { transferAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
+      const detail = await transferAddressOwnerByRef(address, owner, administrator, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address transfer-owner ${address} --owner ${owner}${administrator ? ` --administrator ${administrator}` : ""} --reason ${JSON.stringify(reason)} --yes --json`,
@@ -481,7 +507,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, reason, actor }) => {
     try {
       const { unassignAddressOwnerByRef } = await import('../../lib/address-ownership.js');
-      const detail = unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
+      const detail = await unassignAddressOwnerByRef(address, { actor: actor ?? "mcp", reason });
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address unassign-owner ${address} --reason ${JSON.stringify(reason)} --yes --json`,
@@ -502,7 +528,7 @@ export function registerDomainTools(server: McpServer): void {
   async ({ address, limit }) => {
     try {
       const { getAddressOwnershipHistoryByRef } = await import('../../lib/address-ownership.js');
-      const detail = getAddressOwnershipHistoryByRef(address, limit ?? 20);
+      const detail = await getAddressOwnershipHistoryByRef(address, limit ?? 20);
       return { content: [{ type: "text", text: JSON.stringify({
         ...detail,
         cli_equivalent: `emails address owner-history ${address} --limit ${limit ?? 20} --json`,
@@ -521,7 +547,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain }) => {
     try {
-      assertMcpLocalStateAllowed("suggest_address", "it reads local configured address rows");
       const { suggestAddressLocalParts } = await import('../../lib/address-ownership.js');
       const suggestions = suggestAddressLocalParts(domain, listAddressEmails());
       return { content: [{ type: "text", text: JSON.stringify({
@@ -597,7 +622,6 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("remove_address", "it mutates local address rows");
       const id = resolveId("addresses", address_id);
       const addr = getAddress(id);
       if (!addr) throw new AddressNotFoundError(id);
@@ -617,10 +641,9 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("suspend_address", "it mutates local address lifecycle rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = suspendAddress(id);
+      const addr = await suspendAddress(id);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -636,10 +659,9 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id }) => {
     try {
-      assertMcpLocalStateAllowed("activate_address", "it mutates local address lifecycle rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = activateAddress(id);
+      const addr = await activateAddress(id);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -656,10 +678,9 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ address_id, per_day }) => {
     try {
-      assertMcpLocalStateAllowed("set_address_quota", "it mutates local address quota rows");
       const id = resolveId("addresses", address_id);
       if (!getAddress(id)) throw new AddressNotFoundError(id);
-      const addr = setAddressQuota(id, per_day ?? null);
+      const addr = await setAddressQuota(id, per_day ?? null);
       return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -676,8 +697,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias, target }) => {
     try {
-      assertAliasLocalStateAllowed("add_alias");
-      const a = createAlias(alias, target);
+      const a = await createAlias(alias, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -694,8 +714,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, target }) => {
     try {
-      assertAliasLocalStateAllowed("add_catch_all");
-      const a = createCatchAll(domain, target);
+      const a = await createCatchAll(domain, target);
       return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -713,8 +732,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ domain, limit, offset }) => {
     try {
-      assertAliasLocalStateAllowed("list_aliases");
-      const aliases = listAliases(domain, { limit: limit ?? 100, offset: offset ?? 0 });
+      const aliases = await listAliases(domain, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(aliases, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -730,10 +748,9 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ alias_id }) => {
     try {
-      assertAliasLocalStateAllowed("remove_alias");
-      const a = getAlias(alias_id);
+      const a = await getAlias(alias_id);
       if (!a) throw new Error(`Alias not found: ${alias_id}`);
-      removeAlias(alias_id);
+      await removeAlias(alias_id);
       return { content: [{ type: "text", text: `Alias removed: ${a.local_part}@${a.domain}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -749,8 +766,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ recipient }) => {
     try {
-      assertAliasLocalStateAllowed("resolve_alias");
-      const target = resolveAlias(recipient);
+      const target = await resolveAlias(recipient);
       return { content: [{ type: "text", text: JSON.stringify({ recipient, target }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -767,7 +783,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, label }) => {
     try {
-      const { token, key } = createSendKey(owner_id, label);
+      const { token, key } = await createSendKey(owner_id, label);
       return { content: [{ type: "text", text: JSON.stringify({ token, id: key.id, owner_id: key.owner_id, label: key.label, note: "Store the token now — it will not be shown again." }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -785,7 +801,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, limit, offset }) => {
     try {
-      const keys = listSendKeySummaries(owner_id, { limit: limit ?? 100, offset: offset ?? 0 });
+      const keys = await listSendKeySummaries(owner_id, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(keys, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -801,9 +817,11 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ key_id }) => {
     try {
-      if (!getSendKey(key_id)) throw new Error(`Send key not found: ${key_id}`);
-      revokeSendKey(key_id);
-      return { content: [{ type: "text", text: `Send key revoked: ${key_id}` }] };
+      if (!(await getSendKey(key_id))) throw new Error(`Send key not found: ${key_id}`);
+      // `revokeSendKey` answers false for a key that was ALREADY revoked. Reporting a
+      // revocation that did not happen is the bug this branch removes.
+      const revoked = await revokeSendKey(key_id);
+      return { content: [{ type: "text", text: revoked ? `Send key revoked: ${key_id}` : `Send key was already revoked: ${key_id}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -819,7 +837,7 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ owner_id, from }) => {
     try {
-      const authorized = canOwnerSendFrom(owner_id, from);
+      const authorized = await canOwnerSendFrom(owner_id, from);
       return { content: [{ type: "text", text: JSON.stringify({ owner_id, from, authorized }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };

@@ -34,7 +34,9 @@ let stub: V1Stub;
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true`: the collapsed sequences family reaches `/v1` through the real
+  // HTTP store, which reads the published contract before filtered reads and writes.
+  stub = await startV1Stub({ openapi: true });
 });
 
 afterAll(() => stub.stop());
@@ -87,12 +89,12 @@ describe("template/contact/sequence parity", () => {
     await expectCliOk(runCli(["--json", "sequence", "step", "add", "onboarding", "--step", "1", "--delay", "0", "--template", "welcome"]));
     await expectCliOk(runCli(["--json", "sequence", "enroll", "onboarding", "user@example.com", "--provider", providerId]));
 
-    expect(getTemplate("welcome")?.subject_template).toBe("Welcome {{name}}");
-    expect(isContactSuppressed("user@example.com")).toBe(true);
-    const sequence = getSequence("onboarding")!;
+    expect((await getTemplate("welcome"))?.subject_template).toBe("Welcome {{name}}");
+    expect(await isContactSuppressed("user@example.com")).toBe(true);
+    const sequence = (await getSequence("onboarding"))!;
     expect(sequence.name).toBe("onboarding");
-    expect(listSteps(sequence.id)).toHaveLength(1);
-    expect(listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
+    expect(await listSteps(sequence.id)).toHaveLength(1);
+    expect(await listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
       contact_email: "user@example.com",
       provider_id: providerId,
     }));
@@ -116,41 +118,52 @@ describe("template/contact/sequence parity", () => {
       await callTool(client, "suppress_contact", { email: "user@example.com" });
       const sequence = await callTool<{ id: string }>(client, "create_sequence", { name: "onboarding" });
 
-      expect(listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
-      expect(listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
-      expect(getSequence("onboarding")?.id).toBe(sequence.id);
+      expect(await listTemplates()).toContainEqual(expect.objectContaining({ name: "welcome" }));
+      expect(await listContacts({ suppressed: true })).toContainEqual(expect.objectContaining({ email: "user@example.com" }));
+      expect((await getSequence("onboarding"))?.id).toBe(sequence.id);
 
-      // Sequence sub-ledger writes (steps/enrollments) are DISABLED over MCP in
-      // self_hosted API-only mode — that server-owned state is written via the
-      // authenticated Emails API, not the MCP local write tools.
-      const step = await client.callTool({
-        name: "add_sequence_step",
-        arguments: { sequence_id: sequence.id, step_number: 1, delay_hours: 0, template_name: "welcome" },
-      }, undefined, { timeout: 10_000 });
-      expect(step.isError).toBe(true);
-      expect((step.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
+      // Sequence steps and enrollments are `/v1/sequence-steps` and
+      // `/v1/sequence-enrollments`, so writing them over MCP is IN parity: the row
+      // the tool creates is the same row the exported library functions read back.
+      // These two calls used to be refused with "disabled in self_hosted API-only
+      // mode" while `emails sequence step add` / `emails sequence enroll` wrote the
+      // very same rows over the very same route — the guard was the only refusal.
+      await callTool(client, "add_sequence_step", {
+        sequence_id: sequence.id,
+        step_number: 1,
+        delay_hours: 0,
+        template_name: "welcome",
+      });
+      await callTool(client, "enroll_contact", {
+        sequence_id: sequence.id,
+        contact_email: "user@example.com",
+        provider_id: provider.id,
+      });
 
-      const enrollResult = await client.callTool({
-        name: "enroll_contact",
-        arguments: { sequence_id: sequence.id, contact_email: "user@example.com", provider_id: provider.id },
-      }, undefined, { timeout: 10_000 });
-      expect(enrollResult.isError).toBe(true);
-      expect((enrollResult.content[0] as { text: string }).text).toContain("disabled in self_hosted API-only mode");
+      expect(await listSteps(sequence.id)).toContainEqual(expect.objectContaining({ step_number: 1, template_name: "welcome" }));
+      expect(await listEnrollments({ sequence_id: sequence.id })).toContainEqual(expect.objectContaining({
+        contact_email: "user@example.com",
+        provider_id: provider.id,
+        status: "active",
+      }));
     } finally {
       await client.close();
     }
   }, 30_000);
 
-  it("covers the workflow through exported library functions including due-step processing", () => {
-    createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
-    suppressContact("user@example.com");
-    const seq = createSequence({ name: "onboarding" });
-    addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
-    const enrollment = enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
+  it("covers the workflow through exported library functions including due-step processing", async () => {
+    await createTemplate({ name: "welcome", subject_template: "Welcome {{name}}", text_template: "Hi {{name}}" });
+    // The collapsed contacts family is async too — an un-awaited suppress here leaked
+    // its rejection into the NEXT test file when the stub env was already torn down.
+    await suppressContact("user@example.com");
+    // The collapsed sequences family is async; every call below is awaited.
+    const seq = await createSequence({ name: "onboarding" });
+    await addStep({ sequence_id: seq.id, step_number: 1, delay_hours: 0, template_name: "welcome" });
+    const enrollment = await enroll({ sequence_id: seq.id, contact_email: "user@example.com" });
 
-    expect(renderTemplate(getTemplate("welcome")!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
-    expect(isContactSuppressed("user@example.com")).toBe(true);
-    expect(getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
-    expect(advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });
+    expect(renderTemplate((await getTemplate("welcome"))!.subject_template, { name: "Ada" })).toBe("Welcome Ada");
+    expect(await isContactSuppressed("user@example.com")).toBe(true);
+    expect(await getDueEnrollments()).toContainEqual(expect.objectContaining({ id: enrollment.id }));
+    expect(await advanceEnrollment(enrollment.id)).toMatchObject({ status: "completed" });
   });
 });

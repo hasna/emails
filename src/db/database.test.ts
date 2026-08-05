@@ -137,8 +137,8 @@ describe("getDatabase", () => {
     const db = getDatabase();
     const providerId = uuid();
     db.run(
-      "INSERT INTO providers (id, name, type, api_key, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)",
-      [providerId, "guarded", "resend", "k", now(), now()],
+      "INSERT INTO providers (id, name, type, active, created_at, updated_at) VALUES (?,?,?,1,?,?)",
+      [providerId, "guarded", "resend", now(), now()],
     );
     db.run(
       `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses,

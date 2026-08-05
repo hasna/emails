@@ -20,8 +20,8 @@ async function isSelfHostedRuntimeMode(): Promise<boolean> {
   return resolveEmailsMode().mode === "self_hosted";
 }
 
-async function assertSelfHostedApiRouteReady(toolName: string): Promise<boolean> {
-  if (!(await isSelfHostedRuntimeMode())) return false;
+async function assertSelfHostedApiRouteReady(toolName: string): Promise<void> {
+  if (!(await isSelfHostedRuntimeMode())) return;
   const { isSelfHostedMode } = await import("../../db/self-hosted-store.js");
   if (!isSelfHostedMode()) {
     throw new Error(
@@ -29,15 +29,6 @@ async function assertSelfHostedApiRouteReady(toolName: string): Promise<boolean>
         "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. Set EMAILS_MODE=local only for an explicit local group store.",
     );
   }
-  return true;
-}
-
-async function assertGroupMemberStateAllowed(toolName: string, reason: string): Promise<void> {
-  if (!(await isSelfHostedRuntimeMode())) return;
-  throw new Error(
-    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
-      "Use the self-hosted Emails API for server-owned group member state, or set EMAILS_MODE=local only for an explicit local group-member ledger.",
-  );
 }
 
 export function registerMiscOpsTools(server: McpServer): void {
@@ -52,18 +43,17 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ limit, offset }) => {
     try {
-      const selfHosted = await assertSelfHostedApiRouteReady("list_groups");
+      await assertSelfHostedApiRouteReady("list_groups");
       const { listGroups, getMemberCounts } = await import('../../db/groups.js');
-      const groups = listGroups({ limit: limit ?? 100, offset: offset ?? 0 });
-      const result = selfHosted
-        ? groups
-        : (() => {
-            const counts = getMemberCounts(groups.map((group) => group.id));
-            return groups.map(g => ({
-              ...g,
-              member_count: counts.get(g.id) ?? 0,
-            }));
-          })();
+      const groups = await listGroups({ limit: limit ?? 100, offset: offset ?? 0 });
+      // Uniform in every configuration now that counts are exact over the store seam.
+      // The API-backed variant used to OMIT member_count because its counts came from
+      // one clamped page; the collapsed family counts the whole table or refuses.
+      const counts = await getMemberCounts(groups.map((group) => group.id));
+      const result = groups.map((g) => ({
+        ...g,
+        member_count: counts.get(g.id) ?? 0,
+      }));
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -82,7 +72,7 @@ export function registerMiscOpsTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("create_group");
       const { createGroup } = await import('../../db/groups.js');
-      const group = createGroup(name, description);
+      const group = await createGroup(name, description);
       return { content: [{ type: "text", text: JSON.stringify(group, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -100,9 +90,9 @@ export function registerMiscOpsTools(server: McpServer): void {
     try {
       await assertSelfHostedApiRouteReady("delete_group");
       const { getGroupByName, deleteGroup } = await import('../../db/groups.js');
-      const group = getGroupByName(name);
+      const group = await getGroupByName(name);
       if (!group) throw new Error(`Group not found: ${name}`);
-      deleteGroup(group.id);
+      await deleteGroup(group.id);
       return { content: [{ type: "text", text: `Group deleted: ${name}` }] };
     } catch (e) {
       return toolError(e);
@@ -110,6 +100,12 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   );
 
+  // Group MEMBERS are a repository resource in every configuration (local SQLite
+  // `group_members`, `/v1/group-members` on the self-hosted server), and the
+  // collapsed `src/db/groups.ts` reaches both through the store seam. The four
+  // member tools below therefore carry no mode guard — they are the MCP twins of
+  // `emails group add|remove-member|members|show`, which already perform the same
+  // operations over the same route.
   server.tool(
   "add_group_member",
   "Add a member to a recipient group",
@@ -121,11 +117,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email, name, vars }) => {
     try {
-      await assertGroupMemberStateAllowed("add_group_member", "it writes local group member rows");
       const { getGroupByName, addMember } = await import('../../db/groups.js');
-      const group = getGroupByName(group_name);
+      const group = await getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const member = addMember(group.id, email, name, vars);
+      const member = await addMember(group.id, email, name, vars);
       return { content: [{ type: "text", text: JSON.stringify(member, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -142,11 +137,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
-      await assertGroupMemberStateAllowed("remove_group_member", "it writes local group member rows");
       const { getGroupByName, removeMember } = await import('../../db/groups.js');
-      const group = getGroupByName(group_name);
+      const group = await getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const removed = removeMember(group.id, email);
+      const removed = await removeMember(group.id, email);
       if (!removed) throw new Error(`Member not found: ${email}`);
       return { content: [{ type: "text", text: `Member removed: ${email} from ${group_name}` }] };
     } catch (e) {
@@ -165,11 +159,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, limit, offset }) => {
     try {
-      await assertGroupMemberStateAllowed("list_group_members", "it reads local group member rows");
       const { getGroupByName, listMemberSummaries } = await import('../../db/groups.js');
-      const group = getGroupByName(group_name);
+      const group = await getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const members = listMemberSummaries(group.id, { limit: limit ?? 100, offset: offset ?? 0 });
+      const members = await listMemberSummaries(group.id, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(members, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -186,11 +179,10 @@ export function registerMiscOpsTools(server: McpServer): void {
   },
   async ({ group_name, email }) => {
     try {
-      await assertGroupMemberStateAllowed("get_group_member", "it reads local group member rows");
       const { getGroupByName, getMember } = await import('../../db/groups.js');
-      const group = getGroupByName(group_name);
+      const group = await getGroupByName(group_name);
       if (!group) throw new Error(`Group not found: ${group_name}`);
-      const member = getMember(group.id, email);
+      const member = await getMember(group.id, email);
       if (!member) throw new Error(`Member not found: ${email}`);
       return { content: [{ type: "text", text: JSON.stringify(member, null, 2) }] };
     } catch (e) {
@@ -214,7 +206,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { listSandboxEmailSummaries } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const emails = listSandboxEmailSummaries(resolvedId, limit ?? 50, offset ?? 0);
+      const emails = await listSandboxEmailSummaries(resolvedId, limit ?? 50, offset ?? 0);
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -233,7 +225,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { getSandboxEmail } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("sandbox_emails", id);
-      const email = getSandboxEmail(resolvedId);
+      const email = await getSandboxEmail(resolvedId);
       if (!email) throw new Error(`Sandbox email not found: ${id}`);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
@@ -253,7 +245,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { clearSandboxEmails } = await import('../../db/sandbox.js');
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
-      const count = clearSandboxEmails(resolvedId);
+      const count = await clearSandboxEmails(resolvedId);
       return { content: [{ type: "text", text: JSON.stringify({ deleted: count }, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -275,7 +267,10 @@ export function registerMiscOpsTools(server: McpServer): void {
       const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const { getAnalytics } = await import("../../lib/analytics.js");
-      const data = getAnalytics(resolvedId, period ?? "30d");
+      // Refuses a provider filter — the store seam cannot scope messages to a provider,
+      // and the throw lands on `toolError` below rather than producing a report that
+      // looks provider-specific and is not.
+      const data = await getAnalytics(resolvedId, period ?? "30d");
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return toolError(e);
@@ -322,7 +317,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const filters = { provider_id: resolvedId, from_address, since, until, limit: limit ?? 1000, offset: offset ?? 0 };
       const { exportEmailsCsv, exportEmailsJson } = await import("../../lib/export.js");
-      const output = (format ?? "json") === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
+      const output = (format ?? "json") === "csv" ? await exportEmailsCsv(filters) : await exportEmailsJson(filters);
       return { content: [{ type: "text", text: output }] };
     } catch (e) {
       return toolError(e);
@@ -347,7 +342,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const filters = { provider_id: resolvedId, since, until, limit: limit ?? 1000, offset: offset ?? 0 };
       const { exportEventsCsv, exportEventsJson } = await import("../../lib/export.js");
-      const output = (format ?? "json") === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
+      const output = (format ?? "json") === "csv" ? await exportEventsCsv(filters) : await exportEventsJson(filters);
       return { content: [{ type: "text", text: output }] };
     } catch (e) {
       return toolError(e);

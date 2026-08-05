@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { formatInboxSyncStatus } from "../../lib/inbox-sync-status-format.js";
 import chalk from "../../lib/chalk-lite.js";
-import { confirmDestructiveAction, handleError } from "../utils.js";
+import { confirmDestructiveAction, handleError, isCliJsonOutput, resolveId } from "../utils.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
 import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
@@ -153,7 +153,13 @@ function parseNonNegativeIntOption(value: string | undefined, fallback = 0): num
 
 function normalizeCliMailbox(value: string | undefined): Mailbox {
   const normalized = (value ?? "inbox").trim().toLowerCase();
-  return CLI_MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
+  if (!CLI_MAILBOXES.includes(normalized as Mailbox)) {
+    // Refused rather than defaulted: this used to map every unrecognised value
+    // to "inbox", so a typo like `--folder starrred` listed the WRONG folder's
+    // mail with exit 0 (task a126c676).
+    throw new Error(`Unknown folder ${JSON.stringify(value)}. Valid folders: ${CLI_MAILBOXES.join(", ")}.`);
+  }
+  return normalized as Mailbox;
 }
 
 function mailboxSourceFromOptions(opts: { source?: string; provider?: string; address?: string; domain?: string }): MailboxSource | undefined {
@@ -182,6 +188,17 @@ async function runAutoPull(_opts: { s3?: boolean; limit?: number }) {
 // ingestion runs on the self-hosted API/worker. These commands are kept for
 // discoverability but fail loud. Use `emails inbox list/read/mark-read/status`
 // (API-backed) for the mail view.
+//
+// The `inbox source` LIFECYCLE (list/add-s3/retire) is not one of them. It is a
+// client-side registry held in this machine's config file, and src/lib/s3-sync.ts
+// implements all three functions in full — the same registry
+// src/cli/tui/data.remote.ts already reads to resolve a `--source` ref in this
+// mode. Only the INGESTION half (`sync-s3`) is server-owned.
+//
+// That registry USED to be a second copy inside src/lib/s3-sync.remote.ts, which is
+// what this comment named. It has collapsed to one implementation: it was never
+// storage, so the deployment word had nothing to decide between the two copies. The
+// ingestion is still mode-routed.
 function serverOnly(command: string): never {
   throw new Error(
     `emails inbox ${command} is not available in the self-hosted client; it runs on the self-hosted server.`,
@@ -209,7 +226,15 @@ interface InboundLinksResult {
 }
 
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
-  const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (SES/S3, Cloudflare, Resend, SMTP)");
+  const inboxCmd = program
+    .command("inbox")
+    .description("Sync and browse inbound emails (SES/S3, Cloudflare, Resend, SMTP)")
+    .option("-j, --json", "Print JSON output", false);
+  inboxCmd.action(() => {
+    if (isCliJsonOutput()) {
+      output({ commands: inboxCmd.commands.map((command) => command.name()) }, "");
+    }
+  });
 
   async function getInboundLinks(emailId: string, opts?: { all?: boolean }): Promise<InboundLinksResult> {
     const ds = resolveMailDataSource();
@@ -300,6 +325,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("code <address>")
     .description("Refresh inbound mail and print the latest verification code for an address")
+    .option("-j, --json", "Print JSON output", false)
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect per mailbox state", "50")
@@ -314,6 +340,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("wait-code <address>")
     .description("Wait for a verification code for an inbound address")
+    .option("-j, --json", "Print JSON output", false)
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect per mailbox state", "50")
@@ -326,6 +353,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   program
     .command("code <address>")
     .description("Find the latest verification code for an inbound address (alias: emails inbox code)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect per mailbox state", "50")
@@ -390,6 +418,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("wait <address>")
     .description("Wait for the next inbound email for an address")
+    .option("-j, --json", "Print JSON output", false)
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect", "50")
@@ -402,6 +431,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("latest <address>")
     .description("Print the latest local inbound email for an address")
+    .option("-j, --json", "Print JSON output", false)
     .option("--from <text>", "Only consider messages whose From contains this text")
     .option("--subject <text>", "Only consider messages whose subject contains this text")
     .option("--limit <n>", "Messages to inspect", "50")
@@ -432,6 +462,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("list")
     .description("List local mailbox mail")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
     .option("--source <id>", "Ingestion source ID from `emails inbox sources` (self_hosted exposes exactly one: self_hosted)")
     .option("--folder <folder>", "Folder to list: inbox, unread, starred, sent, archived, spam, trash", "inbox")
@@ -491,6 +522,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("unread-count")
     .description("Show unread inbox counts")
+    .option("-j, --json", "Print JSON output", false)
     .option("--by-address", "Group unread counts by recipient address")
     .option("--limit <n>", "Maximum grouped addresses to show", "50")
     .option("--offset <n>", "Number of grouped addresses to skip", "0")
@@ -513,6 +545,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("explain <email-id>")
     .description("Explain local routing, recipient ownership, and source readiness for an inbound email")
+    .option("-j, --json", "Print JSON output", false)
     .action(() => {
       try { serverOnly("explain"); } catch (e) { handleError(e); }
     });
@@ -521,6 +554,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("search <query>")
     .description("Search local mailbox mail")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
     .option("--folder <folder>", "Folder to search: inbox, unread, starred, sent, archived, spam, trash", "inbox")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
@@ -543,7 +577,11 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           offset,
         });
         if (rows.length === 0) {
-          console.log(chalk.dim(`No results for "${query}".`));
+          // output([]) rather than console.log: under --json the prose was
+          // wrapped as {"output":[...]} while any hit returned a bare array —
+          // the same command, two shapes, flipping exactly on "none" (task
+          // 7f2b4b6e).
+          output([], chalk.dim(`No results for "${query}".`));
           return;
         }
         output(rows, formatMailboxMessages(rows, `Search ${folder}: "${query}"`));
@@ -556,6 +594,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("sources")
     .description("List ingestion sources with legacy/orphaned badges")
+    .option("-j, --json", "Print JSON output", false)
     .option("--search <query>", "Filter by source label, ID, kind, provider, bucket, or badge")
     .option("--limit <n>", "Max sources", "100")
     .action(async (opts: { search?: string; limit?: string }) => {
@@ -574,6 +613,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("mailboxes")
     .description("List folder counts for a mailbox scope or ingestion source")
+    .option("-j, --json", "Print JSON output", false)
     .option("--source <id>", "Ingestion source ID from `emails inbox sources` (self_hosted exposes exactly one: self_hosted)")
     .option("--provider <id>", "Not supported in self_hosted mode: /v1 messages carry no provider provenance")
     .option("--address <address>", "Mailbox scope: exact recipient/sender address")
@@ -592,6 +632,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("status")
     .description("Show sync status for all ingestion sources")
+    .option("-j, --json", "Print JSON output", false)
     .action(async () => {
       try {
         const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
@@ -605,6 +646,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("sync-status")
     .description("Show source-aware mailbox sync status")
+    .option("-j, --json", "Print JSON output", false)
     .action(async () => {
       try {
         const { getEmailSystemStatusForRuntime, statusGapSignals } = await import("../../lib/agent-context.js");
@@ -624,19 +666,35 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       }
     });
 
-  const sourceCmd = inboxCmd.command("source").description("Manage ingestion source lifecycle");
+  const sourceCmd = inboxCmd
+    .command("source")
+    .description("Manage ingestion source lifecycle")
+    .option("-j, --json", "Print JSON output", false);
+  sourceCmd.action(() => {
+    if (isCliJsonOutput()) {
+      output({ commands: sourceCmd.commands.map((command) => command.name()) }, "");
+    }
+  });
 
   sourceCmd
     .command("list")
     .alias("status")
     .description("List configured S3 ingestion sources")
-    .action(() => {
-      try { serverOnly("source list"); } catch (e) { handleError(e); }
+    .option("-j, --json", "Print JSON output", false)
+    .action(async () => {
+      try {
+        const { listS3Sources } = await import("../../lib/s3-sync.js");
+        const sources = listS3Sources();
+        output(sources, formatSourceList(sources));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   sourceCmd
     .command("add-s3")
     .description("Register an SES/S3 inbound bucket/prefix as a source")
+    .option("-j, --json", "Print JSON output", false)
     .requiredOption("--bucket <name>", "S3 bucket name")
     .option("--prefix <prefix>", "S3 key prefix")
     .option("--region <region>", "AWS region", "us-east-1")
@@ -644,21 +702,62 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--name <name>", "Source display name")
     .option("--status <status>", "Source status: live | import | legacy | retired", "live")
     .option("--no-live-sync", "Register source but disable live sync")
-    .action(() => {
-      try { serverOnly("source add-s3"); } catch (e) { handleError(e); }
+    .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
+      try {
+        // `addInboundBucket` is NOT called in this arm. It writes the
+        // `inbound_s3_buckets` config that drives LOCAL ingestion, and this client
+        // performs none: `inbox sync-s3` and `inbox watch` both refuse here, and
+        // `emails status` deliberately reports `inbox.inbound_buckets` as
+        // unavailable because "an empty list here would falsely claim no bucket is
+        // configured". Writing to that key from a client that cannot ingest turned a
+        // declared gap into a half-truth.
+        const { registerS3Source } = await import("../../lib/s3-sync.js");
+        const status = parseSourceStatus(opts.status);
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const source = registerS3Source({
+          bucket: opts.bucket,
+          prefix: opts.prefix,
+          region: opts.region,
+          providerId,
+          name: opts.name,
+          status,
+          liveSyncEnabled: opts.liveSync !== false && status === "live",
+        });
+        // Do NOT say "live sync enabled". The `live_sync_enabled` column is recorded
+        // faithfully, but nothing in THIS client acts on it — ingestion runs on the
+        // operator's server — so echoing it as an enabled capability claimed an
+        // effect that cannot occur here. Say what actually happened: a registry entry
+        // was written, and where the ingestion it describes has to be configured.
+        output(source, [
+          chalk.green(`✓ Recorded S3 source ${source.id} (status ${source.status}) in this machine's source registry.`),
+          chalk.dim("  This registry is client-side provenance only. This client performs no S3 ingestion:"),
+          chalk.dim("  `emails inbox sync-s3` and `emails inbox watch` run on the self-hosted server, which"),
+          chalk.dim("  owns the SES -> S3 -> mailbox pipeline and must be configured there."),
+        ].join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   sourceCmd
     .command("retire <source>")
     .description("Retire an S3 source without deleting provider rows or mail")
-    .action(() => {
-      try { serverOnly("source retire"); } catch (e) { handleError(e); }
+    .option("-j, --json", "Print JSON output", false)
+    .action(async (sourceRef: string) => {
+      try {
+        const { retireS3Source } = await import("../../lib/s3-sync.js");
+        const retired = retireS3Source(sourceRef);
+        output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // ─── READ ─────────────────────────────────────────────────────────────────
   inboxCmd
     .command("read <id>")
     .description("Read a synced email from local DB (marks it read)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--keep-unread", "Do not mark the email as read")
     .action(async (id: string, opts: { keepUnread?: boolean }) => {
       try {
@@ -669,8 +768,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // scan followed by two separate row fetches.
         const detailSource = await ds.getMessageWithBody(id);
         if (!detailSource) {
-          console.error(chalk.red(`Email not found: ${id}`));
-          process.exit(1);
+          handleError(new Error(`Email not found: ${id}`));
         }
         const { msg, body } = detailSource;
         // Opening an email marks it read unless --keep-unread is set.
@@ -685,6 +783,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("links <email-id>")
     .description("Extract links from a synced inbound email")
+    .option("-j, --json", "Print JSON output", false)
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
@@ -698,6 +797,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   program
     .command("links <email-id>")
     .description("Extract links from a synced inbound email (alias: emails inbox links)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--all", "Include non-web links such as mailto: and tel:")
     .action(async (emailId: string, opts: { all?: boolean }) => {
       try {
@@ -713,13 +813,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   async function requireMessage(ds: MailDataSource, id: string): Promise<TuiMessage> {
     const msg = await ds.getMessage(await resolveMailId(ds, id));
-    if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+    if (!msg) handleError(new Error(`Email not found: ${id}`));
     return msg;
   }
 
   inboxCmd
     .command("mark-read <emailId>")
     .description("Mark an inbound email as read")
+    .option("-j, --json", "Print JSON output", false)
     .option("--unread", "Mark as unread instead")
     .action(async (emailId: string, opts: { unread?: boolean }) => {
       try {
@@ -734,6 +835,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("archive <emailId>")
     .description("Archive an inbound email")
+    .option("-j, --json", "Print JSON output", false)
     .option("--undo", "Unarchive (restore to inbox) instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
@@ -747,6 +849,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("star <emailId>")
     .description("Star an inbound email")
+    .option("-j, --json", "Print JSON output", false)
     .option("--undo", "Unstar instead")
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
@@ -761,6 +864,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("label <emailId> <label>")
     .description("Add (or with --remove, remove) a label on an inbound email")
+    .option("-j, --json", "Print JSON output", false)
     .option("--remove", "Remove the label instead of adding")
     .action(async (emailId: string, label: string, opts: { remove?: boolean }) => {
       try {
@@ -775,6 +879,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("attachments")
     .description("List one checkpointable page of self-hosted attachment metadata")
+    .option("-j, --json", "Print JSON output", false)
     .option("--limit <n>", `Attachments per page (1-${MAX_ATTACHMENT_INVENTORY_LIMIT})`, String(DEFAULT_ATTACHMENT_INVENTORY_LIMIT))
     .option("--cursor <cursor>", "Opaque next_cursor from a previous page")
     .option("--direction <direction>", "Filter by inbound or outbound")
@@ -792,6 +897,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("attachment <emailId>")
     .description("Show attachment metadata or deliberately download validated attachment content")
+    .option("-j, --json", "Print JSON output", false)
     .option("--filename <name>", "Filter by filename")
     .option("--index <n>", "Zero-based attachment index")
     .option("--download", "Download selected attachment content")
@@ -862,6 +968,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("delete <id>")
     .description("Delete a synced email from the active inbox store")
+    .option("-j, --json", "Print JSON output", false)
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
@@ -870,11 +977,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const fullId = await resolveMailId(ds, id);
         const existing = await ds.getMessage(fullId);
         if (!existing) {
-          console.error(chalk.red(`Email not found: ${id}`));
-          process.exit(1);
+          handleError(new Error(`Email not found: ${id}`));
         }
         await ds.deleteMessage(fullId);
-        console.log(chalk.green(`✓ Deleted email ${fullId.slice(0, 8)}`));
+        output({ ok: true, deleted: fullId }, chalk.green(`✓ Deleted email ${fullId.slice(0, 8)}`));
       } catch (e) {
         handleError(e);
       }
@@ -884,6 +990,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("clear")
     .description("Clear synced emails from the active inbox store")
+    .option("-j, --json", "Print JSON output", false)
     .option("--provider <id>", "Only clear emails for this provider")
     .option("--yes", "Skip confirmation prompt")
     .action(async (opts: { provider?: string; yes?: boolean }) => {
@@ -901,7 +1008,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }
         await confirmDestructiveAction(`Clear inbox emails ${target}?`, opts.yes);
         const { cleared } = await ds.clear({ providerId: opts.provider });
-        console.log(chalk.green(`✓ Cleared ${cleared} email(s)`));
+        output(
+          { ok: true, cleared, provider_id: opts.provider ?? null },
+          chalk.green(`✓ Cleared ${cleared} email(s)`),
+        );
       } catch (e) {
         handleError(e);
       }
@@ -911,6 +1021,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("sync-s3")
     .description("Sync inbound emails from S3 bucket (stored by SES receipt rules). Defaults --bucket/--region to config inbound_s3_bucket/region.")
+    .option("-j, --json", "Print JSON output", false)
     .option("--source <id>", "Explicit S3 source id")
     .option("--bucket <name>", "S3 bucket name (defaults to config inbound_s3_bucket)")
     .option("--prefix <prefix>", "S3 key prefix to scan (e.g. inbound/example.com/)")
@@ -927,6 +1038,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("setup-realtime <domain>")
     .description("Wire SES→SNS→SQS so inbound mail auto-syncs (no manual sync-s3)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--rule-set <name>", "SES receipt rule set name", "emails-inbound")
     .option("--rule <name>", "SES receipt rule name (defaults to inbound-<domain>)")
     .option("--region <region>", "AWS region (defaults to config inbound_s3_region)")
@@ -938,6 +1050,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("realtime-status")
     .description("Show real-time inbound queue, bucket, and sync health")
+    .option("-j, --json", "Print JSON output", false)
     .action(() => {
       try { serverOnly("realtime-status"); } catch (e) { handleError(e); }
     });
@@ -945,6 +1058,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("watch")
     .description("Watch the SQS queue and auto-sync inbound mail in real-time (no manual sync-s3)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--queue-url <url>", "SQS queue URL (defaults to config inbound_realtime_queue_url)")
     .option("--bucket <name>", "S3 bucket (defaults to config inbound_s3_bucket)")
     .option("--prefix <prefix>", "S3 key prefix to sync")
@@ -961,6 +1075,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("listen")
     .description("Start a local SMTP listener to receive inbound emails (dev/testing)")
+    .option("-j, --json", "Print JSON output", false)
     .option("--port <port>", "SMTP port to listen on", "2525")
     .option("--provider <id>", "Associate received emails with this provider ID")
     .action(() => {
@@ -971,6 +1086,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("open <id>")
     .description("Open a readable local HTML view of a synced email in the browser")
+    .option("-j, --json", "Print JSON output", false)
     .action(() => {
       try {
         throw new Error("emails inbox open is not available in the self-hosted client because it writes a rendered HTML file locally; it runs on the self-hosted server. Use `emails inbox read <id>` for API-backed terminal output.");
@@ -993,6 +1109,49 @@ function formatMailboxMessages(messages: TuiMessage[], title = "Mailbox"): strin
     lines.push(
       `  ${star}${unread} ${chalk.dim(message.id.slice(0, 8))}  ${chalk.cyan(actor.slice(0, 28).padEnd(28))}  ${subject}  ${chalk.dim(date)}${labels}`,
     );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function parseSourceStatus(value: string | undefined): "live" | "import" | "legacy" | "retired" {
+  if (value === "live" || value === "import" || value === "legacy" || value === "retired") return value;
+  throw new Error("Source status must be one of: live, import, legacy, retired");
+}
+
+/**
+ * `emails inbox source list` — the configured INGESTION registry, which is a
+ * different question from `emails inbox sources` (formatMailboxSources below),
+ * the mail-view scopes the store exposes.
+ */
+function formatSourceList(
+  sources: Array<{
+    id: string;
+    type: string;
+    name?: string;
+    status: string;
+    live_sync_enabled: boolean;
+    provider_id?: string;
+    bucket?: string;
+    prefix?: string;
+    region?: string;
+  }>,
+): string {
+  const lines = [chalk.bold("\nInbox sources:")];
+  if (sources.length === 0) {
+    lines.push(chalk.dim("  No sources configured."));
+    lines.push("");
+    return lines.join("\n");
+  }
+  for (const source of sources) {
+    const live = source.status === "live" && source.live_sync_enabled
+      ? chalk.green("live")
+      : source.status === "retired"
+        ? chalk.yellow("retired")
+        : chalk.dim(source.live_sync_enabled ? source.status : `${source.status}/disabled`);
+    const detail = `s3://${source.bucket ?? "unknown"}/${source.prefix ?? ""} ${source.region ?? "us-east-1"}${source.provider_id ? ` provider=${source.provider_id.slice(0, 8)}` : ""}`;
+    lines.push(`  ${chalk.cyan(source.id)}  [${source.type}]  ${live}  ${source.name ?? ""}`);
+    lines.push(chalk.dim(`    ${detail}`));
   }
   lines.push("");
   return lines.join("\n");

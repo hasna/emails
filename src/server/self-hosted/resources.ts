@@ -315,7 +315,12 @@ export const SELF_HOSTED_RESOURCES: SelfHostedResourceSpec[] = [
     path: "events",
     table: "events",
     orderBy: "occurred_at DESC",
-    filters: ["email_id", "provider_id", "type", "recipient"],
+    // `provider_event_id` is the dedup half of the idempotent upsert's key
+    // (src/db/events.ts): the client asks "does this provider event already
+    // exist?" as an indexed equality read instead of walking the table. Declaring
+    // it here is what lets the HTTP store send it at all — its contract check
+    // refuses undeclared filters rather than letting the service ignore them.
+    filters: ["email_id", "provider_id", "type", "recipient", "provider_event_id"],
     foreignKeys: [{ column: "provider_id", table: "self_hosted_providers" }],
     columns: [
       { name: "email_id" },

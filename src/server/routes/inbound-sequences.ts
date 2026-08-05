@@ -1,13 +1,14 @@
 // API route handlers — inbound-sequences.ts
 import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.local.js';
 import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.local.js';
-import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.local.js';
-import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.local.js';
+import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
+import { createSqliteEmailStore } from '../../store-sqlite/index.js';
+import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
 import { describeWarmingProgress } from '../../lib/warming.js';
-import { updateEmailStatus } from '../../db/emails.local.js';
-import { upsertEvent } from '../../db/events.local.js';
+import { updateEmailStatus } from '../../db/emails.js';
+import { upsertEvent } from '../../db/events.js';
 import { getDatabase } from '../../db/database.js';
-import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.local.js';
+import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, queryInteger, queryPage } from './helpers.js';
 import {
   MAILBOXES,
@@ -63,8 +64,34 @@ function parseEnrollmentStatus(value: string | null): EnrollmentStatus | undefin
   throw new Error("status must be active, completed, or cancelled");
 }
 
+/**
+ * The store the `/api/sequences` routes read and write through.
+ *
+ * This is the LOCAL DASHBOARD (`emails serve`), and every other import in this file is
+ * still a local-SQLite module reading the process-wide connection. When
+ * `src/db/sequences` collapsed onto the store seam its exports stopped requiring a
+ * `Database` and started resolving the CONFIGURED store when given nothing — so passing
+ * nothing here would have silently repointed these routes at an operator's API on any
+ * installation configured for one. They therefore name the SQLite store bound to that
+ * same connection, exactly as the `/api/sandbox` routes do (src/server/routes/core.ts).
+ * Built per request: the repositories are thin wrappers over the memoised connection.
+ */
+function localSequenceStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
+/**
+ * The store the `/api/warming` routes read and write through — the SQLite store bound
+ * to the same process-wide connection, for exactly the reason `localSequenceStore`
+ * spells out above. One binding per collapsed family, so each set of routes names its
+ * own store and neither collapse leans on the other's local alias.
+ */
+function localWarmingStore() {
+  return createSqliteEmailStore({ database: getDatabase() });
+}
+
 function resolveSequenceRef(raw: string) {
-  return getSequence(decodeURIComponent(raw));
+  return getSequence(decodeURIComponent(raw), localSequenceStore());
 }
 
 function normalizeMailboxParam(value: string | null | undefined): Mailbox {
@@ -311,7 +338,7 @@ if (inboundMatch && method === "GET") {
 if (path === "/api/doctor" && method === "GET") {
   try {
     const live = url.searchParams.get("live") === "true";
-    const { runDiagnostics } = await import('../../lib/doctor.local.js');
+    const { runDiagnostics } = await import('../../lib/doctor.js');
     const checks = await runDiagnostics(undefined, { liveProviderChecks: live });
     return json(checks);
   } catch (e) { return internalError(e); }
@@ -326,11 +353,11 @@ if (path === "/api/pull" && method === "POST") {
     let result: Record<string, number>;
     if (body.provider_id) {
       const id = resolveIdStrict("providers", String(body.provider_id));
-      const { syncProvider } = await import('../../lib/sync.local.js');
+      const { syncProvider } = await import('../../lib/sync.js');
       const count = await syncProvider(id);
       result = { [id]: count };
     } else {
-      const { syncAll } = await import('../../lib/sync.local.js');
+      const { syncAll } = await import('../../lib/sync.js');
       result = await syncAll();
     }
     return json(result);
@@ -341,9 +368,15 @@ if (path === "/api/pull" && method === "POST") {
 if (path === "/api/digest" && method === "GET") {
   try {
     const period = normalizeEmailDigestPeriod(url.searchParams.get("period") ?? "today");
-    const latest = getLatestEmailDigest(period);
+    // BOTH digest reads in this handler now go through a collapsed facade, and that is the
+    // point of the change that brought this line here. Until it landed, the row read below
+    // still imported the digest ROW family's `.local` arm while the generation path
+    // imported the collapsed digest family — so on a contradictory storage configuration
+    // (which the resolution treats as a hard boot error) this route would 500 on the second
+    // read after succeeding on the first. One store answers both now.
+    const latest = await getLatestEmailDigest(period);
     if (latest) return json(latest);
-    const { generateEmailDigest } = await import('../../lib/email-digest.local.js');
+    const { generateEmailDigest } = await import('../../lib/email-digest.js');
     return json(await generateEmailDigest({ period, offline: true }));
   } catch (e) { return internalError(e); }
 }
@@ -353,7 +386,7 @@ if (path === "/api/digest" && method === "GET") {
 // GET /api/sequences
 if (path === "/api/sequences" && method === "GET") {
   try {
-    return json(listSequences(undefined, queryPage(url, 100)));
+    return json(await listSequences(queryPage(url, 100), localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -362,7 +395,7 @@ if (path === "/api/sequences" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.name) return badRequest("name is required");
-    const seq = createSequence({ name: String(body.name), description: body.description ? String(body.description) : undefined });
+    const seq = await createSequence({ name: String(body.name), description: body.description ? String(body.description) : undefined }, localSequenceStore());
     return json(seq, 201);
   } catch (e) { return internalError(e); }
 }
@@ -371,9 +404,9 @@ if (path === "/api/sequences" && method === "POST") {
 const seqDeleteMatch = path.match(/^\/api\/sequences\/([^/]+)$/);
 if (seqDeleteMatch && method === "DELETE") {
   try {
-    const seq = resolveSequenceRef(seqDeleteMatch[1]!);
+    const seq = await resolveSequenceRef(seqDeleteMatch[1]!);
     if (!seq) return notFound("Sequence not found");
-    deleteSequence(seq.id);
+    await deleteSequence(seq.id, localSequenceStore());
     return json({ deleted: true });
   } catch (e) { return internalError(e); }
 }
@@ -382,27 +415,27 @@ if (seqDeleteMatch && method === "DELETE") {
 const seqStepsMatch = path.match(/^\/api\/sequences\/([^/]+)\/steps$/);
 if (seqStepsMatch && method === "GET") {
   try {
-    const seq = resolveSequenceRef(seqStepsMatch[1]!);
+    const seq = await resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
-    return json(listSteps(seq.id));
+    return json(await listSteps(seq.id, localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
 // POST /api/sequences/:id/steps
 if (seqStepsMatch && method === "POST") {
   try {
-    const seq = resolveSequenceRef(seqStepsMatch[1]!);
+    const seq = await resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.step_number || !body.template_name) return badRequest("step_number and template_name are required");
-    const step = addStep({
+    const step = await addStep({
       sequence_id: seq.id,
       step_number: Number(body.step_number),
       delay_hours: body.delay_hours ? Number(body.delay_hours) : 24,
       template_name: String(body.template_name),
       from_address: body.from_address ? String(body.from_address) : undefined,
       subject_override: body.subject_override ? String(body.subject_override) : undefined,
-    });
+    }, localSequenceStore());
     return json(step, 201);
   } catch (e) { return internalError(e); }
 }
@@ -411,7 +444,7 @@ if (seqStepsMatch && method === "POST") {
 const seqEnrollmentsMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments$/);
 if (seqEnrollmentsMatch && method === "GET") {
   try {
-    const seq = resolveSequenceRef(seqEnrollmentsMatch[1]!);
+    const seq = await resolveSequenceRef(seqEnrollmentsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     let status: EnrollmentStatus | undefined;
     try {
@@ -419,11 +452,11 @@ if (seqEnrollmentsMatch && method === "GET") {
     } catch (error) {
       return badRequest(error instanceof Error ? error.message : String(error));
     }
-    return json(listEnrollments({
+    return json(await listEnrollments({
       sequence_id: seq.id,
       ...(status ? { status } : {}),
       ...queryPage(url, 100),
-    }));
+    }, localSequenceStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -431,15 +464,15 @@ if (seqEnrollmentsMatch && method === "GET") {
 const seqEnrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enroll$/);
 if (seqEnrollMatch && method === "POST") {
   try {
-    const seq = resolveSequenceRef(seqEnrollMatch[1]!);
+    const seq = await resolveSequenceRef(seqEnrollMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.contact_email) return badRequest("contact_email is required");
-    const enrollment = enroll({
+    const enrollment = await enroll({
       sequence_id: seq.id,
       contact_email: String(body.contact_email),
       provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
-    });
+    }, localSequenceStore());
     return json(enrollment, 201);
   } catch (e) { return internalError(e); }
 }
@@ -448,10 +481,10 @@ if (seqEnrollMatch && method === "POST") {
 const seqUnenrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments\/(.+)$/);
 if (seqUnenrollMatch && method === "DELETE") {
   try {
-    const seq = resolveSequenceRef(seqUnenrollMatch[1]!);
+    const seq = await resolveSequenceRef(seqUnenrollMatch[1]!);
     const email = decodeURIComponent(seqUnenrollMatch[2]!);
     if (!seq) return notFound("Sequence not found");
-    const removed = unenroll(seq.id, email);
+    const removed = await unenroll(seq.id, email, localSequenceStore());
     if (!removed) return notFound("Enrollment not found or already inactive");
     return json({ unenrolled: true });
   } catch (e) { return internalError(e); }
@@ -464,7 +497,9 @@ if (path === "/api/warming" && method === "GET") {
   try {
     const url = new URL(req.url);
     const status = url.searchParams.get("status") ?? undefined;
-    return json(listWarmingSchedules(status, undefined, queryPage(url, 50)));
+    // Reads the store seam (async). A table it could not enumerate to the end raises,
+    // and lands on `internalError` below rather than being served as a short page.
+    return json(await listWarmingSchedules(status, queryPage(url, 50), localWarmingStore()));
   } catch (e) { return internalError(e); }
 }
 
@@ -474,12 +509,12 @@ if (path === "/api/warming" && method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.domain) return badRequest("domain is required");
     if (!body.target_daily_volume) return badRequest("target_daily_volume is required");
-    const schedule = createWarmingSchedule({
+    const schedule = await createWarmingSchedule({
       domain: String(body.domain),
       target_daily_volume: Number(body.target_daily_volume),
       start_date: body.start_date ? String(body.start_date) : undefined,
       provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
-    });
+    }, localWarmingStore());
     return json(schedule, 201);
   } catch (e) { return internalError(e); }
 }
@@ -489,9 +524,9 @@ const warmingDomainMatch = path.match(/^\/api\/warming\/([^/]+)$/);
 if (warmingDomainMatch && method === "GET") {
   try {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
-    const schedule = getWarmingSchedule(domain);
+    const schedule = await getWarmingSchedule(domain, localWarmingStore());
     if (!schedule) return notFound("Warming schedule not found");
-    const { today_limit, today_sent, current_day } = describeWarmingProgress(schedule);
+    const { today_limit, today_sent, current_day } = await describeWarmingProgress(schedule);
     return json({ schedule, today_limit, today_sent, current_day });
   } catch (e) { return internalError(e); }
 }
@@ -503,7 +538,7 @@ if (warmingDomainMatch && method === "PUT") {
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.status) return badRequest("status is required");
     const status = String(body.status) as "active" | "paused" | "completed";
-    const updated = updateWarmingStatus(domain, status);
+    const updated = await updateWarmingStatus(domain, status, localWarmingStore());
     if (!updated) return notFound("Warming schedule not found");
     return json(updated);
   } catch (e) { return internalError(e); }
@@ -513,7 +548,7 @@ if (warmingDomainMatch && method === "PUT") {
 if (warmingDomainMatch && method === "DELETE") {
   try {
     const domain = decodeURIComponent(warmingDomainMatch[1]!);
-    const deleted = deleteWarmingSchedule(domain);
+    const deleted = await deleteWarmingSchedule(domain, localWarmingStore());
     if (!deleted) return notFound("Warming schedule not found");
     return json({ deleted: true });
   } catch (e) { return internalError(e); }
@@ -526,7 +561,7 @@ const trackOpenMatch = path.match(/^\/track\/open\/([^/]+)$/);
 if (trackOpenMatch && method === "GET") {
   const emailId = trackOpenMatch[1]!;
   try {
-    upsertEvent({
+    await upsertEvent({
       email_id: emailId,
       provider_id: "tracking",
       provider_event_id: `open-${emailId}-${Date.now()}`,
@@ -535,7 +570,7 @@ if (trackOpenMatch && method === "GET") {
       metadata: { tracked: true, ip: req.headers.get("x-forwarded-for") ?? "unknown" },
       occurred_at: new Date().toISOString(),
     });
-    updateEmailStatus(emailId, "delivered");
+    await updateEmailStatus(emailId, "delivered");
   } catch { /* non-fatal — don't break the tracking pixel response */ }
 
   // Return 1x1 transparent GIF
@@ -557,7 +592,7 @@ if (trackClickMatch && method === "GET") {
     if (decoded.startsWith("https://") || decoded.startsWith("http://")) {
       originalUrl = decoded;
     }
-    upsertEvent({
+    await upsertEvent({
       email_id: emailId,
       provider_id: "tracking",
       provider_event_id: `click-${emailId}-${encoded}-${Date.now()}`,

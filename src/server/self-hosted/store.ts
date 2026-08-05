@@ -230,6 +230,25 @@ export interface MessageListRecord
   snippet: string | null;
   /** Count only — full attachment metadata stays on the single-message read. */
   attachment_count: number;
+  /**
+   * WHY headers.policy_denial is projected as its own scalar on LIST rows.
+   *
+   * `send_state = 'blocked'` says a send was refused; it does not say why. The
+   * reason is written by markSendBlocked() into headers.policy_denial, and full
+   * `headers` are deliberately stripped from list rows (they and the bodies were
+   * ~73% of a 459KB page — see MESSAGE_LIST_COLUMNS). So a list consumer could see
+   * `blocked` and had no way at all to learn the cause: `emails log` and
+   * `emails email list` rendered the bare word.
+   *
+   * That cost five days on 2026-07-22 — an outbound customs-document email for a
+   * held shipment was refused with sender_unverified, read as an unremarkable
+   * "blocked", and the shipment was returned to its shipper while the reason sat
+   * unread in a jsonb column (2026-07-27).
+   *
+   * Projecting the whole headers object would undo the payload decision; a single
+   * short code does not. Null whenever the row was not policy-refused.
+   */
+  policy_denial: string | null;
 }
 
 /** One keyset page of the message list. */
@@ -508,6 +527,15 @@ export interface MessageInput {
   send_started_at?: string | null;
 }
 
+/** Delivery/engagement event persisted by a provider webhook. */
+export interface WebhookDeliveryEventInput {
+  email_id: string | null;
+  type: string;
+  recipient: string | null;
+  metadata: Record<string, unknown>;
+  occurred_at: string;
+}
+
 /** Columns selected for a message row (explicit so new columns are intentional). */
 const MESSAGE_COLUMNS =
   "id, direction, from_addr, to_addrs, cc_addrs, subject, body_text, body_html, status, " +
@@ -529,6 +557,10 @@ const MESSAGE_LIST_COLUMNS =
   "m.source_id, m.send_state, m.send_started_at, m.created_at, m.updated_at, " +
   `NULLIF(left(regexp_replace(COALESCE(m.body_text, ''), '\\s+', ' ', 'g'), ${MESSAGE_SNIPPET_CHARS}), '') AS snippet, ` +
   "CASE WHEN jsonb_typeof(m.attachments) = 'array' THEN jsonb_array_length(m.attachments) ELSE 0 END AS attachment_count, " +
+  // One short text, not the whole headers object: a blocked row must be able to
+  // state its reason without re-adding the payload the column list exists to
+  // avoid. See MessageListRecord.policy_denial.
+  "m.headers->>'policy_denial' AS policy_denial, " +
   "to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts";
 
 // ---- list ordering + folder predicates --------------------------------------
@@ -1085,7 +1117,27 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
       : "";
   const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, MESSAGE_SNIPPET_CHARS);
   const count = Number(row["attachment_count"]);
-  return { ...safe, snippet: snippet || null, attachment_count: Number.isFinite(count) ? count : 0 };
+  return {
+    ...safe,
+    snippet: snippet || null,
+    attachment_count: Number.isFinite(count) ? count : 0,
+    // Explicit rather than left to the raw-row spread: the field is part of the
+    // published list contract, so an absent/odd column must normalize to null
+    // instead of leaking `undefined` (which JSON.stringify would drop, making a
+    // required response property vanish).
+    policy_denial: policyDenialOf(row["policy_denial"]),
+  };
+}
+
+/**
+ * Normalize a policy-denial code to a non-empty string or null.
+ * Shared by the list projection and the API item projection so both paths agree
+ * on the same emptiness rule.
+ */
+export function policyDenialOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 /**
@@ -1376,7 +1428,14 @@ function warmingLimit(target: number, startDate: string | null, now = new Date()
 function encodeColumn(col: ResourceColumn, value: unknown): unknown {
   if (value === undefined) return null;
   if (col.json) return JSON.stringify(value ?? null);
-  if (col.bool) return Boolean(value);
+  if (col.bool) {
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === "false" || normalized === "0") return false;
+      if (normalized === "true" || normalized === "1") return true;
+    }
+    return Boolean(value);
+  }
   if (col.int) {
     const n = typeof value === "number" ? value : Number(value);
     return Number.isFinite(n) ? Math.trunc(n) : 0;
@@ -1740,26 +1799,55 @@ export class EmailsSelfHostedStore {
   }
 }
 
-/** The EXCLUDED assignment list shared by both upsertMessage variants. */
-const MESSAGE_UPSERT_ASSIGNMENTS =
-  `direction           = EXCLUDED.direction,
-   from_addr           = EXCLUDED.from_addr,
-   to_addrs            = EXCLUDED.to_addrs,
-   cc_addrs            = EXCLUDED.cc_addrs,
-   subject             = EXCLUDED.subject,
-   body_text           = EXCLUDED.body_text,
-   body_html           = EXCLUDED.body_html,
-   status              = EXCLUDED.status,
-   provider_message_id = EXCLUDED.provider_message_id,
-   message_id          = EXCLUDED.message_id,
-   in_reply_to         = EXCLUDED.in_reply_to,
-   received_at         = EXCLUDED.received_at,
-   is_read             = EXCLUDED.is_read,
-   is_starred          = EXCLUDED.is_starred,
-   labels              = EXCLUDED.labels,
-   headers             = EXCLUDED.headers,
-   attachments         = EXCLUDED.attachments,
-   updated_at          = now()`;
+/**
+ * The columns an UPSERT-onto-an-existing-row writes: ONLY the ones the input carries.
+ *
+ * This is not an optimisation, and the previous unconditional list was a bug. Writing
+ * the whole insert set on the conflict path meant a re-imported message had its read
+ * flag, star, labels and `received_at` reset from `messageInsertParams`' DEFAULTS —
+ * `is_read ?? false`, `labels ?? []` — rather than from anything the caller said. So
+ * re-running an importer marked the whole mailbox unread, dropped every label and
+ * re-sorted the message to the import instant, on an operation whose entire contract is
+ * that a replay changes nothing it was not told about. The SQLite store found and fixed
+ * exactly this (src/store-sqlite/messages.ts, `updateValues`); this is the same fix on
+ * the Postgres side, so the two implementations of the seam finally agree.
+ *
+ * `from_addr` and `to_addrs` are unconditional because `MessageInput` requires them, so
+ * a caller always states them. `created_at`, `source_id` and the four send-ledger
+ * columns are never in the set: the first is the row's identity, the second is the
+ * conflict key, and the last four belong to the send path.
+ *
+ * One consequence worth stating: the statement TEXT now varies with the shape of the
+ * input, so a plan cache keyed on SQL text holds one entry per combination of named
+ * columns rather than one. The set of shapes real callers produce is small (each write
+ * site passes a fixed field list), and correctness is not negotiable against a cache
+ * hit rate.
+ */
+function messageUpsertAssignments(input: MessageInput): string {
+  const assignments = ["from_addr = EXCLUDED.from_addr", "to_addrs = EXCLUDED.to_addrs"];
+  const whenGiven: Array<[string, unknown]> = [
+    ["direction", input.direction],
+    ["cc_addrs", input.cc_addrs],
+    ["subject", input.subject],
+    ["body_text", input.body_text],
+    ["body_html", input.body_html],
+    ["status", input.status],
+    ["provider_message_id", input.provider_message_id],
+    ["message_id", input.message_id],
+    ["in_reply_to", input.in_reply_to],
+    ["received_at", input.received_at],
+    ["is_read", input.is_read],
+    ["is_starred", input.is_starred],
+    ["labels", input.labels],
+    ["headers", input.headers],
+    ["attachments", input.attachments],
+  ];
+  for (const [column, value] of whenGiven) {
+    if (value !== undefined) assignments.push(`${column} = EXCLUDED.${column}`);
+  }
+  assignments.push("updated_at = now()");
+  return assignments.join(",\n         ");
+}
 
 /**
  * A store already bound to a single `tenantId`. EVERY method injects the tenant:
@@ -1829,6 +1917,58 @@ export class TenantScopedStore {
       // lock namespace. Hash collisions only serialize unrelated operations.
       await tx.execute(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`${this.tenantId}:${digest}`]);
       return action(tx, digest);
+    });
+  }
+
+  /**
+   * Commit a provider delivery event and its idempotency receipt together.
+   *
+   * The unique event key is also the recovery path for two concurrent webhook
+   * requests that both miss the receipt pre-check: the loser reuses the event
+   * row selected by (tenant_id, provider_event_id), then ensures the receipt in
+   * the same transaction. A receipt can therefore never acknowledge a missing
+   * event, and a committed event can never be left without its receipt.
+   */
+  async createWebhookDeliveryEvent(
+    provider: string,
+    eventId: string,
+    input: WebhookDeliveryEventInput,
+  ): Promise<{ id: string }> {
+    if (!this.atomicClient) {
+      throw new Error("webhook delivery-event persistence requires a transactional store");
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      const inserted = await tx.get<{ id: string }>(
+        `INSERT INTO events (
+           id, tenant_id, email_id, provider_event_id, type, recipient, metadata, occurred_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+         ON CONFLICT (tenant_id, provider_event_id) WHERE provider_event_id IS NOT NULL
+         DO NOTHING
+         RETURNING id`,
+        [
+          randomUUID(),
+          this.tenantId,
+          input.email_id,
+          eventId,
+          input.type,
+          input.recipient,
+          JSON.stringify(input.metadata),
+          input.occurred_at,
+        ],
+      );
+      const event = inserted ?? await tx.one<{ id: string }>(
+        `SELECT id FROM events WHERE tenant_id = $1 AND provider_event_id = $2`,
+        [this.tenantId, eventId],
+      );
+      await tx.execute(
+        `INSERT INTO webhook_receipts (
+           id, tenant_id, provider, event_id, resource_id
+         ) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, provider, event_id) DO NOTHING`,
+        [randomUUID(), this.tenantId, provider, eventId, event.id],
+      );
+      return event;
     });
   }
 
@@ -3739,6 +3879,32 @@ export class TenantScopedStore {
     if (address.status !== "active") {
       return { allowed: false, code: "sender_inactive", message: "sender address is not active", status: 403 };
     }
+    // OPEN QUESTION — deliberately NOT changed here. Read before "fixing" it.
+    //
+    // This check is strict on the ADDRESS alone. The very next check treats domain
+    // readiness as SUFFICIENT: `!addressReady && !domainReady && !domainProvisioned`
+    // lets a verified, ready domain vouch for an address that has no readiness of its
+    // own. The same row already carries `domain_verified` and `domain_status` (the
+    // LEFT JOIN above selects them), so the data for the same reasoning is in hand
+    // here — and is not used.
+    //
+    // That asymmetry produces a surprising result in practice: on a domain whose
+    // ownership AND DKIM/SPF/DMARC are all verified, and from which a sibling address
+    // sends successfully, a newly added address still defaults to verified = false and
+    // is refused. Provider identity models (SES/Resend domain identities) treat a
+    // verified domain as authorising every local part under it, which is why the
+    // behaviour reads as a bug to operators.
+    //
+    // It is left alone because loosening it is a TENANT-BOUNDARY decision, not a
+    // cleanup: this gate arrived with the tenant mail-boundary work, `verified` may be
+    // intended as a per-mailbox control-proof distinct from domain ownership, and
+    // widening it silently would grant send rights to every address on a verified
+    // domain across every deployment. Whoever resolves it should either implement the
+    // implication explicitly (probably at address creation on a verified domain,
+    // rather than by weakening the gate at send time) or record here why per-address
+    // proof is required. Until then the refusal is at least diagnosable and fixable:
+    // the code reaches the CLI as headers.policy_denial, and `emails address
+    // set-verified <email>` is the supported way to clear it.
     if (!address.verified) {
       return { allowed: false, code: "sender_unverified", message: "sender address is not verified", status: 403 };
     }
@@ -4066,6 +4232,10 @@ export class TenantScopedStore {
    * Idempotent write keyed on `(tenant_id, source_id)`: inserts a new row, or
    * updates the existing row with the same source_id within this tenant (so
    * re-running an import never duplicates and never touches another tenant's row).
+   *
+   * The conflict path writes only the columns the input carries — see
+   * `messageUpsertAssignments` for why writing all of them broke the very property
+   * "idempotent" names.
    */
   async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
     if (!input.source_id) {
@@ -4075,7 +4245,7 @@ export class TenantScopedStore {
       `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
        VALUES (${MESSAGE_INSERT_VALUES}, $24)
        ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
-         ${MESSAGE_UPSERT_ASSIGNMENTS}
+         ${messageUpsertAssignments(input)}
        RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
       [...messageInsertParams(input), this.tenantId],
     );

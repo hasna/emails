@@ -256,6 +256,17 @@ export interface MessageListRecord {
   snippet: string | null;
   /** Count only — full attachment metadata stays on the single-message read. */
   attachment_count: number;
+  /**
+   * Why an outbound policy gate refused this message (e.g. `sender_unverified`),
+   * or null when it was not refused.
+   *
+   * Mirrors headers.policy_denial. Full headers are deliberately absent from list
+   * rows (they and the bodies dominated the page payload), so without this scalar a
+   * `send_state = 'blocked'` row cannot be explained by any list consumer — which is
+   * how a refused message reads as the bare word `blocked`. Nullable because most
+   * rows were never refused, and because an older server does not send the field.
+   */
+  policy_denial: string | null;
 }
 
 export interface MessageInput {

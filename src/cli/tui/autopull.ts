@@ -54,12 +54,12 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   if (doS3) {
     try {
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-      const { getProvider } = await import("../../db/providers.js");
+      const { getProviderWithCredentials } = await import("../../db/providers.js");
       if (inbound.profile) process.env["AWS_PROFILE"] = inbound.profile;
       const syncAll = async () => {
         let n = 0;
         for (const target of targets) {
-          const prov = target.providerId ? getProvider(target.providerId) : null;
+          const prov = target.providerId ? getProviderWithCredentials(target.providerId) : null;
           const r = await syncS3Inbox({
             sourceId: target.sourceId,
             bucket: target.bucket,
@@ -87,8 +87,10 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
         }
         // Best-effort: drain the realtime SQS queue so it doesn't back up. The
         // objects it points to are already covered by the scan above, so we just
-        // clear it (no extra sync needed).
-        if (queueUrl) {
+        // clear it (no extra sync needed). ONLY when that scan was clean: a scan
+        // that swallowed errors did NOT cover the objects, and clearing the queue
+        // would consume the redelivery signal for mail that never landed.
+        if (queueUrl && syncErrors.length === 0) {
           try {
             const { makeSqsAdapter } = await import("../../lib/inbound-realtime-aws.js");
             const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");

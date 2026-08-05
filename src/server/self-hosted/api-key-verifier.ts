@@ -23,6 +23,19 @@ import {
  * (per-app verifiers are audit-free) so an accepted alias key does not also emit
  * a spurious `app_mismatch` deny line.
  */
+/**
+ * The structured, secret-free `[api-auth]` audit line. Carries the tenant
+ * (`tid`) so the API-key trail is organization-attributable like the IdP
+ * trail — an audit line that cannot answer "which organization did this" is
+ * not an audit line. Ids and outcome fields only; never token material.
+ */
+export function formatApiAuthAuditLine(e: AuthAuditEvent): string {
+  return (
+    `[api-auth] ${e.outcome} app=${e.app} kid=${e.kid ?? "-"} tid=${e.tid ?? "-"} ` +
+    `reason=${e.reason ?? "-"} ${e.method ?? "-"} ${e.path ?? "-"} status=${e.status}`
+  );
+}
+
 export function verifyApiKeyWithAliases(
   options: Omit<VerifyApiKeyOptions, "app" | "audit"> & { audit?: AuthAuditHook },
   apps: readonly [string, ...string[]],
@@ -53,6 +66,11 @@ export function verifyApiKeyWithAliases(
           outcome: decision.ok ? "allow" : "deny",
           app: decision.ok ? decision.principal.app : canonicalApp,
           kid: decision.ok ? decision.principal.kid : denyKid(),
+          // Unlike `kid` (recovered structurally above for forensics), `tid` is
+          // an ORGANIZATION attribution: contracts' own middleware emits it only
+          // once the signature has verified, so a deny here logs null rather
+          // than naming a tenant the request never proved.
+          tid: decision.ok ? decision.principal.tid : null,
           reason: decision.ok ? null : decision.reason,
           scopesRequired: [...(context?.requiredScopes ?? [])],
           method: context?.method ?? null,

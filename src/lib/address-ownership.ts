@@ -5,6 +5,7 @@ import {
   assignAddressOwner,
   getOwner,
   getOwnerByName,
+  listOwners,
   listOwnersByIds,
   listAddressOwnershipEvents,
   transferAddressOwner,
@@ -27,11 +28,25 @@ export interface AddressOwnershipDetail {
   history: AddressOwnershipEvent[];
 }
 
-function resolveOwnerRef(ref: string): Owner | null {
-  const partialId = resolveResourceId("owners", ref);
-  return getOwnerByName(ref)
-    ?? getOwner(ref)
-    ?? (partialId ? getOwner(partialId) : null);
+/**
+ * Resolve an owner reference: exact name, then exact id, then a UNIQUE id prefix.
+ *
+ * The prefix match enumerates the owners family itself rather than going through the
+ * legacy deployment-word resolver (`resolveResourceId`): the owners family has
+ * collapsed onto the store seam, so its references must resolve against the SAME
+ * store its reads and writes go to — resolving a prefix against one store and
+ * assigning ownership in another is the provenance split the collapse removed. An
+ * ambiguous prefix resolves to nothing, exactly as the old resolver answered.
+ */
+async function resolveOwnerRef(ref: string): Promise<Owner | null> {
+  const trimmed = ref.trim();
+  if (!trimmed) return null;
+  const byName = await getOwnerByName(trimmed);
+  if (byName) return byName;
+  const byId = await getOwner(trimmed);
+  if (byId) return byId;
+  const matches = (await listOwners()).filter((owner) => owner.id.startsWith(trimmed));
+  return matches.length === 1 ? (matches[0] as Owner) : null;
 }
 
 export function resolveAddressRef(ref: string): EmailAddress {
@@ -55,10 +70,10 @@ export function resolveAddressRef(ref: string): EmailAddress {
   throw new Error(`Address not found: ${trimmed}`);
 }
 
-export function enrichAddress(address: EmailAddress): EnrichedAddress {
+export async function enrichAddress(address: EmailAddress): Promise<EnrichedAddress> {
   const providers = listProviderNamesByIds([address.provider_id]);
-  const owner = address.owner_id ? getOwner(address.owner_id) : null;
-  const administrator = address.administrator_id ? getOwner(address.administrator_id) : null;
+  const owner = address.owner_id ? await getOwner(address.owner_id) : null;
+  const administrator = address.administrator_id ? await getOwner(address.administrator_id) : null;
   return {
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,
@@ -67,11 +82,11 @@ export function enrichAddress(address: EmailAddress): EnrichedAddress {
   };
 }
 
-export function enrichAddresses(addresses: EmailAddress[]): EnrichedAddress[] {
+export async function enrichAddresses(addresses: EmailAddress[]): Promise<EnrichedAddress[]> {
   const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id));
   const ownerIds = addresses.flatMap((address) => [address.owner_id, address.administrator_id])
     .filter((id): id is string => !!id);
-  const owners = listOwnersByIds(ownerIds);
+  const owners = await listOwnersByIds(ownerIds);
   return addresses.map((address) => ({
     ...address,
     provider_name: providers.get(address.provider_id) ?? null,
@@ -80,13 +95,16 @@ export function enrichAddresses(addresses: EmailAddress[]): EnrichedAddress[] {
   }));
 }
 
-export function listEnrichedAddresses(providerId?: string, opts?: ListAddressOptions): EnrichedAddress[] {
+export async function listEnrichedAddresses(
+  providerId?: string,
+  opts?: ListAddressOptions,
+): Promise<EnrichedAddress[]> {
   return enrichAddresses(listAddresses(providerId, opts));
 }
 
-export function getAddressOwnershipDetail(ref: string): AddressOwnershipDetail {
+export async function getAddressOwnershipDetail(ref: string): Promise<AddressOwnershipDetail> {
   const address = resolveAddressRef(ref);
-  const enriched = enrichAddress(address);
+  const enriched = await enrichAddress(address);
   return {
     address: enriched,
     ownership: enriched.owner
@@ -96,54 +114,54 @@ export function getAddressOwnershipDetail(ref: string): AddressOwnershipDetail {
           administrator_id: enriched.administrator?.id ?? enriched.owner.id,
         }
       : null,
-    history: listAddressOwnershipEvents(address.id, 10),
+    history: await listAddressOwnershipEvents(address.id, 10),
   };
 }
 
-export function setAddressOwnerByRef(
+export async function setAddressOwnerByRef(
   addressRef: string,
   ownerRef: string,
   administratorRef?: string,
-): AddressOwnershipDetail {
+): Promise<AddressOwnershipDetail> {
   const address = resolveAddressRef(addressRef);
-  const owner = resolveOwnerRef(ownerRef);
+  const owner = await resolveOwnerRef(ownerRef);
   if (!owner) throw new Error(`Owner not found: ${ownerRef}`);
-  const administrator = administratorRef ? resolveOwnerRef(administratorRef) : null;
-  assignAddressOwner(address.id, owner.id, administrator?.id);
+  const administrator = administratorRef ? await resolveOwnerRef(administratorRef) : null;
+  await assignAddressOwner(address.id, owner.id, administrator?.id);
   return getAddressOwnershipDetail(address.id);
 }
 
-export function transferAddressOwnerByRef(
+export async function transferAddressOwnerByRef(
   addressRef: string,
   ownerRef: string,
   administratorRef: string | undefined,
   options: { actor?: string; reason: string },
-): AddressOwnershipDetail {
+): Promise<AddressOwnershipDetail> {
   const address = resolveAddressRef(addressRef);
-  const owner = resolveOwnerRef(ownerRef);
+  const owner = await resolveOwnerRef(ownerRef);
   if (!owner) throw new Error(`Owner not found: ${ownerRef}`);
-  const administrator = administratorRef ? resolveOwnerRef(administratorRef) : null;
-  transferAddressOwner(address.id, owner.id, administrator?.id, options);
+  const administrator = administratorRef ? await resolveOwnerRef(administratorRef) : null;
+  await transferAddressOwner(address.id, owner.id, administrator?.id, options);
   return getAddressOwnershipDetail(address.id);
 }
 
-export function unassignAddressOwnerByRef(
+export async function unassignAddressOwnerByRef(
   addressRef: string,
   options: { actor?: string; reason: string },
-): AddressOwnershipDetail {
+): Promise<AddressOwnershipDetail> {
   const address = resolveAddressRef(addressRef);
-  unassignAddressOwner(address.id, options);
+  await unassignAddressOwner(address.id, options);
   return getAddressOwnershipDetail(address.id);
 }
 
-export function getAddressOwnershipHistoryByRef(
+export async function getAddressOwnershipHistoryByRef(
   addressRef: string,
   limit = 20,
-): { address: EnrichedAddress; history: AddressOwnershipEvent[] } {
+): Promise<{ address: EnrichedAddress; history: AddressOwnershipEvent[] }> {
   const address = resolveAddressRef(addressRef);
   return {
-    address: enrichAddress(address),
-    history: listAddressOwnershipEvents(address.id, limit),
+    address: await enrichAddress(address),
+    history: await listAddressOwnershipEvents(address.id, limit),
   };
 }
 

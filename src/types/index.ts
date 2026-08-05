@@ -176,6 +176,40 @@ export interface DnsRecord {
   purpose: "DKIM" | "SPF" | "DMARC" | "MX" | "MAIL_FROM" | "SES_IDENTITY";
 }
 
+/**
+ * Whether a provider type publishes DNS records at all.
+ *
+ * THE AMBIGUITY THIS EXISTS TO REMOVE. An empty `DnsRecord[]` means three
+ * different things and the array cannot say which:
+ *
+ *   - `sandbox` returns `[]` unconditionally. It captures mail in the local
+ *     store and never hands it to a DNS-authenticated sender, so the domain has
+ *     no DKIM/SPF/DMARC of its own. Empty is the COMPLETE answer.
+ *   - `resend` returns `[]` when the domain is not in the account — an
+ *     unfinished setup — and also when a `domains.list()`/`domains.get()` call
+ *     failed, because that adapter discards `result.error`. So a `[]` from a
+ *     publishing provider must not be reported as one specific cause.
+ *   - `ses` cannot return `[]` at all; it always appends SPF and DMARC.
+ *
+ * `providerDnsPublishing()` in `src/providers/index.ts` is the only producer.
+ * The discriminated union makes `reason` non-omittable in TypeScript; the
+ * renderer validates it again at runtime, because `formatDnsTable` is a package
+ * `exports` entry and untyped callers reach it.
+ */
+export type DnsPublishingSupport =
+  | { publishes: true }
+  | {
+      publishes: false;
+      /**
+       * Why this provider type has no records to publish, in operator-facing
+       * words. A CLAUSE, not a sentence: no leading capital, no trailing period —
+       * the renderer embeds it after a colon and adds the period itself.
+       */
+      reason: string;
+      /** What to do instead. A full sentence, with its own terminating period. */
+      instead?: string;
+    };
+
 // Address lifecycle status. `active` can send/receive; `suspended` is blocked
 // from sending (and excluded from delivery) but retained.
 export type AddressStatus = "active" | "suspended";
@@ -243,22 +277,92 @@ export interface SendEmailOptions {
 }
 
 // Email log
-export type EmailStatus = "sent" | "delivered" | "bounced" | "complained" | "failed";
+/**
+ * The delivery state of an entry in the outbound sent ledger.
+ *
+ * THE TWO STORES HAVE DIFFERENT VOCABULARIES AND THIS UNION IS THEIR SUM, which is a schema
+ * divergence invisible from the TypeScript types (`MessageRecord.status` is a bare `string`).
+ *
+ *   * THE FIVE the local SQLite ledger accepts are its own CHECK constraint —
+ *     `CHECK(status IN ('sent','delivered','bounced','complained','failed'))`
+ *     (src/db/database.ts). Nothing else can be written there.
+ *   * THE THREE the SELF-HOSTED service can additionally PRODUCE are the outbound send
+ *     lifecycle. `messages.status` is `TEXT NOT NULL DEFAULT 'queued'`
+ *     (src/server/self-hosted/migrations.ts) and the send path writes `queued` on every
+ *     reservation and re-arm, `blocked` when an outbound policy gate refuses, and `uncertain`
+ *     when a provider call's outcome could not be established
+ *     (src/server/self-hosted/store.ts).
+ *
+ * SO `queued` IS THE ORDINARY STATE OF A MESSAGE THAT HAS BEEN RESERVED AND NOT YET SENT on
+ * an API-configured installation, and any read that refuses it takes `emails log list`, the
+ * export and `GET /api/emails` down on exactly the rows an operator most wants to see. It is
+ * in the type for that reason, not for tidiness.
+ *
+ * WRITES ARE STILL HELD TO THE FIVE. `updateEmailStatus` (src/db/emails.ts) refuses the three
+ * service-only states, because writing one to the local ledger violates that table's CHECK —
+ * the read accepts every state a store can PRODUCE, the write accepts every state both stores
+ * can ACCEPT, and those are different sets on purpose.
+ */
+export type EmailStatus =
+  | "sent"
+  | "delivered"
+  | "bounced"
+  | "complained"
+  | "failed"
+  /** Reserved for sending and not yet handed to a provider. Self-hosted service only. */
+  | "queued"
+  /** Refused by an outbound policy gate before any provider was called. Self-hosted only. */
+  | "blocked"
+  /** The provider call's outcome could not be established. Self-hosted only. */
+  | "uncertain";
 
+/**
+ * The states BOTH stores accept on a write — the local ledger's CHECK constraint.
+ *
+ * Exported so `src/db/emails.ts` and any future writer share one definition rather than two
+ * lists that can drift.
+ */
+export const WRITABLE_EMAIL_STATUSES: readonly EmailStatus[] = [
+  "sent",
+  "delivered",
+  "bounced",
+  "complained",
+  "failed",
+];
+
+/**
+ * One entry in the outbound sent ledger.
+ *
+ * THREE FIELDS ARE NULLABLE BECAUSE A STORE MAY NOT PUBLISH THEM, and that is a different
+ * fact from the value being empty. The store seam's message projections
+ * (`MessageRecord` / `MessageListRecord`, src/store/records.ts) carry no `provider_id`, no
+ * `bcc_addrs` and no `tags`, so `src/db/emails.ts` answers `null` for all three rather than
+ * the `"self_hosted"` / `[]` / `{}` the deleted HTTP arm invented — three comfortable
+ * values indistinguishable from three real ones. `src/lib/sent-ledger.local.ts`, which
+ * writes the `emails` table directly, fills all three.
+ *
+ * `reply_to` was already nullable and is the one field where "there is no reply-to" and
+ * "this store does not record one" still collide; separating them needs a second field on
+ * this published type and is named in the `src/db/emails.ts` header rather than left to be
+ * discovered.
+ */
 export interface Email {
   id: string;
-  provider_id: string;
+  /** null when the store does not record which provider sent the message. */
+  provider_id: string | null;
   provider_message_id: string | null;
   from_address: string;
   to_addresses: string[];
   cc_addresses: string[];
-  bcc_addresses: string[];
+  /** null when the store does not record a bcc list. NOT "there were no bcc recipients". */
+  bcc_addresses: string[] | null;
   reply_to: string | null;
   subject: string;
   status: EmailStatus;
   has_attachments: boolean;
   attachment_count: number;
-  tags: Record<string, string>;
+  /** null when the store does not record tags. NOT "this message has no tags". */
+  tags: Record<string, string> | null;
   idempotency_key?: string | null;
   sent_at: string;
   created_at: string;

@@ -1,5 +1,5 @@
 import { ansi } from "./ansi.js";
-import type { DnsRecord } from "../types/index.js";
+import type { DnsPublishingSupport, DnsRecord } from "../types/index.js";
 
 export interface DnsCheckResult {
   record: DnsRecord;
@@ -8,8 +8,44 @@ export interface DnsCheckResult {
   match: boolean;
 }
 
-export function formatDnsCheck(results: DnsCheckResult[]): string {
-  if (results.length === 0) return "No DNS records to check.\n";
+const NOTHING_TO_CHECK = "No DNS records to check.\n";
+
+/**
+ * Render a live DNS check.
+ *
+ * `support` disambiguates the EMPTY case only, for exactly the reason
+ * `formatDnsTable` takes it: nothing to check is three different situations —
+ * a provider type that publishes no records at all, a domain not yet added to a
+ * provider that does, and a lookup that failed — and "No DNS records to check."
+ * reads as the last one in all three.
+ *
+ * This existed as an unconditioned sentence while its sibling renderer had
+ * already been fixed, so `emails domain dns` said "Nothing is missing" and the
+ * `emails domain check` it recommends in its own next-step line answered "not
+ * ready" for the same domain. Same ambiguity, one command apart.
+ *
+ * Validated at runtime rather than trusted from the type, because this module is
+ * reachable from untyped JS through the package's `exports`, and printing
+ * "…none are expected: undefined." would be worse than the plain sentence.
+ */
+export function formatDnsCheck(results: DnsCheckResult[], support?: DnsPublishingSupport): string {
+  if (results.length === 0) {
+    if (typeof support !== "object" || support === null) return NOTHING_TO_CHECK;
+    if (support.publishes === false) {
+      const reason = typeof support.reason === "string" ? support.reason.trim().replace(/\.+$/, "") : "";
+      if (!reason) return NOTHING_TO_CHECK;
+      const instead = typeof support.instead === "string" ? support.instead.trim() : "";
+      return `Nothing to check, and nothing is expected to be published: ${reason}.${instead ? ` ${instead}` : ""}\n`;
+    }
+    if (support.publishes === true) {
+      return "No records were expected for this domain, so nothing could be checked. This provider "
+        + "type does publish DKIM/SPF/DMARC records, so this is an answer about the domain and not "
+        + "about the provider: most often the domain has not been added to the provider yet — "
+        + "'emails domain add <domain> --provider <id>' — though a provider lookup that failed or "
+        + "was throttled looks the same from here.\n";
+    }
+    return NOTHING_TO_CHECK;
+  }
 
   const cols = {
     type: Math.max(4, ...results.map((r) => r.record.type.length)),

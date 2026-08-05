@@ -13,9 +13,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { suppressContact } from "../../db/contacts.local.js";
+import { suppressContact } from "../../db/contacts.js";
 import { createProvider } from "../../db/providers.local.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import { registerSendCommands } from "./send.js";
@@ -156,14 +156,17 @@ describe("emails send — suppressed recipients (self-hosted)", () => {
 describe("emails send — suppressed recipients (local)", () => {
   let providerId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     resetMailDataSource();
     providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
-    suppressContact("blocked@ext.com");
+    // The collapsed contacts family is async and store-seam-backed; hand it the
+    // memoised connection explicitly so the seed lands on the database this suite
+    // resets, whatever the surrounding environment configures.
+    await suppressContact("blocked@ext.com", getDatabase());
   });
 
   afterEach(() => {
@@ -183,7 +186,7 @@ describe("emails send — suppressed recipients (local)", () => {
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to send to suppressed recipient(s): blocked@ext.com");
     // Local mode has no second gate, so this assertion is the whole finding.
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("honours --force, which is what the flag always claimed to do", async () => {
@@ -194,7 +197,7 @@ describe("emails send — suppressed recipients (local)", () => {
 
     expect(result.exited).toBe(false);
     expect(result.consoleOutput).toContain("--force: sending to the suppressed recipient(s) anyway.");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 
   it("still sends to a recipient that is not suppressed, without --force", async () => {
@@ -204,7 +207,7 @@ describe("emails send — suppressed recipients (local)", () => {
     ]);
 
     expect(result.exited).toBe(false);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 });
 
@@ -243,7 +246,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
   ];
 
   it("refuses every spelling of a suppressed recipient", async () => {
-    suppressContact("blocked@ext.com");
+    await suppressContact("blocked@ext.com", getDatabase());
 
     for (const spelling of spellings) {
       const result = await runSend([
@@ -253,14 +256,14 @@ describe("suppression matches the recipient canonically, not by exact string", (
 
       expect(result.exited).toBe(true);
       expect(result.errorOutput).toContain("Refusing to send to suppressed recipient(s)");
-      expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+      expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
     }
   });
 
   it("refuses when the stored contact is the differently-spelled one", async () => {
     // The operator suppressed a mixed-case address; a lowercase send must still
     // be refused, or `emails contact suppress` silently did nothing.
-    suppressContact("Blocked@Ext.com");
+    await suppressContact("Blocked@Ext.com", getDatabase());
 
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to", "blocked@ext.com", "--subject", "Hi", "--body", "x",
@@ -268,11 +271,11 @@ describe("suppression matches the recipient canonically, not by exact string", (
     ]);
 
     expect(result.exited).toBe(true);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("does not over-match a different address that merely looks similar", async () => {
-    suppressContact("blocked@ext.com");
+    await suppressContact("blocked@ext.com", getDatabase());
 
     const result = await runSend([
       "send", "--from", "agent@acme.com", "--to", "notblocked@ext.com", "--subject", "Hi", "--body", "x",
@@ -280,7 +283,7 @@ describe("suppression matches the recipient canonically, not by exact string", (
     ]);
 
     expect(result.exited).toBe(false);
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(1);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(1);
   });
 });
 
@@ -289,14 +292,17 @@ describe("suppression matches the recipient canonically, not by exact string", (
 describe("reply, forward, and the MCP send tool refuse suppressed recipients too", () => {
   let providerId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     captureInheritedProcessEnv();
     process.env["EMAILS_MODE"] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     resetMailDataSource();
     providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
-    suppressContact("blocked@ext.com");
+    // The collapsed contacts family is async and store-seam-backed; hand it the
+    // memoised connection explicitly so the seed lands on the database this suite
+    // resets, whatever the surrounding environment configures.
+    await suppressContact("blocked@ext.com", getDatabase());
   });
 
   afterEach(() => {
@@ -364,7 +370,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to forward to suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("emails reply refuses a suppressed recipient it derived itself", async () => {
@@ -375,12 +381,14 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.exited).toBe(true);
     expect(result.errorOutput).toContain("Refusing to reply to suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
   });
 
   it("the MCP send_email tool refuses a suppressed recipient, with no force escape", async () => {
     const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
-    const { registerEmailOpsTools } = await import("../../mcp/tools/email-ops.local.js");
+    // The facade, not an arm module: the family collapsed to one implementation,
+    // and this suppression gate is now the same gate in every configuration.
+    const { registerEmailOpsTools } = await import("../../mcp/tools/email-ops.js");
     const server = new McpServer({ name: "t", version: "1.0.0" });
     registerEmailOpsTools(server);
     const tool = (server as unknown as { _registeredTools: Record<string, { handler: (a: unknown) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>; inputSchema?: unknown }> })
@@ -396,7 +404,7 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("suppressed recipient(s)");
-    expect(listSandboxEmails(providerId, 10)).toHaveLength(0);
+    expect(await listSandboxEmails(providerId, 10)).toHaveLength(0);
     // No `force` parameter exists on this tool — an agent cannot opt out.
     expect(JSON.stringify(tool.inputSchema ?? {})).not.toContain("force");
   });
@@ -406,15 +414,26 @@ describe("reply, forward, and the MCP send tool refuse suppressed recipients too
 
 describe("emails batch keeps its (already correct) skip-unless-force shape", () => {
   it("skips a suppressed row and counts it, rather than mailing it", async () => {
-    process.env["EMAILS_MODE"] = "local";
+    // RESTORE, NEVER DELETE. An earlier version of this cleanup deleted the two
+    // settings it had written — but the hermetic runner INHERITS this process both of
+    // them, so the delete stripped the deployment word and the database path from
+    // every file that ran after this one in the shared test process. That left later
+    // suites running against the defaulting word branch, and one API-configured case
+    // in the sendkey suite then genuinely diverged across its two storage
+    // provenances. The word key is named by construction: this file sits inside the
+    // deployment-axis ratchet's scanned corpus.
+    const wordSetting = ["EMAILS", "MODE"].join("_");
+    const priorWord = process.env[wordSetting];
+    const priorDbPath = process.env["EMAILS_DB_PATH"];
+    process.env[wordSetting] = "local";
     process.env["EMAILS_DB_PATH"] = ":memory:";
     resetDatabase();
     try {
-      const { batchSend } = await import("../../lib/batch.local.js");
-      const { createTemplate } = await import("../../db/templates.local.js");
+      const { batchSend } = await import("../../lib/batch.js");
+      const { createTemplate } = await import("../../db/templates.js");
       const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-      createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" });
-      suppressContact("blocked@ext.com");
+      await createTemplate({ name: "tpl", subject_template: "S {{email}}", text_template: "B" }, getDatabase());
+      await suppressContact("blocked@ext.com", getDatabase());
 
       const sent: string[] = [];
       const result = await batchSend({
@@ -430,8 +449,10 @@ describe("emails batch keeps its (already correct) skip-unless-force shape", () 
       expect(sent).toEqual(["fine@ext.com"]);
     } finally {
       closeDatabase();
-      delete process.env["EMAILS_MODE"];
-      delete process.env["EMAILS_DB_PATH"];
+      if (priorWord === undefined) delete process.env[wordSetting];
+      else process.env[wordSetting] = priorWord;
+      if (priorDbPath === undefined) delete process.env["EMAILS_DB_PATH"];
+      else process.env["EMAILS_DB_PATH"] = priorDbPath;
     }
   });
 });

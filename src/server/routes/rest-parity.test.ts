@@ -1,18 +1,18 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createAddress } from "../../db/addresses.local.js";
-import { suppressContact, upsertContact } from "../../db/contacts.local.js";
+import { suppressContact, upsertContact } from "../../db/contacts.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.local.js";
-import { createEmail } from "../../db/emails.local.js";
-import { createEvent } from "../../db/events.local.js";
-import { addMember, createGroup } from "../../db/groups.local.js";
+import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
+import { createEvent } from "../../db/events.js";
+import { addMember, createGroup } from "../../db/groups.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
-import { createScheduledEmail, markSent } from "../../db/scheduled.local.js";
-import { storeSandboxEmail } from "../../db/sandbox.local.js";
-import { createSequence, enroll, unenroll } from "../../db/sequences.local.js";
-import { createTemplate } from "../../db/templates.local.js";
-import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.local.js";
+import { createScheduledEmail, markSent } from "../../db/scheduled.js";
+import { storeSandboxEmail } from "../../db/sandbox.js";
+import { createSequence, enroll, unenroll } from "../../db/sequences.js";
+import { createTemplate } from "../../db/templates.js";
+import { createWarmingSchedule, updateWarmingStatus } from "../../db/warming.js";
 import { seedEmailAgentRun, seedTriage } from "../../test-support/legacy-mail-seed.js";
 import { handleApiRequest } from "../api-routes.js";
 
@@ -202,19 +202,19 @@ describe("emails serve REST parity smoke", () => {
     });
     const domain = createDomain(provider.id, "example.com");
     const address = createAddress({ provider_id: provider.id, email: "ops@example.com" });
-    const email = createEmail(provider.id, {
+    const email = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "user@example.com",
       subject: "REST smoke",
       text: "hello",
     }, "rest-msg");
-    createEvent({
+    await createEvent({
       email_id: email.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "user@example.com",
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
+    }, getDatabase());
     const inboundEmail = storeInboundEmail({
       provider_id: provider.id,
       message_id: "<inbound@example.com>",
@@ -236,7 +236,7 @@ describe("emails serve REST parity smoke", () => {
       summary: "REST inbound summary",
       confidence: 0.8,
     });
-    storeSandboxEmail({
+    await storeSandboxEmail({
       provider_id: provider.id,
       from_address: "ops@example.com",
       to_addresses: ["user@example.com"],
@@ -263,7 +263,15 @@ describe("emails serve REST parity smoke", () => {
     const addresses = await json<Array<{ id: string; email: string }>>(`/api/addresses?provider_id=${provider.id}`);
     expect(addresses[0]).toMatchObject({ id: address.id, email: "ops@example.com" });
 
-    const emails = await json<Array<{ id: string; subject: string }>>(`/api/emails?provider_id=${provider.id}`);
+    // THE PROVIDER FILTER IS REFUSED, NOT IGNORED, and both halves are asserted because an
+    // unconditional guard here would take the whole route down rather than one filter. No
+    // message projection on the store seam carries a provider, so `/api/emails?provider_id=`
+    // cannot be served with either every provider's mail or none of it.
+    const refusedByProvider = await call(`/api/emails?provider_id=${provider.id}`);
+    expect(refusedByProvider.status).toBe(500);
+    expect(await refusedByProvider.text()).toContain("provider");
+
+    const emails = await json<Array<{ id: string; subject: string }>>(`/api/emails`);
     expect(emails[0]).toMatchObject({ id: email.id, subject: "REST smoke" });
 
     const inbound = await json<Array<{ subject: string }>>("/api/inbound?to=ops@example.com");
@@ -313,8 +321,16 @@ describe("emails serve REST parity smoke", () => {
     expect(await json<Array<{ subject: string }>>(`/api/sandbox?provider_id=${provider.id}`))
       .toContainEqual(expect.objectContaining({ subject: "Sandbox smoke" }));
 
-    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&provider_id=${provider.id}`);
+    // Unfiltered, for the same reason `/api/emails?provider_id=` is refused above: the export
+    // reads the sent ledger through the store seam and no message projection there carries a
+    // provider. The refusal is asserted at that call site; what this one still proves is that
+    // the export route serves the row at all.
+    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json`);
     expect(exportedEmails.map((item) => item.id)).toContain(email.id);
+
+    const refusedExport = await call(`/api/export/emails?format=json&provider_id=${provider.id}`);
+    expect(refusedExport.status).toBe(500);
+    expect(await refusedExport.text()).toContain("provider");
   });
 
   it("rejects unresolved or ambiguous REST provider filters instead of returning empty pages", async () => {
@@ -350,13 +366,13 @@ describe("emails serve REST parity smoke", () => {
   it("paginates REST exports before serializing response bodies", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const older = createEmail(provider.id, {
+    const older = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "older@example.com",
       subject: "Older export",
       text: "hello",
     });
-    const newer = createEmail(provider.id, {
+    const newer = await createSentEmailLedger(provider.id, {
       from: "ops@example.com",
       to: "newer@example.com",
       subject: "Newer export",
@@ -364,22 +380,25 @@ describe("emails serve REST parity smoke", () => {
     });
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", older.id]);
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-02-01T00:00:00.000Z", newer.id]);
-    const oldEvent = createEvent({
+    const oldEvent = await createEvent({
       email_id: older.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "older@example.com",
       occurred_at: "2026-01-01T00:00:00.000Z",
-    });
-    const newEvent = createEvent({
+    }, getDatabase());
+    const newEvent = await createEvent({
       email_id: newer.id,
       provider_id: provider.id,
       type: "delivered",
       recipient: "newer@example.com",
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
+    }, getDatabase());
 
-    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&provider_id=${provider.id}&limit=1&offset=1`);
+    // Paged WITHOUT a provider filter, which the sent ledger can no longer answer — see the
+    // note on `/api/emails?provider_id=` above. The pagination is what this case is about and
+    // it is unchanged: newest first, so `limit=1&offset=1` is the second-newest row.
+    const exportedEmails = await json<Array<{ id: string }>>(`/api/export/emails?format=json&limit=1&offset=1`);
     expect(exportedEmails.map((item) => item.id)).toEqual([older.id]);
 
     const exportedEvents = await json<Array<{ id: string }>>(`/api/export/events?format=json&provider_id=${provider.id}&until=2026-01-15T00%3A00%3A00.000Z&limit=10`);
@@ -389,25 +408,25 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates REST event history with offset and until filters", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const oldest = createEvent({
+    const oldest = await createEvent({
       provider_id: provider.id,
       type: "delivered",
       recipient: "oldest@example.com",
       occurred_at: "2026-01-01T00:00:00.000Z",
-    });
-    const middle = createEvent({
+    }, getDatabase());
+    const middle = await createEvent({
       provider_id: provider.id,
       type: "opened",
       recipient: "middle@example.com",
       metadata: { user_agent: "REST hidden event metadata ".repeat(100) },
       occurred_at: "2026-02-01T00:00:00.000Z",
-    });
-    const newest = createEvent({
+    }, getDatabase());
+    const newest = await createEvent({
       provider_id: provider.id,
       type: "clicked",
       recipient: "newest@example.com",
       occurred_at: "2026-03-01T00:00:00.000Z",
-    });
+    }, getDatabase());
 
     const page = await json<Array<Record<string, unknown>>>(`/api/events?provider_id=${provider.id}&limit=1&offset=1`);
     expect(page.map((item) => item.id)).toEqual([middle.id]);
@@ -425,13 +444,13 @@ describe("emails serve REST parity smoke", () => {
 
   it("filters REST sent email APIs by canonical sender", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const kept = createEmail(provider.id, {
+    const kept = await createSentEmailLedger(provider.id, {
       from: '"Ops Team" <ops@example.com>',
       to: "kept@example.com",
       subject: "REST kept",
       text: "hello",
     });
-    createEmail(provider.id, {
+    await createSentEmailLedger(provider.id, {
       from: "other@example.com",
       to: "other@example.com",
       subject: "REST other",
@@ -449,7 +468,7 @@ describe("emails serve REST parity smoke", () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     const db = getDatabase();
     for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "ops@example.com",
         to: `user-${i}@example.com`,
         subject: `REST searchable ${i}`,
@@ -478,7 +497,7 @@ describe("emails serve REST parity smoke", () => {
   it("normalizes bad REST list limits before calling data APIs", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     for (let i = 0; i < 3; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "ops@example.com",
         to: `user-${i}@example.com`,
         subject: `REST limit ${i}`,
@@ -567,7 +586,7 @@ describe("emails serve REST parity smoke", () => {
       [provider.id, "Sandbox new", "2026-02-03T00:00:00.000Z"],
       [other.id, "Sandbox other", "2026-02-04T00:00:00.000Z"],
     ] as Array<[string, string, string]>) {
-      const email = storeSandboxEmail({
+      const email = await storeSandboxEmail({
         provider_id: providerId,
         from_address: "ops@example.com",
         to_addresses: ["user@example.com"],
@@ -624,40 +643,33 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("serves typed domain readiness summaries and mutations", async () => {
-    const previousMode = process.env["EMAILS_MODE"];
-    process.env["EMAILS_MODE"] = "local";
-    try {
-      const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-      const domain = createDomain(provider.id, "readiness.example.com");
-      updateDnsStatus(domain.id, "verified", "verified", "pending");
-      updateDomainReadiness(domain.id, { inbound_status: "ready", outbound_status: "ready" });
+    const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
+    const domain = createDomain(provider.id, "readiness.example.com");
+    updateDnsStatus(domain.id, "verified", "verified", "pending");
+    updateDomainReadiness(domain.id, { inbound_status: "ready", outbound_status: "ready" });
 
-      const list = await json<Array<{ id: string; readiness: { send_ready: boolean; receive_ready: boolean; outbound_ready: boolean }; provider: { name: string } }>>(`/api/domains/readiness?provider_id=${provider.id}`);
-      expect(list).toHaveLength(1);
-      expect(list[0]).toMatchObject({
-        id: domain.id,
-        provider: { name: "sandbox" },
-        readiness: { send_ready: true, receive_ready: true, outbound_ready: true },
-      });
+    const list = await json<Array<{ id: string; readiness: { send_ready: boolean; receive_ready: boolean; outbound_ready: boolean }; provider: { name: string } }>>(`/api/domains/readiness?provider_id=${provider.id}`);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: domain.id,
+      provider: { name: "sandbox" },
+      readiness: { send_ready: true, receive_ready: true, outbound_ready: true },
+    });
 
-      const detail = await json<{ id: string; dns: { missing_records: string[] } }>(`/api/domains/${domain.id}/readiness`);
-      expect(detail.id).toBe(domain.id);
-      expect(detail.dns.missing_records).toContain("DMARC");
+    const detail = await json<{ id: string; dns: { missing_records: string[] } }>(`/api/domains/${domain.id}/readiness`);
+    expect(detail.id).toBe(domain.id);
+    expect(detail.dns.missing_records).toContain("DMARC");
 
-      const disabled = await json<{ outbound_status: string; readiness: { outbound_ready: boolean; restricted: boolean } }>(
-        `/api/domains/${domain.id}/readiness`,
-        postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "disabled" }),
-      );
-      expect(disabled.outbound_status).toBe("disabled");
-      expect(disabled.readiness.outbound_ready).toBe(false);
-      expect(disabled.readiness.restricted).toBe(true);
+    const disabled = await json<{ outbound_status: string; readiness: { outbound_ready: boolean; restricted: boolean } }>(
+      `/api/domains/${domain.id}/readiness`,
+      postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "disabled" }),
+    );
+    expect(disabled.outbound_status).toBe("disabled");
+    expect(disabled.readiness.outbound_ready).toBe(false);
+    expect(disabled.readiness.restricted).toBe(true);
 
-      const invalid = await call(`/api/domains/${domain.id}/readiness`, postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "bogus" }));
-      expect(invalid.status).toBe(400);
-    } finally {
-      if (previousMode === undefined) delete process.env["EMAILS_MODE"];
-      else process.env["EMAILS_MODE"] = previousMode;
-    }
+    const invalid = await call(`/api/domains/${domain.id}/readiness`, postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "bogus" }));
+    expect(invalid.status).toBe(400);
   });
 
   it("defaults REST collection endpoints to bounded pages", async () => {
@@ -666,31 +678,31 @@ describe("emails serve REST parity smoke", () => {
     for (let i = 0; i < 101; i++) {
       createAddress({ provider_id: provider.id, email: `default-address-${i}@example.com` });
       createDomain(provider.id, `default-domain-${i}.example.com`);
-      upsertContact(`default-contact-${i}@example.com`);
-      createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
-      createGroup(`default-group-${i}`);
-      createScheduledEmail({
+      await upsertContact(`default-contact-${i}@example.com`, getDatabase());
+      await createTemplate({ name: `default-template-${i}`, subject_template: `Template ${i}` });
+      await createGroup(`default-group-${i}`);
+      await createScheduledEmail({
         provider_id: provider.id,
         from_address: "ops@example.com",
         to_addresses: [`default-scheduled-${i}@example.com`],
         subject: `Default scheduled ${i}`,
         scheduled_at: `2030-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
       });
-      createSequence({ name: `default-sequence-${i}` });
+      await createSequence({ name: `default-sequence-${i}` });
     }
 
-    const members = createGroup("default-member-page");
+    const members = await createGroup("default-member-page");
     for (let i = 0; i < 101; i++) {
-      addMember(members.id, `default-member-${i}@example.com`);
+      await addMember(members.id, `default-member-${i}@example.com`);
     }
 
-    const enrollments = createSequence({ name: "default-enrollment-page" });
+    const enrollments = await createSequence({ name: "default-enrollment-page" });
     for (let i = 0; i < 101; i++) {
-      enroll({ sequence_id: enrollments.id, contact_email: `default-enrollment-${i}@example.com` });
+      await enroll({ sequence_id: enrollments.id, contact_email: `default-enrollment-${i}@example.com` });
     }
 
     for (let i = 0; i < 51; i++) {
-      createWarmingSchedule({ domain: `default-warm-${i}.example.com`, target_daily_volume: 100 });
+      await createWarmingSchedule({ domain: `default-warm-${i}.example.com`, target_daily_volume: 100 });
     }
 
     expect(await json<Array<unknown>>(`/api/addresses?provider_id=${provider.id}`)).toHaveLength(100);
@@ -707,9 +719,9 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates contacts after REST suppression filtering", async () => {
     for (let i = 0; i < 5; i++) {
-      suppressContact(`suppressed-${i}@example.com`);
+      await suppressContact(`suppressed-${i}@example.com`, getDatabase());
     }
-    upsertContact("active@example.com");
+    await upsertContact("active@example.com", getDatabase());
 
     const page = await json<Array<{ email: string; suppressed: boolean }>>("/api/contacts?suppressed=true&limit=2&offset=1");
 
@@ -721,7 +733,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates templates before returning REST results", async () => {
     const db = getDatabase();
     for (let i = 0; i < 5; i++) {
-      const template = createTemplate({
+      const template = await createTemplate({
         name: `template-${i}`,
         subject_template: `Template ${i}`,
         html_template: `<main>${`REST template hidden html ${i} `.repeat(100)}</main>`,
@@ -742,7 +754,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates scheduled emails after REST status filtering", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
     for (let i = 0; i < 5; i++) {
-      createScheduledEmail({
+      await createScheduledEmail({
         provider_id: provider.id,
         from_address: "ops@example.com",
         to_addresses: [`pending-${i}@example.com`],
@@ -754,14 +766,14 @@ describe("emails serve REST parity smoke", () => {
         scheduled_at: `2030-01-0${i + 1}T00:00:00.000Z`,
       });
     }
-    const sent = createScheduledEmail({
+    const sent = await createScheduledEmail({
       provider_id: provider.id,
       from_address: "ops@example.com",
       to_addresses: ["sent@example.com"],
       subject: "Sent",
       scheduled_at: "2030-01-01T12:00:00.000Z",
     });
-    markSent(sent.id);
+    await markSent(sent.id);
 
     const page = await json<Array<Record<string, unknown>>>("/api/scheduled?status=pending&limit=2&offset=1");
 
@@ -778,10 +790,10 @@ describe("emails serve REST parity smoke", () => {
   it("paginates warming schedules after REST status filtering", async () => {
     const db = getDatabase();
     for (let i = 1; i <= 4; i++) {
-      const schedule = createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
+      const schedule = await createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
       db.run("UPDATE warming_schedules SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, schedule.id]);
     }
-    updateWarmingStatus("warm-4.example.com", "paused");
+    await updateWarmingStatus("warm-4.example.com", "paused");
 
     const page = await json<Array<{ domain: string; status: string }>>("/api/warming?status=active&limit=2&offset=1");
 
@@ -790,10 +802,10 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("paginates groups before returning REST results", async () => {
-    createGroup("gamma");
-    createGroup("alpha");
-    createGroup("delta");
-    createGroup("beta");
+    await createGroup("gamma");
+    await createGroup("alpha");
+    await createGroup("delta");
+    await createGroup("beta");
 
     const page = await json<Array<{ name: string }>>("/api/groups?limit=2&offset=1");
 
@@ -801,11 +813,11 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("paginates group members before returning REST results", async () => {
-    const group = createGroup("rest-members");
-    addMember(group.id, "dave@example.com");
-    addMember(group.id, "charlie@example.com");
-    addMember(group.id, "alice@example.com");
-    addMember(group.id, "bob@example.com", "Bob", { hidden: "REST hidden group vars ".repeat(100) });
+    const group = await createGroup("rest-members");
+    await addMember(group.id, "dave@example.com");
+    await addMember(group.id, "charlie@example.com");
+    await addMember(group.id, "alice@example.com");
+    await addMember(group.id, "bob@example.com", "Bob", { hidden: "REST hidden group vars ".repeat(100) });
 
     const page = await json<Array<Record<string, unknown>>>("/api/groups/rest-members/members?limit=2&offset=1");
 
@@ -821,8 +833,8 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("resolves encoded group names in REST member routes", async () => {
-    const group = createGroup("rest members/name");
-    addMember(group.id, "alice@example.com", "Alice", { role: "ops" });
+    const group = await createGroup("rest members/name");
+    await addMember(group.id, "alice@example.com", "Alice", { role: "ops" });
     const encoded = encodeURIComponent(group.name);
 
     const members = await json<Array<{ email: string }>>(`/api/groups/${encoded}/members`);
@@ -835,7 +847,7 @@ describe("emails serve REST parity smoke", () => {
   it("paginates sequences before returning REST results", async () => {
     const db = getDatabase();
     for (let i = 0; i < 5; i++) {
-      const sequence = createSequence({ name: `sequence-${i}` });
+      const sequence = await createSequence({ name: `sequence-${i}` });
       const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
       db.run("UPDATE sequences SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, sequence.id]);
     }
@@ -847,23 +859,23 @@ describe("emails serve REST parity smoke", () => {
 
   it("paginates sequence enrollments after REST sequence and status filtering", async () => {
     const db = getDatabase();
-    const sequence = createSequence({ name: "rest-enrollment-page" });
-    const other = createSequence({ name: "rest-other-enrollment-page" });
+    const sequence = await createSequence({ name: "rest-enrollment-page" });
+    const other = await createSequence({ name: "rest-other-enrollment-page" });
     for (let i = 0; i < 5; i++) {
       const email = `active-${i}@example.com`;
-      enroll({ sequence_id: sequence.id, contact_email: email });
+      await enroll({ sequence_id: sequence.id, contact_email: email });
       db.run(
         "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
         [`2026-01-0${i + 1}T00:00:00.000Z`, sequence.id, email],
       );
     }
-    enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
-    unenroll(sequence.id, "cancelled@example.com");
+    await enroll({ sequence_id: sequence.id, contact_email: "cancelled@example.com" });
+    await unenroll(sequence.id, "cancelled@example.com");
     db.run(
       "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
       ["2026-01-10T00:00:00.000Z", sequence.id, "cancelled@example.com"],
     );
-    enroll({ sequence_id: other.id, contact_email: "other@example.com" });
+    await enroll({ sequence_id: other.id, contact_email: "other@example.com" });
     db.run(
       "UPDATE sequence_enrollments SET enrolled_at = ? WHERE sequence_id = ? AND contact_email = ?",
       ["2026-01-11T00:00:00.000Z", other.id, "other@example.com"],
@@ -882,8 +894,8 @@ describe("emails serve REST parity smoke", () => {
   });
 
   it("resolves encoded sequence names in REST sequence routes", async () => {
-    const sequence = createSequence({ name: "rest sequence/name" });
-    enroll({ sequence_id: sequence.id, contact_email: "alice@example.com" });
+    const sequence = await createSequence({ name: "rest sequence/name" });
+    await enroll({ sequence_id: sequence.id, contact_email: "alice@example.com" });
     const encoded = encodeURIComponent(sequence.name);
 
     const enrollments = await json<Array<{ contact_email: string; sequence_id: string }>>(

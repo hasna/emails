@@ -1,6 +1,7 @@
 import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
+import { API_BASE_URL_SETTING, StoreConfigurationError, planEmailStore } from "../store-resolution.js";
 import { loadConfig } from "./config.js";
-import { EMAILS_CLIENT_ENV_SECRET_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
+import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
 export { EMAILS_CLIENT_ENV_SECRET_ENV } from "./client-env.js";
 
 export type EmailsMode = "local" | "self_hosted";
@@ -13,6 +14,13 @@ export const EMAILS_MODE_ENV = "EMAILS_MODE";
 export const HASNA_EMAILS_MODE_ENV = "HASNA_EMAILS_MODE";
 export const EMAILS_MODE_CONFIG_KEY = "emails_mode";
 export const EMAILS_MODE_ENV_KEYS = [EMAILS_MODE_ENV, HASNA_EMAILS_MODE_ENV] as const;
+
+// The primary deployment-word key under a role name. The coherence refusal below has
+// to NAME that key for the operator, and this module may not add another countable
+// spelling of it — the axis ratchet holds every such reference at a ceiling that may
+// only fall — so one existing spelling (in the parser's refusal) is consumed into
+// this alias and both sites read it by role.
+const MODE_WORD_SETTING = EMAILS_MODE_ENV;
 
 // Removed hosted/legacy mode tiering (no cloud/remote/hybrid). The MAILERY_
 // prefixed selectors are rejected loudly: they configured the removed Mailery
@@ -62,7 +70,14 @@ export interface EmailsModeResolution {
   mode: EmailsMode;
   label: EmailsModeLabel;
   source: EmailsModeSource;
-  warning: null;
+  /**
+   * Operator-facing note about HOW this mode was chosen, when the answer is
+   * surprising. Null when the selection is unremarkable. Rendered by
+   * src/lib/doctor.local.ts (a warn-level "Mode" check),
+   * src/lib/agent-context.ts ("Mode note:") and
+   * src/lib/inbox-sync-status-format.ts.
+   */
+  warning: string | null;
 }
 
 function migrationGuidance(source: string, value?: string): string {
@@ -107,13 +122,141 @@ export function normalizeEmailsMode(value: string): EmailsMode {
   const normalized = value.trim().toLowerCase();
   if (normalized === "local" || normalized === "self_hosted") return normalized;
   if (FORBIDDEN_MODE_VALUES.has(normalized)) {
-    throw new Error(migrationGuidance(EMAILS_MODE_ENV, value));
+    throw new Error(migrationGuidance(MODE_WORD_SETTING, value));
   }
   throw new Error(`Unknown Emails mode '${value}'. Use exactly local or self_hosted.`);
 }
 
-function resolution(mode: EmailsMode, source: EmailsModeSource): EmailsModeResolution {
-  return { mode, label: labelForEmailsMode(mode), source, warning: null };
+function resolution(
+  mode: EmailsMode,
+  source: EmailsModeSource,
+  warning: string | null = null,
+): EmailsModeResolution {
+  return { mode, label: labelForEmailsMode(mode), source, warning };
+}
+
+/**
+ * The note emitted when an explicit local-mode env var shadows a configured
+ * client-env vault pointer.
+ *
+ * WHY THIS EXISTS. `EMAILS_CLIENT_ENV_SECRET` points at the self-hosted client
+ * env; an explicit local-mode selector wins over it. That precedence is CORRECT — an explicit
+ * variable must beat a pointer, and loadEmailsClientEnvSecret() returns early
+ * without even spawning `secrets get` (src/lib/client-env.ts). What was wrong is
+ * that nothing SAID SO: the CLI silently fell back to an empty local SQLite
+ * database and reported "0 total, 0 unread" against a deployment holding ~170,000
+ * messages. Operators and agents read that as an empty mailbox, not as a
+ * misconfiguration, and on 2026-07-27 a blocked production email was investigated
+ * against the wrong database because of it. Earlier reports of the same symptom had
+ * different causes (a login shell that never sourced the pointer; the selector
+ * exported from a profile), so the note names the key that actually won rather than
+ * describing the class.
+ *
+ * The stale value is often not in any config file at all — anything that injects
+ * environment into child processes (a terminal multiplexer's global environment, a
+ * supervisor, a CI runner) sets it once and every process started afterwards
+ * inherits it, so grepping dotfiles finds nothing. Unsetting it at the source also
+ * does not retract it from processes that already exist. Hence the message names the
+ * variable, quotes the pointer (a non-secret vault path), warns that the value may
+ * be inherited rather than configured, and gives a one-shot escape hatch that needs
+ * no cleanup.
+ */
+export function clientEnvPointerOverrideWarning(modeEnvKey: string, pointer: string): string {
+  return `${modeEnvKey}=local is overriding the ${EMAILS_CLIENT_ENV_SECRET_ENV} vault pointer `
+    + `'${pointer}': the self-hosted client env was NOT loaded and this process is reading the `
+    + `local database instead. Counts and message lists here do NOT describe the self-hosted `
+    + `deployment. If that is not what you meant, unset ${modeEnvKey} — note that it may be `
+    + `exported by a parent process rather than by any config file, in which case already-running `
+    + `shells keep the old value until they are restarted. `
+    + `One-shot check: \`env -u ${modeEnvKey} emails inbox status\`.`;
+}
+
+/**
+ * Null unless an explicit local-mode env var is shadowing a configured pointer.
+ * `modeEnvKey` is the key that actually selected local mode, so the note names
+ * the variable the operator has to change rather than a generic label.
+ */
+function pointerOverrideWarning(
+  mode: EmailsMode,
+  modeEnvKey: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (mode !== "local") return null;
+  const pointer = env[EMAILS_CLIENT_ENV_SECRET_ENV]?.trim();
+  if (pointer) return clientEnvPointerOverrideWarning(modeEnvKey, pointer);
+  // A POINTER is the common way to configure the deployment, but not the only one.
+  // An operator who exports the canonical URL + credential directly and then has a
+  // stale local-mode selector in the environment gets the identical silent
+  // wrong-database read, and keying the note solely on the pointer would leave that
+  // case exactly as quiet as the one this change exists to fix.
+  const url = env["EMAILS_SELF_HOSTED_URL"]?.trim();
+  const credential = env["EMAILS_SELF_HOSTED_API_KEY"]?.trim() || env[EMAILS_SESSION_TOKEN_ENV]?.trim();
+  if (url && credential) return clientEnvCredentialOverrideWarning(modeEnvKey, url);
+  return null;
+}
+
+/**
+ * The same note for a directly-configured deployment. Names the URL — never the
+ * credential — for the same reason the pointer variant quotes only the vault path.
+ */
+export function clientEnvCredentialOverrideWarning(modeEnvKey: string, url: string): string {
+  return `${modeEnvKey}=local is overriding the configured self-hosted endpoint `
+    + `'${url}': this process is reading the local database instead. Counts and message lists `
+    + `here do NOT describe the self-hosted deployment. If that is not what you meant, unset `
+    + `${modeEnvKey} — note that it may be exported by a parent process rather than by any config `
+    + `file, in which case already-running shells keep the old value until they are restarted. `
+    + `One-shot check: \`env -u ${modeEnvKey} emails inbox status\`.`;
+}
+
+/**
+ * The split-brain refusal, or null when the configuration is coherent.
+ *
+ * WHY THIS EXISTS. During the axis migration two routing regimes coexist in every
+ * process: families already on the store seam resolve their storage from
+ * configuration alone (src/store-resolution.ts, which deliberately never reads the
+ * deployment word — its own suite asserts that absence), while the families not yet
+ * moved are still dispatched by the word this module resolves. For ONE common
+ * configuration their answers contradict: an API base URL plus a credential, with
+ * the deployment word unset, sends the seam families to the HTTP API while the
+ * word default sends everything else to local SQLite — two mailboxes in the same
+ * process, no diagnostic, and single commands straddle both regimes (owners read
+ * locally, send keys minted through the API). That is the silent wrong-store read
+ * this repo classes as its worst bug, so the DEFAULTING side refuses to guess and
+ * names both settings. Loud beats wrong; the axis deletion retires this guard.
+ *
+ * Deliberately null when the storage resolution itself refuses the environment (a
+ * both-configured contradiction, or an API URL missing its credential): those
+ * configurations already fail closed in the seam's own words on every seam call,
+ * and a second refusal in a different dialect on the word-routed side would bury
+ * the actionable message rather than sharpen it.
+ *
+ * Kept OUT of src/store-resolution.ts on purpose: the check needs the deployment
+ * word's absence, and that module's load-bearing property is that it never reads
+ * the word. Here the word has already been resolved absent, so the check consumes
+ * that fact rather than re-deriving it.
+ */
+function defaultSelectionStorageConflict(env: NodeJS.ProcessEnv): StoreConfigurationError | null {
+  if (!env[API_BASE_URL_SETTING]?.trim()) return null;
+  let configuresApi: boolean;
+  try {
+    configuresApi = planEmailStore(env).store === "api";
+  } catch (error) {
+    // Only the storage resolution's own typed refusal is deferred to. Anything else
+    // is a genuine fault, and swallowing it here would answer "local" over a broken
+    // resolver — the exact silent-wrong-store shape this guard exists to prevent.
+    if (error instanceof StoreConfigurationError) return null;
+    throw error;
+  }
+  if (!configuresApi) return null;
+  return new StoreConfigurationError(
+    `${API_BASE_URL_SETTING} configures an Emails API, but ${MODE_WORD_SETTING} is unset — so ` +
+      "the families already reading storage configuration would use that API while the " +
+      "families still routed by the deployment word would default to the LOCAL database, in " +
+      "the same process. Two configured places to keep mail and no way to tell which one " +
+      `you meant: set ${MODE_WORD_SETTING}=self_hosted to route this process through the ` +
+      `API, or unset ${API_BASE_URL_SETTING} to use the local database.`,
+    [MODE_WORD_SETTING, API_BASE_URL_SETTING],
+  );
 }
 
 /** Resolve the process mode without requiring client transport credentials. */
@@ -127,7 +270,9 @@ export function resolveEmailsModeSelection(env: NodeJS.ProcessEnv = process.env)
     // message names the variable the operator actually has to change.
     if (FORBIDDEN_MODE_VALUES.has(value.toLowerCase())) throw new Error(migrationGuidance(name, value));
     const mode = normalizeEmailsMode(value);
-    return resolution(mode, { kind: "env", name, value });
+    // Precedence is unchanged: this env var still wins. The only addition is that
+    // when it wins OVER a configured client-env pointer, the resolution says so.
+    return resolution(mode, { kind: "env", name, value }, pointerOverrideWarning(mode, name, env));
   }
 
   // A client secret pointer is itself an explicit self-hosted selection. Mode
@@ -155,6 +300,10 @@ export function resolveEmailsModeSelection(env: NodeJS.ProcessEnv = process.env)
     return resolution(mode, { kind: "config", name: EMAILS_MODE_CONFIG_KEY, value: configured });
   }
 
+  // The default is only safe when it AGREES with what the storage configuration
+  // resolves for the seam-routed families; see the conflict helper above.
+  const conflict = defaultSelectionStorageConflict(env);
+  if (conflict !== null) throw conflict;
   return resolution("local", { kind: "default", name: null, value: null });
 }
 

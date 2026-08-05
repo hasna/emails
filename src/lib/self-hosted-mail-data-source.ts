@@ -95,6 +95,12 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
+  /**
+   * Outbound-policy denial code. List rows carry it as its own column (full
+   * headers are stripped from list pages for payload size); the detail read
+   * carries it inside `headers`. Read both, prefer the explicit column.
+   */
+  policy_denial?: string | null;
   attachments?: unknown[] | null;
   /** List rows carry only the count; full metadata comes from the detail read. */
   attachment_count?: number;
@@ -187,6 +193,35 @@ const MAIL_CHANGES_CURSOR_V2_KEYS = [
 // Hard cap on rows walked for a full scan (counts/search/resolve). Large enough
 // to cover a real mailbox without an unbounded walk.
 const MAX_SCAN_ROWS = 100_000;
+
+// ── server-side folder pushdown ───────────────────────────────────────────────
+//
+// GET /v1/messages accepts an index-backed `?folder=` filter (the serve rejects
+// unknown values by name). The client sends it so a scarce folder — starred,
+// archived, spam, trash — is answered by the server instead of by walking the
+// whole store client-side; `folderMatch` remains the second gate, so a server
+// that predates the parameter and ignores it still yields correct results.
+// `unread` is not a server folder: it maps to `inbox` and stays client-side.
+type ServerListFolder = "inbox" | "starred" | "sent" | "archived" | "spam" | "trash";
+
+function serverListFolderOf(mailbox: Mailbox): ServerListFolder {
+  return mailbox === "unread" ? "inbox" : mailbox;
+}
+
+// Hard cap on /messages requests for ONE filtered folder listing. Only a server
+// that ignores `?folder=` (or a pathologically deep offset) can reach it: with
+// the pushdown honoured, pages are match-dense and the page loop breaks as soon
+// as the requested window fills. Sized to the same worst case as MAX_SCAN_ROWS.
+const MAX_FILTER_WALK_REQUESTS = 200;
+
+function filterWalkExhausted(mailbox: Mailbox, scannedRows: number): Error {
+  return new Error(
+    `self-hosted emails: listing the ${mailbox} folder scanned ${scannedRows} rows over `
+      + `${MAX_FILTER_WALK_REQUESTS} requests without completing. This server ignored the `
+      + "GET /v1/messages ?folder= filter (it predates server-side folder listing) — "
+      + "upgrade the emails-serve deployment, or narrow the listing with --since.",
+  );
+}
 // How long a full scan is reused within one (short-lived) CLI/MCP invocation.
 const SCAN_TTL_MS = 15_000;
 // Hard cap on rows walked while collecting one conversation. The candidate read
@@ -547,7 +582,25 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
     // render identically to a delivered message (2026-07-25 incident).
     ...(typeof m.status === "string" && m.status ? { status: m.status } : {}),
     ...(typeof m.send_state === "string" && m.send_state ? { send_state: m.send_state } : {}),
+    // And the REASON, not just the state. `blocked` alone is not actionable: the
+    // send was refused by a local policy gate before any provider was contacted,
+    // and until this was projected the cause was reachable only by calling
+    // GET /v1/messages/{id} by hand (2026-07-27).
+    ...(v1PolicyDenial(m) ? { policy_denial: v1PolicyDenial(m)! } : {}),
   };
+}
+
+/**
+ * The denial code for a row, from the list column or from the detail read's
+ * headers — whichever this row carries. Null when the row was not refused.
+ */
+function v1PolicyDenial(m: V1Message): string | null {
+  const explicit = typeof m.policy_denial === "string" ? m.policy_denial.trim() : "";
+  if (explicit) return explicit;
+  const fromHeaders = m.headers?.["policy_denial"];
+  if (typeof fromHeaders !== "string") return null;
+  const trimmed = fromHeaders.trim();
+  return trimmed ? trimmed : null;
 }
 
 function attachmentRecord(value: unknown): Record<string, unknown> | null {
@@ -859,12 +912,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
       from?: string;
       subject?: string;
       search?: string;
+      folder?: ServerListFolder;
     } = {},
   ): Promise<V1MessagePage> {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
     if (position.cursor) params.set("cursor", position.cursor);
     else if (position.offset !== undefined && position.offset > 0) params.set("offset", String(position.offset));
+    if (opts.folder) params.set("folder", opts.folder);
     if (opts.direction) params.set("direction", opts.direction);
     if (opts.since) params.set("since", opts.since);
     if (opts.to) params.set("to", opts.to);
@@ -894,6 +949,7 @@ export class SelfHostedMailDataSource implements MailDataSource {
       from?: string;
       subject?: string;
       search?: string;
+      folder?: ServerListFolder;
     } = {},
   ): AsyncGenerator<V1Message[]> {
     let cursor: string | undefined;
@@ -1032,6 +1088,24 @@ export class SelfHostedMailDataSource implements MailDataSource {
       return matches ? candidate : null;
     };
 
+    // One request budget for the whole call, across every filter set and both
+    // sort branches. Only reachable when the server ignores the `?folder=`
+    // pushdown (see MAX_FILTER_WALK_REQUESTS): the alternative was the shipped
+    // behaviour — a silent, store-wide, 50-rows-per-request walk that made
+    // `inbox list --folder starred` look like a hang against a six-figure store
+    // (task a3f8e019).
+    let walkRequests = 0;
+    let scannedRows = 0;
+    const budgeted = async function* (this: SelfHostedMailDataSource, requestLimit: number, requestOpts: Parameters<SelfHostedMailDataSource["listPage"]>[2]): AsyncGenerator<V1Message[]> {
+      for await (const page of this.listPages(requestLimit, requestOpts)) {
+        walkRequests += 1;
+        if (walkRequests > MAX_FILTER_WALK_REQUESTS) throw filterWalkExhausted(mailbox, scannedRows);
+        scannedRows += page.length;
+        yield page;
+      }
+    }.bind(this);
+    const folder = serverListFolderOf(mailbox);
+
     if (opts?.sort === "oldest") {
       // The server is newest-first. Retain only the request-bounded oldest tail
       // while walking the cursor chain, never the whole mailbox.
@@ -1041,7 +1115,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
       // preserves global ordering and avoids duplicate rows across that union.
       const sourceFilters = filters.length > 1 ? [{}] : filters;
       for (const filtersForRequest of sourceFilters) {
-        for await (const page of this.listPages(PAGE_LIMIT, {
+        for await (const page of budgeted(PAGE_LIMIT, {
+          folder,
           direction,
           since,
           ...filtersForRequest,
@@ -1065,7 +1140,8 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const matches = new Map<string, V1Message>();
     for (const sourceFilters of scopeServerFilterSets(scope)) {
       let filterMatches = 0;
-      for await (const page of this.listPages(pageLimit, {
+      for await (const page of budgeted(pageLimit, {
+          folder,
           direction,
           since,
           ...sourceFilters,
@@ -1572,6 +1648,17 @@ export class SelfHostedMailDataSource implements MailDataSource {
       throw new Error(
         "--provider is not supported in self_hosted mode: the server selects the outbound provider "
           + "(EMAILS_SEND_PROVIDER) and holds its credentials. Re-run without --provider.",
+      );
+    }
+    if (input.unsubscribeUrl) {
+      // Same class as --provider above: the POST /v1/messages/send contract carries
+      // no unsubscribe_url field, so the RFC 8058 List-Unsubscribe headers cannot be
+      // honored on this path. Accepting the flag and mailing WITHOUT the headers is
+      // a compliance failure the operator cannot see — refuse before the request.
+      throw new Error(
+        "--unsubscribe-url is not supported against the emails serve send API: its send contract "
+          + "carries no unsubscribe_url field, so the List-Unsubscribe headers would be silently "
+          + "dropped. Re-run without --unsubscribe-url, or send through a local provider.",
       );
     }
     const to = input.to.split(",").map((v) => v.trim()).filter(Boolean);

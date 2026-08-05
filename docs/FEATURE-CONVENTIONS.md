@@ -1,25 +1,33 @@
 # Feature conventions for agents
 
 Use this checklist when adding behavior to `@hasna/emails`. The project is a
-CLI, MCP server, REST dashboard API, and public library over the same local
-SQLite store, so new behavior should land in the right layer and get regression
-coverage there.
+CLI, MCP server, local dashboard API, self-hosted `/v1` service, and public
+library. Storage behavior may need both the local SQLite store and the HTTP/
+Postgres path, so new behavior should land at the shared store seam where
+possible and get regression coverage at each exposed layer.
 
 ## DB-backed feature
 
-1. Add schema in `src/db/database.ts`.
-2. Add idempotent `ensureSchema` coverage for the same table, columns, and
-   indexes.
-3. Add CRUD helpers in `src/db/<feature>.ts`.
-4. Add focused tests in `src/db/<feature>.test.ts`.
-5. Use `EMAILS_DB_PATH=:memory:` or a temp DB path in tests.
+1. Add local schema in `src/db/database.ts` and idempotent `ensureSchema`
+   coverage for the same table, columns, and indexes.
+2. If the feature is self-hosted, add an immutable migration in
+   `src/server/self-hosted/migrations.ts` and tenant/RLS coverage where the row
+   is tenant-scoped.
+3. Put shared operations on the relevant `src/store/` repository and implement
+   them for SQLite and HTTP, or document a typed capability refusal.
+4. Add focused DB/store tests and extend the shared conformance suite when the
+   operation belongs to the store contract.
+5. Use `EMAILS_DB_PATH=:memory:` or a temp DB path for local tests; real
+   Postgres suites are gated by `EMAILS_TEST_POSTGRES_URL`.
 
 Regression example: ownership lives in `src/db/owners.ts`,
 `src/lib/address-ownership.ts`, and `src/db/owners.test.ts`.
 
 ## CLI command
 
-1. Register in the nearest `src/cli/commands/*.ts` module.
+1. Register in the nearest `src/cli/commands/*.ts` module. If behavior differs
+   by selected store, keep the shared command shape stable and route the
+   implementation through the existing local/remote facade.
 2. Return structured data through the shared `output(data, formatted)` callback
    whenever practical.
 3. If a command still logs directly, `--json` must stay parseable through the
@@ -33,7 +41,8 @@ Regression examples: `src/cli/cli-contract.test.ts`,
 
 ## MCP tool
 
-1. Register in `src/mcp/tools/*.ts`.
+1. Register in `src/mcp/tools/*.ts` and wire any new registrar from
+   `src/mcp/server.ts`.
 2. Return JSON text, not human-only prose, for agent-facing results.
 3. Let the MCP contract wrapper add `cli_equivalent` and structured errors.
 4. Add HTTP transport tests for high-use tools, not only direct helper tests.
@@ -43,7 +52,9 @@ Regression examples: `src/mcp/http.test.ts` and
 
 ## REST endpoint
 
-1. Add routes in `src/server/routes/*.ts`, keeping `serve.ts` thin.
+1. Add local dashboard routes in `src/server/routes/*.ts`, keeping `serve.ts`
+   thin. Add self-hosted `/v1` behavior to the service/store and its OpenAPI
+   contract in `src/server/self-hosted/`.
 2. Redact provider credentials before returning provider-shaped objects.
 3. Prefer route-dispatcher tests for fast API parity coverage.
 
@@ -62,7 +73,7 @@ Before publishing a release:
 
 ```bash
 bun run build
-EMAILS_DB_PATH=:memory: bun test
+bun run test
 npm pack --dry-run
 ```
 

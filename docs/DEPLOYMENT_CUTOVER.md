@@ -3,13 +3,20 @@
 This repository intentionally has no automatic deployment workflow. Merging or
 tagging the repository cannot publish a package, push an image, or update AWS.
 
+Any future release or deployment workflow is repository-policy gated by
+`scripts/deployment-workflow-policy.mjs`. Before its first publishing or
+deployment mutation it must run the immutable candidate gate documented in
+`docs/IMMUTABLE_DEPLOYMENT_GATE.md`; a separate mutating job must have a normal
+`needs: immutable-deployment-gate` dependency. CI rejects a missing, bypassable,
+or incomplete gate before that workflow can merge.
+
 The fast-uri quarantine is resolved: the eligible security update cleared the full seven-day
 managed quarantine window on 2026-07-26 10:42:54.497 Europe/Bucharest and is
 pinned in the current package manifest and lockfile. Future third-party dependency changes remain subject to the
 managed quarantine process.
 
 Before a future `workflow_dispatch` deployment is introduced, an operator must
-provide a Mailery-owned infrastructure manifest and least-privilege role in the
+provide an operator-owned infrastructure manifest and least-privilege role in the
 target user's AWS account. The workflow must use `APP=emails`, require an
 explicit environment approval, and must not contain a Hasna account ID, bucket,
 cluster, database URL, secret path, or default endpoint.

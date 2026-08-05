@@ -8,9 +8,28 @@ Client configuration:
 ```bash
 export EMAILS_MODE=self_hosted
 export EMAILS_SELF_HOSTED_URL="https://emails.example.com"
-export EMAILS_SELF_HOSTED_API_KEY="..."
+export EMAILS_SELF_HOSTED_API_KEY="..." # or EMAILS_SESSION_TOKEN / EMAILS_IDP_TOKEN
 emails inbox list
 ```
+
+The client chooses `EMAILS_SESSION_TOKEN`, then `EMAILS_IDP_TOKEN`, then
+`EMAILS_SELF_HOSTED_API_KEY` when more than one is present. A client-env vault
+entry referenced by `EMAILS_CLIENT_ENV_SECRET` may carry the URL and any one of
+those credentials. See [AUTHENTICATION.md](AUTHENTICATION.md) for the account,
+tenant-key, and optional IdP flows.
+
+For a repeatable read-only client check, run the published smoke from the exact
+checked-out release on every client station:
+
+```bash
+./scripts/self-hosted-client-smoke.sh
+```
+
+It refuses local database selectors, then runs `emails --version`, remote
+status, provider-list, and a one-row inbox read. It performs no send or mailbox
+mutation and emits only an aggregate pass record; command responses stay in a
+private temporary directory. This is the smoke referenced by
+[STATION_LOCAL_RETIREMENT.md](STATION_LOCAL_RETIREMENT.md).
 
 Service configuration:
 
@@ -21,6 +40,7 @@ export EMAILS_API_SIGNING_KEY="..." # 32+ characters
 export EMAILS_SEND_PROVIDER=ses     # or resend
 export EMAILS_AUTH_ALLOWED_EMAIL_DOMAINS="example.com"   # required; your own domains
 export EMAILS_AUTH_FROM="no-reply@example.com"           # required; a verified sender identity
+export EMAILS_IDP_JWKS_URL="https://id.example.com/v1/.well-known/jwks.json" # optional IdP verifier
 export EMAILS_AWS_REGION=us-east-1
 # SES identity — pick ONE:
 #   (a) nothing: sign with the deployment IAM role of the account the service runs in
@@ -48,6 +68,10 @@ emails db migrate
 emails self-hosted key create
 emails-serve
 ```
+
+The current migration ledger ends at `0021_idp_principal_tenants`. A release
+image used after that migration must recognize 0021; an older image fails
+readiness on the unknown applied ledger row and is not a rollback target.
 
 ## Auth: signup domain allowlist and sender identity
 

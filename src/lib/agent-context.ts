@@ -20,10 +20,11 @@
 //
 // THE RULE NOW
 // ------------
-// One assembler, one shape (src/lib/status-types.ts), facts gathered through the
-// mode seam (src/lib/status-facts.ts). Every field is either measured from a real
-// source or `null` with a machine-readable reason in `gaps` — see
-// src/lib/status-availability.ts for why `null` and not `0`/`[]`.
+// One assembler, one shape (src/lib/status-types.ts), facts gathered from the ONE
+// store this installation configured (src/lib/status-facts.ts — a single
+// implementation since the two per-deployment siblings were deleted). Every field is
+// either measured from a real source or `null` with a machine-readable reason in
+// `gaps` — see src/lib/status-availability.ts for why `null` and not `0`/`[]`.
 
 import { resolveMailDataSource } from "./mail-data-source.js";
 import { getEmailsMode, resolveEmailsMode, type EmailsMode } from "./mode.js";
@@ -147,7 +148,10 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
   const primarySource = mailboxSources[0];
   const receivedTotal = counts.inbox + counts.archived + counts.spam + counts.trash;
 
-  const facts = collectStatusFacts({
+  // `await` because the facts now come from the store seam, and every store
+  // operation is a Promise (src/store/repositories.ts rule 1). This assembler was
+  // already async, so the change is the keyword and nothing else.
+  const facts = await collectStatusFacts({
     mailboxSources,
     domainLimit: DOMAIN_READINESS_LIMIT,
     usableFromLimit: USABLE_FROM_LIMIT,
@@ -231,7 +235,15 @@ async function buildSystemStatus(): Promise<EmailSystemStatus> {
   const partial: Omit<EmailSystemStatus, "next_actions"> = {
     ...blocks,
     // A bound still degrades: the caller asked for a total and got a floor.
-    degraded: failures.length > 0 || incomplete.length > 0,
+    //
+    // So does a mode note. When one is present the process is reading a DIFFERENT
+    // DATABASE than the operator asked for, so every count below is about the wrong
+    // system — a worse condition than any single unmeasured field, not a footnote to
+    // them. Without this the JSON payload reads `degraded: false, limited: false,
+    // total: 0, unread: 0`: immaculate, and wrong. The human renderers print the note,
+    // but agents read this object, and an agent sent to investigate a blocked message
+    // is exactly who concluded the mailbox was empty.
+    degraded: failures.length > 0 || incomplete.length > 0 || mode.warning !== null,
     limited: limitations.length > 0,
     unavailable,
     limitations,
@@ -367,6 +379,7 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
 export function statusGapSignals(status: EmailSystemStatus): {
   degraded: boolean;
   limited: boolean;
+  mode_warning: string | null;
   unavailable: string[];
   failures: string[];
   limitations: string[];
@@ -376,6 +389,14 @@ export function statusGapSignals(status: EmailSystemStatus): {
   return {
     degraded: status.degraded,
     limited: status.limited,
+    // The single most important thing a subset consumer can be told, and the one the
+    // subsets used to drop: WHICH SYSTEM these numbers describe. Every `--json` and
+    // MCP view projects a subset of the full status, and none of them carried `mode`,
+    // so a shadowed client-env pointer — the process reading an empty local database
+    // while the operator believes they are looking at the deployment — was invisible
+    // on every machine-readable surface. MCP has no human arm at all, so for an agent
+    // the note did not exist. Adding a signal here reaches every view.
+    mode_warning: status.mode.warning,
     unavailable: status.unavailable,
     failures: status.failures,
     limitations: status.limitations,
@@ -481,7 +502,11 @@ export function formatAgentContextSummary(context: Record<string, unknown>): str
 export interface AgentContextSample {
   status: Record<string, unknown>;
   limits: { samples: number; domain_full_limit: number | null; address_full_limit: number | null };
-  truncated: { domains: boolean; addresses: boolean };
+  /**
+   * `null` where the underlying inventory could not be read, so truncation is not
+   * answerable — never `false`, which would claim the sample is the whole list.
+   */
+  truncated: { domains: boolean | null; addresses: boolean | null };
 }
 
 /**
@@ -539,8 +564,14 @@ export function sampleAgentContext(
       address_full_limit: status.addresses.usable_from_limit,
     },
     truncated: {
-      domains: status.domains.usable_truncated || (usableDomains?.length ?? 0) > sampleLimit,
-      addresses: status.addresses.usable_from_truncated || (usableFrom?.length ?? 0) > sampleLimit,
+      // An unknown truncation stays unknown. `null || (len > limit)` would answer
+      // `false` for a short sample of a list nobody managed to read.
+      domains: status.domains.usable_truncated === null
+        ? null
+        : status.domains.usable_truncated || (usableDomains?.length ?? 0) > sampleLimit,
+      addresses: status.addresses.usable_from_truncated === null
+        ? null
+        : status.addresses.usable_from_truncated || (usableFrom?.length ?? 0) > sampleLimit,
     },
   };
 }

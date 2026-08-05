@@ -42,7 +42,6 @@ import {
 } from "../webhooks/receivers.js";
 
 const WEBHOOK_RECEIPTS_SPEC = resourceSpecForPath("webhook-receipts")!;
-const EVENTS_SPEC = resourceSpecForPath("events")!;
 
 /** Injected S3 reader so the mounted route is testable without AWS. */
 export type FetchS3Object = (bucket: string, key: string) => Promise<Buffer>;
@@ -191,8 +190,12 @@ export function selfHostedInboundSource(
  * `evaluateOutboundPolicy` actually reads — is a separate, still-open defect and
  * is deliberately NOT done here.
  */
-function selfHostedDeliveryEventSink(deps: SelfHostedWebhookDeps, ledger: SelfHostedWebhookReceiptLedger): DeliveryEventSink {
-  return async (event, routing) => {
+function selfHostedDeliveryEventSink(
+  deps: SelfHostedWebhookDeps,
+  ledger: SelfHostedWebhookReceiptLedger,
+  provider: "sns" | "resend",
+): DeliveryEventSink {
+  return async (event, routing, eventId) => {
     const scopes = await ledger.scopesFor(routing);
     if (scopes.length === 0) return null;
     let firstId: string | null = null;
@@ -201,21 +204,19 @@ function selfHostedDeliveryEventSink(deps: SelfHostedWebhookDeps, ledger: SelfHo
       const emailId = event.provider_message_id
         ? await scoped.findMessageIdByKey(event.provider_message_id)
         : null;
-      const row = await scoped.createResource(EVENTS_SPEC, {
+      const row = await scoped.createWebhookDeliveryEvent(provider, eventId, {
         email_id: emailId,
-        provider_event_id: event.provider_event_id,
         type: event.type,
         recipient: event.recipient ?? null,
-        occurred_at: event.occurred_at,
         metadata: {
           ...(event.metadata ?? {}),
           ...(event.provider_message_id ? { provider_message_id: event.provider_message_id } : {}),
         },
+        occurred_at: event.occurred_at,
       });
-      const id = row["id"];
-      if (firstId === null && typeof id === "string") firstId = id;
+      if (firstId === null) firstId = row.id;
     }
-    return firstId ? { id: firstId } : null;
+    return firstId ? { id: firstId, receiptRecorded: true } : null;
   };
 }
 
@@ -241,7 +242,11 @@ function selfHostedResendInboundSink(deps: SelfHostedWebhookDeps, ledger: SelfHo
         message_id: parsed.provider_message_id || null,
         provider_message_id: parsed.provider_message_id || null,
         received_at: parsed.received_at,
-        is_read: false,
+        // `is_read` is DELIBERATELY ABSENT, not `false`. This write is an upsert on
+        // `source_id`, and the upsert now writes only the columns the input names — so
+        // stating `false` here would make a duplicate provider delivery mark an
+        // already-read message unread again, which is exactly the replay defect the
+        // conditional assignment list exists to close. The insert defaults it to false.
         headers: parsed.headers,
         attachments: [],
         // Stable upstream identity so a replay upserts instead of duplicating,
@@ -316,7 +321,7 @@ export async function handleSelfHostedSesWebhook(
     env: env(deps),
     inboundSource: () => selfHostedInboundSource(env(deps)),
     ingest: selfHostedSesIngest(deps, prefixDomainMappings),
-    recordDeliveryEvent: selfHostedDeliveryEventSink(deps, ledger),
+    recordDeliveryEvent: selfHostedDeliveryEventSink(deps, ledger, "sns"),
     verifySns: deps.verifySns,
     fetchUrl: deps.fetchUrl,
     route: "/v1/webhooks/ses-inbound",
@@ -331,6 +336,6 @@ export function handleSelfHostedResendWebhook(deps: SelfHostedWebhookDeps, req: 
     // Fails closed with 503 when the operator has not configured a secret.
     webhookSecret: () => env(deps)["RESEND_WEBHOOK_SECRET"],
     storeInbound: selfHostedResendInboundSink(deps, ledger),
-    recordDeliveryEvent: selfHostedDeliveryEventSink(deps, ledger),
+    recordDeliveryEvent: selfHostedDeliveryEventSink(deps, ledger, "resend"),
   });
 }

@@ -2,17 +2,25 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import type { Database } from "../../db/database.js";
 import type { Provider, SendEmailOptions } from "../../types/index.js";
-import type { Template } from "../../db/templates.local.js";
-import { listScheduledEmailSummaries, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.local.js";
+import type { Template } from "../../db/templates.js";
+import { listScheduledEmailSummaries, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.js";
 import { getActiveProvider, getLatestActiveProviderId, getProvider } from "../../db/providers.local.js";
-import { getTemplate, renderTemplate } from "../../db/templates.local.js";
+// The templates family reads the store seam now: async, and the trailing `cache.db`
+// argument means what it says — a SQLite store bound to that exact handle — so this
+// LOCAL scheduler keeps rendering from the local database whatever storage the
+// environment resolves to, exactly as it always has.
+import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.local.js";
+// The sequences family reads the store seam now: async, and the trailing `cache.db`
+// argument means what it says — a SQLite store bound to that exact handle — so this
+// LOCAL scheduler keeps processing the local database whatever storage the environment
+// resolves to, exactly as it always has.
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
-} from "../../db/sequences.local.js";
-import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage } from "../utils.js";
+} from "../../db/sequences.js";
+import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage, parseScheduledStatusFilter } from "../utils.js";
 
 const SCHEDULED_EMAIL_BATCH_SIZE = 100;
 const SEQUENCE_SCHEDULER_BATCH_SIZE = 100;
@@ -73,9 +81,9 @@ function getCachedDefaultProvider(cache: SchedulerTickCache): Provider | null {
   return cache.defaultProvider;
 }
 
-function getCachedTemplate(cache: SchedulerTickCache, name: string): Template | null {
+async function getCachedTemplate(cache: SchedulerTickCache, name: string): Promise<Template | null> {
   if (!cache.templates.has(name)) {
-    cache.templates.set(name, getTemplate(name, cache.db));
+    cache.templates.set(name, await getTemplate(name, cache.db));
   }
   return cache.templates.get(name) ?? null;
 }
@@ -90,14 +98,19 @@ function getCachedFromAddress(cache: SchedulerTickCache, providerId: string): st
 
 async function processDueScheduledEmails(cache: SchedulerTickCache, log: SchedulerLog, limit: number) {
   const result = emptyBatchResult();
-  const due = getDueEmails({ limit }, cache.db);
+  // The schedule is read through `src/db/scheduled.ts`, which now reads the store seam:
+  // async, and no longer takes a database handle (it binds to the same process-wide
+  // connection `cache.db` is). It REFUSES a schedule it could not enumerate to the end
+  // rather than handing back a truncated batch, so that refusal reaches the caller's
+  // error handling instead of quietly shrinking the tick.
+  const due = await getDueEmails({ limit });
   result.attempted = due.length;
 
   for (const scheduled of due) {
     try {
       const provider = getCachedProvider(cache, scheduled.provider_id);
       if (!provider) {
-        markFailed(scheduled.id, "Provider not found", cache.db);
+        await markFailed(scheduled.id, "Provider not found");
         result.failed++;
         continue;
       }
@@ -114,13 +127,25 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
       };
       const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
       await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db);
-      markSent(scheduled.id, cache.db);
+      await markSent(scheduled.id);
       result.sent++;
       log(chalk.green(`✓ Sent scheduled email ${scheduled.id.slice(0, 8)} to ${scheduled.to_addresses.join(", ")}`));
     } catch (err) {
-      markFailed(scheduled.id, err instanceof Error ? err.message : String(err), cache.db);
       result.failed++;
       log(chalk.red(`✗ Failed scheduled email ${scheduled.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`));
+      // `markFailed` now RAISES when the row is gone or the store refuses, where the
+      // deleted local arm silently changed nothing. Failing to record a failure must not
+      // abandon the rest of the batch — the remaining due rows are unrelated — so it is
+      // logged loudly and the loop continues. Swallowing it silently would be the defect
+      // the raise exists to remove.
+      try {
+        await markFailed(scheduled.id, err instanceof Error ? err.message : String(err));
+      } catch (markErr) {
+        log(chalk.red(
+          `✗ Could not record the failure of scheduled email ${scheduled.id.slice(0, 8)}: `
+            + `${markErr instanceof Error ? markErr.message : String(markErr)}`,
+        ));
+      }
     }
   }
 
@@ -129,23 +154,27 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
 
 async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: SchedulerLog, limit: number) {
   const result = emptyBatchResult();
-  const dueEnrollments = getDueEnrollments({ limit }, cache.db);
+  // `getDueEnrollments` REFUSES an enumeration it could not finish rather than handing
+  // back the first rows of the store's own order — the missed rows would be exactly the
+  // longest-overdue ones. That refusal propagates out of this tick as an error instead
+  // of quietly shrinking the batch.
+  const dueEnrollments = await getDueEnrollments({ limit }, cache.db);
   result.attempted = dueEnrollments.length;
 
   for (const enrollment of dueEnrollments) {
     try {
       const stepIndex = enrollment.current_step;
-      const step = getStepAtIndex(enrollment.sequence_id, stepIndex, cache.db);
+      const step = await getStepAtIndex(enrollment.sequence_id, stepIndex, cache.db);
       if (!step) {
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
 
-      const template = getCachedTemplate(cache, step.template_name);
+      const template = await getCachedTemplate(cache, step.template_name);
       if (!template) {
         log(chalk.yellow(`⚠ Template not found for sequence step: ${step.template_name}`));
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
@@ -163,7 +192,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
       if (!from) from = getCachedFromAddress(cache, provider.id) ?? "";
       if (!from) {
         log(chalk.yellow(`⚠ No from address for sequence step ${step.id.slice(0, 8)}`));
-        advanceEnrollment(enrollment.id, cache.db);
+        await advanceEnrollment(enrollment.id, cache.db);
         result.skipped++;
         continue;
       }
@@ -179,7 +208,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
 
       const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
       await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db);
-      advanceEnrollment(enrollment.id, cache.db);
+      await advanceEnrollment(enrollment.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));
     } catch (err) {
@@ -214,11 +243,14 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const status = parseScheduledStatusFilter(opts.status);
         const page = parseCliListPage(opts);
-        const emails = listScheduledEmailSummaries({
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError` below, never a short page presented as the list —
+        // this command shipped exactly that, answering `--offset 500` with zero rows.
+        const emails = await listScheduledEmailSummaries({
           ...(status ? { status } : {}),
           ...page,
         });
@@ -252,12 +284,12 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   scheduledCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "scheduled_emails", id);
         if (!resolvedId) handleError(new Error(`Scheduled email not found: ${id}`));
-        const cancelled = cancelScheduledEmail(resolvedId!, db);
+        const cancelled = await cancelScheduledEmail(resolvedId!);
         if (!cancelled) handleError(new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`));
         console.log(chalk.green(`✓ Scheduled email cancelled: ${resolvedId!.slice(0, 8)}`));
       } catch (e) {
@@ -273,11 +305,14 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const status = parseScheduledStatusFilter(opts.status);
         const page = parseCliListPage(opts);
-        const emails = listScheduledEmailSummaries({
+        // Reads the store seam (async). A schedule it could not enumerate to the end is a
+        // THROW landing on `handleError` below, never a short page presented as the list —
+        // this command shipped exactly that, answering `--offset 500` with zero rows.
+        const emails = await listScheduledEmailSummaries({
           ...(status ? { status } : {}),
           ...page,
         });
@@ -303,12 +338,12 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   scheduleCmd
     .command("cancel <id>")
     .description("Cancel a scheduled email")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "scheduled_emails", id);
         if (!resolvedId) handleError(new Error(`Scheduled email not found: ${id}`));
-        if (!cancelScheduledEmail(resolvedId!, db)) handleError(new Error(`Cannot cancel ${id}`));
+        if (!(await cancelScheduledEmail(resolvedId!))) handleError(new Error(`Cannot cancel ${id}`));
         console.log(chalk.green(`✓ Cancelled: ${resolvedId!.slice(0,8)}`));
       } catch (e) { handleError(e); }
     });
@@ -372,7 +407,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
         if (!provider) handleError(new Error(`Provider not found: ${providerId}`));
 
         console.log(chalk.dim(`Batch sending with template '${opts.template}' from ${opts.from}...`));
-        const { batchSend } = await import("../../lib/batch.local.js");
+        const { batchSend } = await import("../../lib/batch.js");
         const result = await batchSend({
           csvPath: opts.csv,
           templateName: opts.template,
@@ -421,13 +456,23 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     });
 
   // ─── DOCTOR ───────────────────────────────────────────────────────────────────
+  // src/lib/doctor.ts is ONE implementation now, shared with misc.remote.ts and the MCP
+  // `run_doctor` tool; it reads its resource facts through the store seam.
+  //
+  // `--live` STAYS REGISTERED but its help text no longer claims to validate anything, and
+  // that is the honest form rather than a compromise. The store seam redacts provider
+  // sending credentials in both stores, so nothing behind this command can validate a
+  // provider key any more; the report answers the request with an explicit "requested and
+  // not performed here" and names `emails provider status`, which does. The flag it is NOT
+  // allowed to become is the one misc.remote.ts refuses to register — accepted, documented,
+  // and silently ignored, with output byte-identical to running without it.
   const doctorCmd = program
     .command("doctor")
-    .description("Run system diagnostics")
-    .option("--live", "Validate provider credentials with live provider API calls")
+    .description("Run system diagnostics (reads through the configured store). Always exits 0 — the report is the product; gate automation on the --json check statuses, not the exit code")
+    .option("--live", "Ask for live provider credential validation (reported as not performed here — use 'emails provider status')")
     .action(async (opts: { live?: boolean }) => {
       try {
-        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.local.js");
+        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
         const checks = await runDiagnostics(undefined, { liveProviderChecks: opts.live === true });
         output(checks, formatDiagnostics(checks));
       } catch (e) {
@@ -440,7 +485,9 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .description("Diagnose why inbound mail may not be reaching a local address")
     .action(async (address: string) => {
       try {
-        const { diagnoseInboundDeliveryLive, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.local.js");
+        // The delivery doctor no longer has arms — one implementation reads the
+        // configured store — so this imports the module itself rather than an arm.
+        const { diagnoseInboundDeliveryLive, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.js");
         const report = await diagnoseInboundDeliveryLive(address);
         output(report, formatDeliveryDoctorReport(report));
       } catch (e) {

@@ -23,10 +23,10 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .command("create <name>")
     .description("Create a new email sequence")
     .option("--description <text>", "Sequence description")
-    .action((name: string, opts: { description?: string }) => {
+    .action(async (name: string, opts: { description?: string }) => {
       try {
-        const seq = createSequence({ name, description: opts.description });
-        console.log(chalk.green(`✓ Sequence created: ${seq.name} (${seq.id.slice(0, 8)})`));
+        const seq = await createSequence({ name, description: opts.description });
+        output(seq, chalk.green(`✓ Sequence created: ${seq.name} (${seq.id.slice(0, 8)})`));
       } catch (e) {
         handleError(e);
       }
@@ -38,10 +38,10 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--limit <n>", "Maximum sequences to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of sequences to skip", "0")
     .option("--verbose", "Show sequence descriptions inline")
-    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const page = parseCliListPage(opts);
-        const seqs = listSequences(page);
+        const seqs = await listSequences(page);
         if (seqs.length === 0) {
           output([], chalk.dim("No sequences. Use 'emails sequence create' to add one."));
           return;
@@ -71,28 +71,32 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("show <name>")
     .description("Show sequence details, steps, and enrollment count")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const steps = listSteps(seq!.id);
-        const enrollmentCounts = countEnrollmentsByStatus(seq!.id);
+        const steps = await listSteps(seq!.id);
+        const enrollmentCounts = await countEnrollmentsByStatus(seq!.id);
 
-        console.log(chalk.bold(`\nSequence: ${seq!.name}`));
-        if (seq!.description) console.log(chalk.dim(`  ${seq!.description}`));
-        console.log(`  Status: ${seq!.status}`);
-        console.log(`  Enrollments: ${enrollmentCounts.active} active / ${enrollmentCounts.total} total`);
-        console.log(`\n  Steps (${steps.length}):`);
+        // output(document, prose) rather than console.log prose: under --json
+        // this read emitted display lines wrapped as {"output":[...]}, forcing
+        // consumers to screen-scrape steps and enrollment counts (task 15908bba).
+        const lines = [chalk.bold(`\nSequence: ${seq!.name}`)];
+        if (seq!.description) lines.push(chalk.dim(`  ${seq!.description}`));
+        lines.push(`  Status: ${seq!.status}`);
+        lines.push(`  Enrollments: ${enrollmentCounts.active} active / ${enrollmentCounts.total} total`);
+        lines.push(`\n  Steps (${steps.length}):`);
         if (steps.length === 0) {
-          console.log(chalk.dim("    No steps. Use 'emails sequence step add' to add some."));
+          lines.push(chalk.dim("    No steps. Use 'emails sequence step add' to add some."));
         } else {
           for (const step of steps) {
             const fromStr = step.from_address ? ` from ${step.from_address}` : "";
-            console.log(`    ${step.step_number}. [${step.id.slice(0, 8)}] ${step.template_name}${fromStr} (delay: ${step.delay_hours}h)`);
-            if (step.subject_override) console.log(chalk.dim(`       subject: ${step.subject_override}`));
+            lines.push(`    ${step.step_number}. [${step.id.slice(0, 8)}] ${step.template_name}${fromStr} (delay: ${step.delay_hours}h)`);
+            if (step.subject_override) lines.push(chalk.dim(`       subject: ${step.subject_override}`));
           }
         }
-        console.log();
+        lines.push("");
+        output({ sequence: seq, steps, enrollments: enrollmentCounts }, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -101,12 +105,12 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("pause <name>")
     .description("Pause a sequence (no new sends)")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        updateSequence(seq!.id, { status: "paused" });
-        console.log(chalk.yellow(`⏸ Sequence paused: ${name}`));
+        await updateSequence(seq!.id, { status: "paused" });
+        output({ name, status: "paused" }, chalk.yellow(`⏸ Sequence paused: ${name}`));
       } catch (e) {
         handleError(e);
       }
@@ -115,12 +119,12 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("archive <name>")
     .description("Archive a sequence")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        updateSequence(seq!.id, { status: "archived" });
-        console.log(chalk.dim(`Sequence archived: ${name}`));
+        await updateSequence(seq!.id, { status: "archived" });
+        output({ name, status: "archived" }, chalk.dim(`Sequence archived: ${name}`));
       } catch (e) {
         handleError(e);
       }
@@ -130,12 +134,12 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .command("enroll <name> <email>")
     .description("Enroll a contact in a sequence")
     .option("--provider <id>", "Provider ID to use for sending")
-    .action((name: string, email: string, opts: { provider?: string }) => {
+    .action(async (name: string, email: string, opts: { provider?: string }) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const enrollment = enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
-        console.log(chalk.green(`✓ Enrolled ${email} in sequence '${name}' (${enrollment.id.slice(0, 8)})`));
+        const enrollment = await enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
+        output(enrollment, chalk.green(`✓ Enrolled ${email} in sequence '${name}' (${enrollment.id.slice(0, 8)})`));
         if (enrollment.next_send_at) {
           console.log(chalk.dim(`  Next send: ${enrollment.next_send_at}`));
         }
@@ -147,13 +151,13 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("unenroll <name> <email>")
     .description("Unenroll a contact from a sequence")
-    .action((name: string, email: string) => {
+    .action(async (name: string, email: string) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const removed = unenroll(seq!.id, email);
+        const removed = await unenroll(seq!.id, email);
         if (!removed) handleError(new Error(`Contact ${email} not actively enrolled in '${name}'`));
-        console.log(chalk.green(`✓ Unenrolled ${email} from sequence '${name}'`));
+        output({ unenrolled: true, sequence: name, email }, chalk.green(`✓ Unenrolled ${email} from sequence '${name}'`));
       } catch (e) {
         handleError(e);
       }
@@ -166,7 +170,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID (uses default if not specified)")
     .action(async (name: string, opts: { csv: string; provider?: string }) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const { parseCsv } = await import("../../lib/batch.js");
         const { readFileSync } = await import("node:fs");
@@ -179,14 +183,14 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
           const email = row.email?.trim();
           if (!email) { skipped++; continue; }
           try {
-            enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
+            await enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
             enrolled++;
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             if (msg.includes("UNIQUE constraint")) { skipped++; } else { failed++; }
           }
         }
-        console.log(chalk.green(`✓ Bulk enroll complete: ${enrolled} enrolled, ${skipped} skipped, ${failed} failed`));
+        output({ enrolled, skipped, failed }, chalk.green(`✓ Bulk enroll complete: ${enrolled} enrolled, ${skipped} skipped, ${failed} failed`));
       } catch (e) { handleError(e); }
     });
 
@@ -197,13 +201,13 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--limit <n>", "Maximum enrollments to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of enrollments to skip", "0")
     .option("--verbose", "Show expanded list hints")
-    .action((name: string | undefined, opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+    .action(async (name: string | undefined, opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const seq = name ? getSequence(name) : null;
+        const seq = name ? await getSequence(name) : null;
         if (name && !seq) handleError(new Error(`Sequence not found: ${name}`));
         const page = parseCliListPage(opts);
         const status = parseEnrollmentStatus(opts.status);
-        const enrollments = listEnrollments({
+        const enrollments = await listEnrollments({
           ...(seq ? { sequence_id: seq.id } : {}),
           ...(status ? { status } : {}),
           ...page,
@@ -243,11 +247,11 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .requiredOption("--template <name>", "Template name to use")
     .option("--from <email>", "From address override")
     .option("--subject <text>", "Subject override")
-    .action((name: string, opts: { step: string; delay: string; template: string; from?: string; subject?: string }) => {
+    .action(async (name: string, opts: { step: string; delay: string; template: string; from?: string; subject?: string }) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const step = addStep({
+        const step = await addStep({
           sequence_id: seq!.id,
           step_number: parseInt(opts.step, 10),
           delay_hours: parseInt(opts.delay, 10),
@@ -255,7 +259,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
           from_address: opts.from,
           subject_override: opts.subject,
         });
-        console.log(chalk.green(`✓ Step ${step.step_number} added (${step.id.slice(0, 8)}): ${step.template_name} in ${step.delay_hours}h`));
+        output(step, chalk.green(`✓ Step ${step.step_number} added (${step.id.slice(0, 8)}): ${step.template_name} in ${step.delay_hours}h`));
       } catch (e) {
         handleError(e);
       }
@@ -264,21 +268,26 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceStepCmd
     .command("list <name>")
     .description("List steps in a sequence")
-    .action((name: string) => {
+    .action(async (name: string) => {
       try {
-        const seq = getSequence(name);
+        const seq = await getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const steps = listSteps(seq!.id);
+        const steps = await listSteps(seq!.id);
         if (steps.length === 0) {
-          console.log(chalk.dim("No steps."));
+          output([], chalk.dim("No steps."));
           return;
         }
-        console.log(chalk.bold(`\nSteps for '${name}':`));
+        // output(rows, prose) rather than console.log prose: under --json this
+        // list emitted display lines wrapped as {"output":[...]}, which made the
+        // full step id unobtainable anywhere in the CLI (tasks 15908bba,
+        // 55c19dde).
+        const lines = [chalk.bold(`\nSteps for '${name}':`)];
         for (const step of steps) {
           const fromStr = step.from_address ? ` from ${step.from_address}` : "";
-          console.log(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
+          lines.push(`  ${step.step_number}. [${chalk.cyan(step.id.slice(0, 8))}] ${step.template_name}${fromStr}  delay: ${step.delay_hours}h`);
         }
-        console.log();
+        lines.push("");
+        output(steps, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -286,12 +295,29 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
 
   sequenceStepCmd
     .command("remove <step-id>")
-    .description("Remove a step by ID")
-    .action((stepId: string) => {
+    .description("Remove a step by ID (full, or the 8-char id `step add`/`step list` print)")
+    .action(async (stepId: string) => {
       try {
-        const removed = removeStep(stepId);
-        if (!removed) handleError(new Error(`Step not found: ${stepId}`));
-        console.log(chalk.green(`✓ Step removed: ${stepId}`));
+        // `step add` and `step list` print 8-char ids; nothing in the CLI ever
+        // printed the full one, so requiring it made this verb unusable (task
+        // 55c19dde). A short ref is resolved across every sequence's steps.
+        let resolvedId = stepId;
+        if (!(await removeStep(stepId))) {
+          const matches: string[] = [];
+          for (const sequence of await listSequences({ limit: 1000 })) {
+            for (const step of await listSteps(sequence.id)) {
+              if (step.id.startsWith(stepId)) matches.push(step.id);
+            }
+          }
+          if (matches.length > 1) {
+            handleError(new Error(`Step '${stepId}' is ambiguous: ${matches.map((id) => id.slice(0, 8)).join(", ")}`));
+          }
+          if (matches.length === 0) handleError(new Error(`Step not found: ${stepId}`));
+          resolvedId = matches[0]!;
+          const removed = await removeStep(resolvedId);
+          if (!removed) handleError(new Error(`Step not found: ${stepId}`));
+        }
+        output({ removed: true, step_id: resolvedId }, chalk.green(`✓ Step removed: ${resolvedId}`));
       } catch (e) {
         handleError(e);
       }

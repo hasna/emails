@@ -90,9 +90,17 @@ describe("public package entrypoint", () => {
       "resetDatabase",
       "runInTransaction",
       "resolvePartialId",
+      // Pairs with the exported `getAdapter` + `formatDnsTable`: without it a
+      // consumer can produce records and cannot build the descriptor that says
+      // whether an empty list means "nothing to publish" or "nothing came back".
+      "providerDnsPublishing",
     ]) {
       expect(typeof (emails as Record<string, unknown>)[name]).toBe("function");
     }
+    // Same round trip a consumer makes, proving the two exports compose.
+    expect(
+      emails.formatDnsTable([], emails.providerDnsPublishing({ type: "sandbox" } as Parameters<typeof emails.providerDnsPublishing>[0])),
+    ).toContain("none are expected");
     expect(emails.CANONICAL_OPEN_EMAILS_S3_BUCKET).toBeNull();
     for (const storageInternal of ["PG_MIGRATIONS", "PgAdapterAsync", "storagePush", "storagePull", "storageSync"]) {
       expect((emails as Record<string, unknown>)[storageInternal]).toBeUndefined();
@@ -119,7 +127,7 @@ describe("public package entrypoint", () => {
     }
   });
 
-  it("supports an isolated local SQLite lifecycle through the public root", () => {
+  it("supports an isolated local SQLite lifecycle through the public root", async () => {
     emails.closeDatabase();
     const db = emails.getDatabase(":memory:");
     const savedClientEnv = new Map(
@@ -134,7 +142,7 @@ describe("public package entrypoint", () => {
 
       const provider = emails.runInTransaction(db, () =>
         emails.createProvider({ name: "library-local", type: "sandbox" }, db));
-      const group = emails.createGroup("library-group", undefined, db);
+      const group = await emails.createGroup("library-group", undefined, db);
       const domain = emails.createDomain(provider.id, "library.example.test", db);
       const address = emails.createAddress({ provider_id: provider.id, email: "sender@library.example.test" }, db);
       expect(emails.resolvePartialId(db, "providers", provider.id.slice(0, 12))).toBe(provider.id);
@@ -148,7 +156,9 @@ describe("public package entrypoint", () => {
       emails.resetDatabase();
       emails.getDatabase(":memory:");
       expect(emails.listProviders(db).map((item) => item.id)).toContain(provider.id);
-      expect(emails.listGroups(db).map((item) => item.id)).toContain(group.id);
+      // The DATABASE-FIRST argument order is the one the local arm published for the
+      // package's whole 1.x life; it must keep compiling and keep addressing `db`.
+      expect((await emails.listGroups(db)).map((item) => item.id)).toContain(group.id);
     } finally {
       for (const [key, value] of savedClientEnv) {
         if (value === undefined) delete process.env[key];
@@ -184,34 +194,63 @@ import {
   resolvePartialId,
   runInTransaction,
 } from "./types/index.js";
-import { getDatabase as getStorageDatabase } from "./types/storage.js";
+import { createSqliteEmailStore, getDatabase as getStorageDatabase } from "./types/storage.js";
+import type { EmailStore } from "./types/storage.js";
 
 const db: Database = getDatabase(":memory:");
 const same: Database = getStorageDatabase(":memory:");
 createProvider({ name: "typed", type: "sandbox" }, db);
 createGroup("typed-group", undefined, db);
-getEmail("message-id", db);
 listGroups(db, { limit: 1 });
 listProviders(db, { limit: 1 });
 resolvePartialId(db, "providers", "abc");
 runInTransaction(db, () => same);
+// THE SENT LEDGER WIDENED THIS PARAMETER RATHER THAN REPLACING IT. \`getEmail\` is ASYNC
+// now and takes an OPTIONAL store that may be an \`EmailStore\` (new) or the \`Database\`
+// this surface has published for its whole 1.x life (unchanged). All THREE shapes compile,
+// and the database arm is the one a released consumer already depends on.
+const store: EmailStore = createSqliteEmailStore();
+const byId: Promise<unknown> = getEmail("message-id");
+const byStore: Promise<unknown> = getEmail("message-id", store);
+const byDatabase: Promise<unknown> = getEmail("message-id", db);
+void byId;
+void byStore;
+void byDatabase;
 closeDatabase();
 `);
-      const check = Bun.spawnSync({
+      const typecheck = (file: string) => Bun.spawnSync({
         cmd: [
           "bun", "x", "tsc", "--noEmit", "--ignoreConfig", "--strict", "--skipLibCheck",
           "--target", "esnext", "--module", "esnext", "--moduleResolution", "bundler",
-          "--types", "bun-types", join(dir, "consumer.ts"),
+          "--types", "bun-types", join(dir, file),
         ],
         cwd: root,
         stdout: "pipe",
         stderr: "pipe",
       });
+      const check = typecheck("consumer.ts");
       expect(check.exitCode, `${check.stdout.toString()}\n${check.stderr.toString()}`).toBe(0);
+
+      // THE NEGATIVE CONTROL, and it is the half that makes the positive one mean anything.
+      // The store parameter is a UNION of two real shapes now, and a union is exactly the
+      // declaration most likely to rot into `any` — at which point the fixture above would
+      // keep passing while the surface accepted anything at all. A third, unrelated type must
+      // still be a COMPILE error.
+      writeFileSync(join(dir, "consumer-wrong-store.ts"), `
+import { getEmail } from "./types/index.js";
+
+void getEmail("message-id", 42 as unknown as string);
+`);
+      const refused = typecheck("consumer-wrong-store.ts");
+      expect(refused.exitCode, "handing getEmail a string must not typecheck").not.toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30_000);
+    // The budget covers three child `tsc` processes whose wall-clock scales
+    // with machine load, not with the contract: 30 s was measured 7 s short
+    // under a full parallel suite run on an idle arm64 box. A genuine hang
+    // still fails.
+  }, 180_000);
 
   it("keeps build outputs lean by externalizing installed runtime packages", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {

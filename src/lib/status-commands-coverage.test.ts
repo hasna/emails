@@ -10,7 +10,7 @@
 //
 //   next_actions[0].command = "emails domain status --json"
 //
-// (src/lib/status-facts.remote.ts domainFixCommands -> agent-context.ts
+// (the deleted HTTP-arm status module's domainFixCommands -> agent-context.ts
 // buildNextActions), and `isCommandAvailableInMode` waved it through. Running it
 // throws "emails domain status is not available in the self-hosted client" — the
 // exact "remedy that refuses" defect the registry was introduced to remove.
@@ -77,21 +77,97 @@ describe("refusal registry covers every CLI refusal call site", () => {
   // shared and the self-hosted-only partitions must be non-empty, and the scan
   // must see the two helpers by name.
   it("finds a non-empty, correctly partitioned set of refusals", () => {
-    expect(refusals.length).toBeGreaterThan(20);
-    expect(refusals.filter((r) => r.shared).length).toBeGreaterThan(10);
-    expect(refusals.filter((r) => !r.shared).length).toBeGreaterThan(10);
+    // FLOORS ARE 1, NOT 10 — on purpose, and this is a strengthening rather than a
+    // relaxation. Refusals are being DELETED as capabilities get wired up (that is
+    // the whole programme), so a count floor is a countdown to a vacuous guard: the
+    // non-shared partition went 21 -> 12 in one change, leaving 2 of margin over a
+    // floor of 10, and two more legitimate deletions would have failed this test for
+    // doing the right thing. The mode-axis ratchet already learned this lesson and
+    // records it in src/mode-axis-ratchet.test.ts: prove the counter still FIRES
+    // against fixtures, because repo counts are supposed to reach zero.
+    //
+    // So the emptiness check stays (a scan over nothing must fail), and the real
+    // proof that the regex and the partition rules still work moved to the
+    // fixture-driven case below, which cannot be eroded by deleting refusals.
+    expect(refusals.length).toBeGreaterThan(0);
+    expect(refusals.filter((r) => r.shared).length).toBeGreaterThan(0);
+    expect(refusals.filter((r) => !r.shared).length).toBeGreaterThan(0);
     expect(new Set(refusals.map((r) => r.file))).toContain("domain.ts");
-    expect(new Set(refusals.map((r) => r.file))).toContain("address.ts");
     expect(new Set(refusals.map((r) => r.file))).toContain("provision.ts");
   });
 
+  // The check that survives every count reaching zero. Both directions are asserted:
+  // a regex that stopped matching would silently empty the scan, and one widened
+  // until it matches anything would flag unrelated code.
+  it("proves the refusal scan still fires, independently of repo content", () => {
+    const matches = (source: string): string[] =>
+      [...source.matchAll(new RegExp(REFUSAL_CALL.source, "g"))].map((m) => m[1] ?? "");
+
+    for (const hit of [
+      'serverOnly("emails schedule run");',
+      'notImplementedAnywhere("emails provision");',
+      '  try { serverOnly( "emails batch" ); } catch (e) { handleError(e); }',
+    ]) {
+      expect(matches(hit).length, hit).toBeGreaterThan(0);
+    }
+    for (const miss of [
+      "function serverOnly(command: string): never {",
+      "notImplementedAnywhere(command);",
+      "// serverOnly is described in prose here",
+    ]) {
+      expect(matches(miss).filter((c) => c.startsWith("emails ")), miss).toEqual([]);
+    }
+    // The partition rule: only `*.remote.ts` / `*.local.ts` are mode-specific.
+    for (const [file, shared] of [
+      ["misc.remote.ts", false], ["misc.local.ts", false], ["domain.ts", true], ["provision.ts", true],
+    ] as const) {
+      expect(!file.endsWith(".remote.ts") && !file.endsWith(".local.ts"), file).toBe(shared);
+    }
+  });
+
+  // The scan's BLIND SPOT, stated so it cannot be mistaken for coverage: `:57` drops
+  // any literal that does not start with `emails `, and flag-conditional refusals are
+  // inline `handleError(new Error(...))` calls with no literal at all. Neither can
+  // ever appear in `refusals`, so neither is protected by the assertions below.
+  // src/lib/status-commands.test.ts pins those by name instead.
+  it("declares what the scan cannot see", () => {
+    const inbox = readFileSync(join(COMMANDS_DIR, "inbox.remote.ts"), "utf8");
+    // Real refusals in the file, invisible because the literal omits the `emails ` prefix.
+    expect(inbox).toContain('serverOnly("sync-s3")');
+    expect(refusals.map((r) => r.command)).not.toContain("emails inbox sync-s3");
+    // A flag-conditional refusal: no matchable literal at all.
+    expect(inbox).toContain("`inbox unread-count --by-address` is not available");
+    expect(refusals.map((r) => r.command)).not.toContain("emails inbox unread-count --by-address");
+  });
+
   // The regression, named. These are the call sites the `*.remote.ts` glob missed.
+  //
+  // `emails domain check` was on this list until it was WIRED UP: its whole
+  // implementation already shipped in src/lib/dns-check.ts and no command reached
+  // it. It is asserted absent below rather than quietly dropped, so the day
+  // someone re-refuses it this test says so.
   it("sees the shared-module refusals the original grep could not", () => {
     const shared = refusals.filter((r) => r.shared).map((r) => r.command);
     expect(shared).toContain("emails domain status");
-    expect(shared).toContain("emails domain check");
     expect(shared).toContain("emails domain verify");
     expect(shared).toContain("emails address provision");
+  });
+
+  it("no longer counts the DNS commands that were wired to their libraries", () => {
+    const shared = refusals.filter((r) => r.shared).map((r) => r.command);
+    for (const wired of [
+      "emails domain check",
+      "emails domains check",
+      "emails domain dns",
+      "emails domains dns",
+    ]) {
+      expect(shared, `${wired} refuses again — is that intended?`).not.toContain(wired);
+      // And the registry must not still be suppressing them from every
+      // suggestion path: the coverage check above only fails in one direction.
+      for (const mode of ["local", "self_hosted"] as const) {
+        expect(isCommandAvailableInMode(`${wired} example.com`, mode), `${wired} in ${mode}`).toBe(true);
+      }
+    }
   });
 
   it("registers every unconditional refusal in NEVER_AVAILABLE_COMMANDS", () => {

@@ -21,6 +21,8 @@ import { mergeAttachmentDetails } from "../../lib/attachment-actions.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { filterAttachmentDetails } from "./inbox.remote.js";
 import { registerInboxCommands } from "./inbox.js";
+import { registerInboxCommands as registerLocalInboxCommands } from "./inbox.local.js";
+import { registerInboxCommands as registerRemoteInboxCommands } from "./inbox.remote.js";
 
 let stub: V1Stub;
 let attachmentInventoryServer: ReturnType<typeof Bun.serve>;
@@ -149,6 +151,10 @@ async function runInboxSubprocessExpectingExit(args: string[]) {
   return { exitCode, stdout, stderr };
 }
 
+function allRegisteredCommands(program: Command): Command[] {
+  return program.commands.flatMap((command) => [command, ...allRegisteredCommands(command)]);
+}
+
 beforeAll(async () => {
   stub = await startV1Stub();
   attachmentInventoryServer = Bun.serve({
@@ -245,6 +251,27 @@ describe("inbound repo over /v1", () => {
 // ─── inbox list ──────────────────────────────────────────────────────────────
 
 describe("inbox list", () => {
+  it("prints one parseable JSON document when --json follows the subcommand", async () => {
+    seedEmail({ subject: "Machine readable" });
+
+    const child = Bun.spawn({
+      cmd: [process.execPath, "run", "src/cli/index.tsx", "inbox", "unread-count", "--json"],
+      cwd: process.cwd(),
+      env: { ...process.env, NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ unread: 1 });
+  });
+
   it("lists inbox mail newest-first", async () => {
     seedEmail({ subject: "A", received_at: "2026-01-01T00:00:00.000Z" });
     seedEmail({ subject: "B", received_at: "2026-01-02T00:00:00.000Z" });
@@ -338,6 +365,25 @@ describe("inbox list", () => {
     expect(data).toEqual([]);
     expect(out).toContain("No mail found");
   });
+});
+
+describe("inbox JSON option registration", () => {
+  for (const [mode, register] of [
+    ["local", registerLocalInboxCommands],
+    ["self_hosted", registerRemoteInboxCommands],
+  ] as const) {
+    it(`registers the exact JSON option on every ${mode} command`, () => {
+      const program = new Command();
+      register(program, () => {});
+
+      for (const command of allRegisteredCommands(program)) {
+        const option = command.options.find((candidate) => candidate.long === "--json");
+        expect(option?.flags, command.name()).toBe("-j, --json");
+        expect(option?.description, command.name()).toBe("Print JSON output");
+        expect(option?.defaultValue, command.name()).toBe(false);
+      }
+    });
+  }
 });
 
 // ─── inbox search ────────────────────────────────────────────────────────────
@@ -803,13 +849,22 @@ describe("inbox status / sync-status", () => {
     expect(data).toMatchObject({
       inbox: { total: 3, unread: 1 },
       mailboxes: { counts: { inbox: 2, sent: 1, archived: 1 } },
-      // legacy/orphaned are NOT zero: the /v1 mail view carries no
-      // active/legacy/orphaned badges, so a 0 there was a fabricated
-      // classification of the operator's ingestion. null + a reason instead.
-      sources: { total: 1, legacy: null, orphaned: null },
+      // NOTHING in this block is a zero. The mail view for a shared store publishes
+      // exactly one row, `kind: "all"` — an aggregate over the whole store, not an
+      // ingestion source — and it carries no active/legacy/orphaned badge. So the
+      // classification cannot be measured, and neither can the number of ingestion
+      // sources: counting the aggregate would report one source on an installation
+      // that has configured none, and excluding it would report a flat zero for a
+      // view that enumerates none. Each is null with its own reason.
+      sources: { total: null, legacy: null, orphaned: null },
     });
     const payload = data as { sources: { legacy: number | null }; gaps: Record<string, { reason: string }> };
-    expect(payload.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_over_v1:source_classification/);
+    expect(payload.gaps["sources.legacy"]?.reason).toMatch(/^not_modelled_on_store:source_classification/);
+    expect(payload.gaps["sources.total"]?.reason).toMatch(/^not_modelled_on_store:aggregate_only_mailbox_view/);
+    // The one row IS still published, with its real mail totals, so the view is
+    // informative rather than empty.
+    const listed = data as { sources: { items: Array<{ total: number }> } };
+    expect(listed.sources.items).toHaveLength(1);
     // The terminal must not paint a yellow "0" for buckets it never inspected.
     expect(out).toContain("S3 buckets:  unavailable");
     expect(out).toContain("Data gaps");
@@ -1594,9 +1649,6 @@ describe("inbox unread-count --by-address blocks in the self-hosted client", () 
 describe("server-only ingestion/diagnostic subcommands", () => {
   const cases: Array<{ label: string; args: string[]; command: string }> = [
     { label: "explain", args: ["inbox", "explain", "31f40200"], command: "emails inbox explain" },
-    { label: "source list", args: ["inbox", "source", "list"], command: "emails inbox source list" },
-    { label: "source add-s3", args: ["inbox", "source", "add-s3", "--bucket", "mail-bucket"], command: "emails inbox source add-s3" },
-    { label: "source retire", args: ["inbox", "source", "retire", "s3-mail-bucket"], command: "emails inbox source retire" },
     { label: "sync-s3", args: ["inbox", "sync-s3", "--bucket", "mail-bucket", "--limit", "1"], command: "emails inbox sync-s3" },
     { label: "setup-realtime", args: ["inbox", "setup-realtime", "example.com"], command: "emails inbox setup-realtime" },
     { label: "realtime-status", args: ["inbox", "realtime-status"], command: "emails inbox realtime-status" },
@@ -1613,4 +1665,121 @@ describe("server-only ingestion/diagnostic subcommands", () => {
       expect(result.stderr).toContain("it runs on the self-hosted server");
     });
   }
+});
+
+// ─── inbox source lifecycle (previously refused; client-side registry) ────────
+//
+// `inbox source list/add-s3/retire` used to refuse in this mode while
+// `inbox sources` — one word apart — worked, an intra-file contradiction. The
+// registry is client config: src/lib/s3-sync.ts implements all three functions as
+// ONE collapsed implementation (this used to name a second copy inside the now-
+// reduced src/lib/s3-sync.remote.ts), and src/cli/tui/data.remote.ts already READS the same registry to
+// resolve a `--source` ref. Only the INGESTION half (`sync-s3`) is server-owned,
+// and it still refuses (asserted above).
+//
+// Every test here runs under a temporary HOME so the registry writes land in a
+// throwaway config file, never the operator's.
+describe("inbox source lifecycle is a client-side registry", () => {
+  let sourceHome: string;
+  let priorSourceHome: string | undefined;
+
+  beforeEach(() => {
+    sourceHome = mkdtempSync(join(tmpdir(), "emails-inbox-source-home-"));
+    priorSourceHome = process.env.HOME;
+    process.env.HOME = sourceHome;
+  });
+  afterEach(() => {
+    if (priorSourceHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorSourceHome;
+    rmSync(sourceHome, { recursive: true, force: true });
+  });
+
+  it("reports an empty registry as empty instead of refusing", async () => {
+    const { data, out } = await runInboxCommand(["inbox", "source", "list"]);
+
+    expect(data).toEqual([]);
+    expect(out).toContain("No sources configured.");
+    expect(out).not.toContain("not available in the self-hosted client");
+  });
+
+  it("registers an S3 source with add-s3 and reads it back with list", async () => {
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3",
+      "--bucket", "inbound-mail",
+      "--prefix", "raw/",
+      "--region", "eu-west-1",
+      "--name", "Primary inbound",
+    ]);
+    expect(added.data).toMatchObject({
+      id: "s3-inbound-mail-raw-",
+      type: "s3",
+      bucket: "inbound-mail",
+      prefix: "raw/",
+      region: "eu-west-1",
+      status: "live",
+      live_sync_enabled: true,
+    });
+    // No capability claim: this client performs no ingestion, so the message says
+    // what it actually did (recorded provenance) and where ingestion is configured.
+    expect(added.out).toContain("Recorded S3 source s3-inbound-mail-raw-");
+    expect(added.out).not.toContain("live sync enabled");
+    expect(added.out).toContain("performs no S3 ingestion");
+
+    const listed = await runInboxCommand(["inbox", "source", "list"]);
+    expect(listed.data as Array<{ id: string; bucket: string }>).toEqual([
+      expect.objectContaining({ id: "s3-inbound-mail-raw-", bucket: "inbound-mail" }),
+    ]);
+    expect(listed.out).toContain("s3://inbound-mail/raw/ eu-west-1");
+  });
+
+  it("records provider provenance through the /v1 provider id resolver", async () => {
+    await stub.seed({ providers: [{ id: "0198d00d-0000-7000-8000-0000000000a1", name: "ses-inbound", type: "ses" }] });
+
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3",
+      "--bucket", "provenance-bucket",
+      "--provider", "0198d00d",
+    ]);
+
+    expect(added.data).toMatchObject({ provider_id: "0198d00d-0000-7000-8000-0000000000a1" });
+  });
+
+  it("honours --no-live-sync instead of silently enabling ingestion", async () => {
+    const added = await runInboxCommand([
+      "inbox", "source", "add-s3", "--bucket", "cold-bucket", "--no-live-sync",
+    ]);
+
+    // The column is recorded faithfully; the message makes no claim either way,
+    // because nothing in this client acts on it.
+    expect(added.data).toMatchObject({ live_sync_enabled: false });
+    expect(added.out).not.toContain("live sync enabled");
+  });
+
+  it("rejects an unknown --status", async () => {
+    const result = await runInboxCommandExpectingExit([
+      "inbox", "source", "add-s3", "--bucket", "bad-status", "--status", "archived",
+    ]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("Source status must be one of: live, import, legacy, retired");
+  });
+
+  it("retires a registered source and keeps it listed as retired", async () => {
+    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "retire-me"]);
+
+    const retired = await runInboxCommand(["inbox", "source", "retire", "s3-retire-me"]);
+    expect(retired.data).toMatchObject({ id: "s3-retire-me", status: "retired", live_sync_enabled: false });
+    expect(retired.out).toContain("Retired S3 source s3-retire-me");
+
+    const listed = await runInboxCommand(["inbox", "source", "list"]);
+    expect(listed.data as Array<{ status: string }>).toEqual([
+      expect.objectContaining({ status: "retired" }),
+    ]);
+    expect(listed.out).toContain("retired");
+  });
+
+  it("fails retire for an unknown source rather than reporting success", async () => {
+    const result = await runInboxCommandExpectingExit(["inbox", "source", "retire", "s3-not-registered"]);
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("S3 source not found: s3-not-registered");
+  });
 });

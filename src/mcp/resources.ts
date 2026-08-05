@@ -10,7 +10,11 @@ export const mailboxesResourcePayload = local.mailboxesResourcePayload;
 export const sourcesResourcePayload = local.sourcesResourcePayload;
 export const recentErrorsResourcePayload = local.recentErrorsResourcePayload;
 
-export function domainsResourcePayloadForRuntime(db?: Database): Record<string, unknown> {
+// ASYNC ON BOTH ARMS. `src/db/provisioning` reaches the store seam, where every operation
+// returns a promise, and both arms of this payload read it. Making only one arm async would
+// publish a function whose return type depends on the deployment word — a promise in one
+// configuration and a value in the other — which is the split this programme removes.
+export async function domainsResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
   return getEmailsMode() === "self_hosted"
     ? remote.domainsResourcePayloadForRuntime()
     : local.domainsResourcePayload(db);

@@ -51,6 +51,7 @@ interface FakeDb {
   client: PoolQueryClient;
   tables: Map<string, Row[]>;
   seenSql: string[];
+  failNextReceiptInsert(): void;
 }
 
 function rowsOf(tables: Map<string, Row[]>, table: string): Row[] {
@@ -104,6 +105,7 @@ function conflictKeys(sql: string, table: string): string[] {
 function fakeDb(): FakeDb {
   const tables = new Map<string, Row[]>();
   const seenSql: string[] = [];
+  let rejectNextReceiptInsert = false;
 
   function unsupported(sql: string): never {
     throw new Error(`fake pg: unsupported statement: ${normalize(sql).slice(0, 220)}`);
@@ -121,6 +123,10 @@ function fakeDb(): FakeDb {
 
     if (/^INSERT INTO/i.test(flat)) {
       const { table, row } = insertRow(sql, params);
+      if (table === "webhook_receipts" && rejectNextReceiptInsert) {
+        rejectNextReceiptInsert = false;
+        throw new Error("fake pg: receipt insert failed");
+      }
       const rows = rowsOf(tables, table);
       if (/ON CONFLICT/i.test(flat)) {
         const keys = conflictKeys(sql, table);
@@ -159,6 +165,14 @@ function fakeDb(): FakeDb {
       const hit = rowsOf(tables, "messages")
         .find((row) => row["tenant_id"] === tenantId && (row["source_id"] === key || row["message_id"] === key));
       return hit ? [{ id: hit["id"] }] : [];
+    }
+
+    // createWebhookDeliveryEvent conflict re-read.
+    if (/^SELECT id FROM events WHERE tenant_id = \$1 AND provider_event_id = \$2/i.test(flat)) {
+      const [tenantId, providerEventId] = params as [string, string];
+      return rowsOf(tables, "events")
+        .filter((row) => row["tenant_id"] === tenantId && row["provider_event_id"] === providerEventId)
+        .map((row) => ({ id: row["id"] }));
     }
 
     // createInboundMessageWithProvenance conflict re-read
@@ -222,11 +236,25 @@ function fakeDb(): FakeDb {
       run(sql, params);
     },
     async transaction<T>(fn: (tx: TypedQueryClient) => Promise<T>) {
-      return fn(client);
+      const snapshot = new Map(
+        [...tables].map(([table, rows]) => [table, structuredClone(rows)]),
+      );
+      try {
+        return await fn(client);
+      } catch (error) {
+        tables.clear();
+        for (const [table, rows] of snapshot) tables.set(table, rows);
+        throw error;
+      }
     },
   } as PoolQueryClient;
 
-  return { client, tables, seenSql };
+  return {
+    client,
+    tables,
+    seenSql,
+    failNextReceiptInsert() { rejectNextReceiptInsert = true; },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +441,17 @@ const neverVerified = async () => false;
 // ---------------------------------------------------------------------------
 
 describe("self-hosted webhook mount", () => {
+  test("0022 installs the Postgres event-type allowlist without deleting legacy rows", () => {
+    const migration = emailsSelfHostedMigrations().find(
+      (candidate) => candidate.id === "0022_events_type_enum_check",
+    );
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("ADD CONSTRAINT events_type_enum_check");
+    expect(migration!.sql).toContain("'delivered','bounced','complained','opened','clicked','unsubscribed'");
+    expect(migration!.sql).toContain("NOT VALID");
+    expect(migration!.sql).not.toMatch(/DELETE\s+FROM\s+(?:public\.)?events/i);
+  });
+
   test("every documented webhook route is actually mounted, and vice versa", async () => {
     const documented = Object.keys(emailsSelfHostedOpenApi.paths as Record<string, unknown>)
       .filter((path) => path.startsWith("/v1/webhooks/"))
@@ -685,6 +724,22 @@ describe("replaying a provider event stores one record", () => {
     expect(storedRowCount(db, "events")).toBe(1);
   });
 
+  test("an event insert rolls back when its receipt insert fails, then redelivery stores one row", async () => {
+    const { deps, db } = harness({ verifySns: alwaysVerified });
+    const envelope = snsEnvelope({ Type: "Notification", Message: sesDelivery("Bounce") });
+    db.failNextReceiptInsert();
+
+    const failed = await handleSelfHostedRequest(deps, snsRequest(envelope));
+    expect(failed!.status).toBe(500);
+    expect(storedRowCount(db, "events")).toBe(0);
+    expect(storedRowCount(db, "webhook_receipts")).toBe(0);
+
+    const retried = await json(await handleSelfHostedRequest(deps, snsRequest(envelope)));
+    expect(retried["event_id"]).toBeTruthy();
+    expect(storedRowCount(db, "events")).toBe(1);
+    expect(storedRowCount(db, "webhook_receipts")).toBe(1);
+  });
+
   test("the same svix-id twice stores one Resend message", async () => {
     const { deps, db } = harness({ resendSecret: RESEND_SECRET });
     const first = await json(await handleSelfHostedRequest(
@@ -863,5 +918,19 @@ describe("test-double integrity", () => {
     expect(db.seenSql.some((sql) => sql.includes("set_config('app.current_tenant'"))).toBe(true);
     expect(db.seenSql.some((sql) => sql.startsWith("INSERT INTO messages"))).toBe(true);
     expect(db.seenSql.some((sql) => sql.startsWith("INSERT INTO webhook_receipts"))).toBe(true);
+  });
+});
+
+describe("webhook event migration", () => {
+  test("deduplicates existing events before adding the tenant/provider-event unique index", () => {
+    const migration = emailsSelfHostedMigrations().find(
+      (candidate) => candidate.id === "0023_webhook_event_idempotency",
+    );
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("DELETE FROM events");
+    expect(migration!.sql).toContain("events_tenant_provider_event_uidx");
+    expect(migration!.sql).toMatch(
+      /ON events \(tenant_id, provider_event_id\)\s+WHERE provider_event_id IS NOT NULL/,
+    );
   });
 });

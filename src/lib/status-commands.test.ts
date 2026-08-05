@@ -2,7 +2,12 @@
 // refuses is the same defect class as reporting a count that was never measured:
 // the payload asserts something untrue. `emails status` used to propose
 // `emails provision status` and every JSON error proposed `emails doctor --json`,
-// both of which refuse in self_hosted mode.
+// both of which refused in self_hosted mode.
+//
+// `emails doctor` no longer refuses — src/lib/doctor.ts reads its facts through
+// the store seam — so the self_hosted examples below use `emails stats`, which
+// still has no client-side aggregation over the delivery events table. Keeping a
+// runnable command in these fixtures would make them vacuously green.
 
 import { describe, expect, it } from "bun:test";
 import {
@@ -15,15 +20,60 @@ import {
 
 describe("mode-aware command availability", () => {
   it("rejects the commands that refuse in self_hosted", () => {
-    expect(isCommandAvailableInMode("emails doctor --json", "self_hosted")).toBe(false);
+    expect(isCommandAvailableInMode("emails stats --json", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails provision status", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails inbox watch --all-buckets", "self_hosted")).toBe(false);
     expect(isCommandAvailableInMode("emails refresh", "self_hosted")).toBe(false);
   });
 
   it("keeps the self_hosted-only refusals available in local mode", () => {
-    for (const command of ["emails doctor --json", "emails refresh", "emails export events"]) {
+    for (const command of ["emails stats --json", "emails pull", "emails monitor"]) {
       expect(isCommandAvailableInMode(command, "local")).toBe(true);
+    }
+  });
+
+  // REGRESSION (2026-07-27). `emails refresh` is not a registered command in
+  // ANY mode — running it exits with "error: unknown command 'refresh'". It used to
+  // sit in SELF_HOSTED_REFUSED_COMMANDS alone, and this very file asserted it was
+  // AVAILABLE in local mode, which is why `emails inbox status` kept printing
+  // "Pull now: emails refresh" to local operators until one of them followed the
+  // hint and hit the dead end. The real verb is `emails pull`.
+  it("refuses `emails refresh` in EVERY mode — it is not a command anywhere", () => {
+    for (const mode of ["local", "self_hosted"] as const) {
+      expect(isCommandAvailableInMode("emails refresh", mode), mode).toBe(false);
+    }
+    expect(NEVER_AVAILABLE_COMMANDS).toContain("emails refresh");
+    // …and the replacement must be genuinely runnable where ingestion is local,
+    // or this would be satisfied by suppressing the hint entirely.
+    expect(isCommandAvailableInMode("emails pull", "local")).toBe(true);
+    expect(isCommandAvailableInMode("emails pull", "self_hosted")).toBe(false);
+  });
+
+  // The registry narrowed when the gratuitous refusals were deleted: a prefix that
+  // covers a whole namespace must not keep blocking the subcommands of it that run.
+  it("does not refuse the commands that were un-blocked in self_hosted", () => {
+    for (const command of [
+      "emails doctor --json",
+      "emails export emails --format json",
+      "emails export events --format json",
+      "emails schedule list --json",
+      "emails scheduled list --json",
+      "emails schedule cancel abc123",
+      "emails daemon status --json",
+      "emails daemon restart --json",
+      "emails logs tail --component scheduler",
+      "emails inbox source list --json",
+    ]) {
+      expect(isCommandAvailableInMode(command, "self_hosted"), command).toBe(true);
+    }
+    // …while the genuinely server-side neighbours in the same namespaces stay out.
+    for (const command of [
+      "emails doctor delivery ops@example.com",
+      "emails schedule run",
+      "emails scheduler",
+      "emails inbox sync-s3 --bucket b",
+    ]) {
+      expect(isCommandAvailableInMode(command, "self_hosted"), command).toBe(false);
     }
   });
 
@@ -49,7 +99,7 @@ describe("mode-aware command availability", () => {
 
   it("filters a suggestion list while preserving order", () => {
     const filtered = keepAvailableCommands(
-      ["emails status --json", "emails doctor --json", "emails provider list --json"],
+      ["emails status --json", "emails stats --json", "emails provider list --json"],
       "self_hosted",
     );
     expect(filtered).toEqual(["emails status --json", "emails provider list --json"]);
@@ -72,5 +122,37 @@ describe("mode-aware command availability", () => {
       expect(SELF_HOSTED_REFUSED_COMMANDS).not.toContain(command);
       expect(LOCAL_REFUSED_COMMANDS).not.toContain(command);
     }
+  });
+});
+
+// Flag-conditional refusals: the base command runs, one flag form throws, and the
+// throw is an inline `handleError(new Error(...))` with no `serverOnly("emails ...")`
+// literal. src/lib/status-commands-coverage.test.ts derives its expectations from
+// those literals, so it is STRUCTURALLY blind to these — they are pinned here by name
+// instead, in both directions, so neither half can drift.
+describe("flag-conditional refusals the coverage scan cannot see", () => {
+  it("refuses the flag form while keeping the base command available", () => {
+    for (const [base, refusedFlagForm] of [
+      ["emails inbox unread-count", "emails inbox unread-count --by-address"],
+      ["emails inbox clear", "emails inbox clear --provider p1"],
+    ] as const) {
+      expect(isCommandAvailableInMode(base, "self_hosted"), base).toBe(true);
+      expect(isCommandAvailableInMode(refusedFlagForm, "self_hosted"), refusedFlagForm).toBe(false);
+    }
+    // Extra flags after the refused one must not smuggle it back in.
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address --limit 10", "self_hosted")).toBe(false);
+    // Local mode serves both from SQL, so both stay available there.
+    expect(isCommandAvailableInMode("emails inbox unread-count --by-address", "local")).toBe(true);
+    expect(isCommandAvailableInMode("emails inbox clear --provider p1", "local")).toBe(true);
+  });
+
+  // The mirror-image defect: listing a command that RUNS suppresses a real remedy.
+  // `emails send --to-group` used to refuse and now works (client-side group fan-out),
+  // so it must be absent from every refusal list.
+  it("does not refuse a flag form that was since implemented", () => {
+    for (const mode of ["local", "self_hosted"] as const) {
+      expect(isCommandAvailableInMode("emails send --to-group ops --subject s", mode), mode).toBe(true);
+    }
+    expect(SELF_HOSTED_REFUSED_COMMANDS).not.toContain("emails send --to-group");
   });
 });

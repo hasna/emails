@@ -225,20 +225,120 @@ describe("MCP domain/address self_hosted API-only guards", () => {
     });
   });
 
-  it("fails local-only domain/address MCP tools before creating local SQLite", async () => {
+  it("fails the two provider-adapter tools that no mode can serve", async () => {
+    // These are the ONLY domain/address tools left behind a mode guard, and the
+    // guard is honest: they call `getAdapter(provider).getDnsRecords/.verifyDomain`
+    // and the `/v1/providers` row carries no credential columns, so removing this
+    // refusal would replace it with a client-credentialed AWS/Cloudflare call.
+    //
+    // NOT because their CLI twins also refuse — this comment used to say that and it
+    // is false of `emails domain dns`, which runs in both configurations. The twins
+    // are deliberately asymmetric: an MCP client's ambient environment is not the
+    // operator's shell.
     for (const [name, args] of [
       ["get_dns_records", { domain: "example.com" }],
       ["verify_domain", { domain: "example.com" }],
+    ] as const) {
+      const result = await runDomainTool(name, args);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text ?? "").toContain("self_hosted API-only mode");
+    }
+  });
+
+  it("no longer refuses the repository-backed domain/address tools — they reach the wire", async () => {
+    // Each of these has a `/v1` route, a complete client arm, and a working CLI twin;
+    // the guard was the only thing refusing.
+    //
+    // A bare `not.toContain("self_hosted API-only mode")` would be near-vacuous here:
+    // it stays green if a tool is replaced by `throw new Error("nope")`, and — worse —
+    // if a guard is re-added using the OTHER refusal wording this codebase already
+    // ships ("is API-backed in self_hosted mode and requires ..."). So each tool must
+    // additionally prove it got as far as the HTTP transport: it either succeeds, or
+    // fails with an error naming the wire (the `/v1` path or an HTTP status). This
+    // fixture only serves GET /v1/domains and GET /v1/addresses, so most calls fail
+    // there; src/mcp/self-hosted-unguarded-tools.test.ts drives them to completion
+    // against a full stub.
+    const REFUSAL_WORDINGS = ["self_hosted API-only mode", "is API-backed in self_hosted mode", "not available in the self-hosted client"];
+    // The discriminating property is "reached the HTTP transport", NOT "succeeded".
+    // Deliberately not asserting success for any of them: this suite shares a process
+    // with others that mutate the self-hosted env, and under that pollution the
+    // fixture's own key stops matching and every call fails 401 — which is still
+    // proof the tool got to the wire. `self-hosted-unguarded-tools.test.ts` drives all
+    // of these to completion against a clean stub; here the job is only to catch a
+    // re-added mode refusal or a stubbed-out throw, and reaching the wire does that.
+    // THE SEAM'S OWN REFUSAL LABEL IS A FOURTH FORM OF THE SAME EVIDENCE, added when
+    // `src/db/aliases.ts` collapsed onto the store seam. That family no longer builds a
+    // `curl` command line, so a refusal it reports names the operation rather than a URL:
+    // `aliases.list: not found`. That label is minted ONLY by `src/store-http/`
+    // (`refusalForStatus`, whose `what` is `<resource>.<operation>`), so its presence proves
+    // the HTTP client's own refusal path ran against a real response — which is exactly the
+    // discriminating property this case is after, and strictly more specific than a bare
+    // status. It is NOT a relaxation: a re-added mode guard, a stubbed-out throw and a
+    // client-side `capability_unavailable` refusal (whose message names a capability and a
+    // store kind, never a `<resource>.<operation>` label) all still fail.
+    const WIRE = /\/v1\/|\/(domains|addresses|aliases)\b|Self-hosted (GET|POST|PATCH|PUT|DELETE)|HTTP \d{3}|\b(?:domains|addresses|aliases)\.(?:list|get|create|update|remove):/;
+
+    for (const [name, args] of [
       ["remove_domain", { domain_id: "domain-ready-1" }],
       ["suggest_address", { domain: "example.com" }],
       ["remove_address", { address_id: "addr-ready-1" }],
       ["suspend_address", { address_id: "addr-ready-1" }],
       ["activate_address", { address_id: "addr-ready-1" }],
       ["set_address_quota", { address_id: "addr-ready-1", per_day: 5 }],
+      ["add_alias", { alias: "hello@example.com", target: "ops@example.com" }],
+      ["add_catch_all", { domain: "example.com", target: "ops@example.com" }],
+      ["list_aliases", {}],
+      ["remove_alias", { alias_id: "alias-1" }],
+      ["resolve_alias", { recipient: "hello@example.com" }],
     ] as const) {
       const result = await runDomainTool(name, args);
-      expect(result.isError).toBe(true);
-      expect(result.content[0]?.text ?? "").toContain("self_hosted API-only mode");
+      const body = result.content[0]?.text ?? "";
+      expect(body, `${name} produced no output`).not.toBe("");
+      for (const wording of REFUSAL_WORDINGS) {
+        expect(body, `${name} still refuses by mode`).not.toContain(wording);
+      }
+      // Reached the transport: either it worked, or the failure names the wire.
+      //
+      // ONE TOOL IS EXEMPT FROM THE WIRE PATTERN AND CARRIES A STRICTER ASSERTION INSTEAD,
+      // because the collapse of `src/db/aliases.ts` onto the store seam changed the SHAPE of
+      // its answer rather than weakening it. `remove_alias` reads the alias by id first, and
+      // ABSENCE IS A VALUE at the seam (`get` answers `ok(null)` for a 404, which is what lets
+      // "there is no such alias" be told apart from "I could not look"). This fixture serves no
+      // `/v1/aliases` route, so that read legitimately answers "not there" and the tool reports
+      // exactly that — an answer, not a transport error, so there is no URL or status in it to
+      // match. Asserting the exact message is the stronger available check here: a re-added mode
+      // guard, a stubbed-out `throw`, and a client-side capability refusal all produce something
+      // else. What this case can no longer discriminate for this ONE tool is a silent fallback to
+      // local SQLite, which would also answer "not there" — and that is proved instead by
+      // src/mcp/self-hosted-unguarded-tools.test.ts, which drives `remove_alias` to completion
+      // against a full `/v1` service and asserts the row leaves the SERVER's table.
+      if (result.isError) {
+        if (name === "remove_alias") {
+          // EITHER form is transport evidence, and both are required to be listed because this
+          // suite shares a process with others that mutate the self-hosted environment: under
+          // that pollution the fixture's own key stops matching and the read fails 401
+          // (`aliases.get: unauthorized`), which the wire pattern already recognises. Without
+          // pollution the read is answered and the tool reports the absence. What neither form
+          // admits is a re-added mode guard, a stubbed-out throw, or a client-side capability
+          // refusal.
+          const absence = `Error: Alias not found: ${String((args as { alias_id: string }).alias_id)}`;
+          expect(
+            body === absence || WIRE.test(body),
+            `${name} neither reached the /v1 transport nor reported the store's own by-id absence: ${body}`,
+          ).toBe(true);
+        } else {
+          expect(body, `${name} failed before reaching the /v1 transport: ${body}`).toMatch(WIRE);
+        }
+      }
+    }
+  });
+
+  it("proves the wire-reaching assertion above can fail (guard wording is really absent)", async () => {
+    // Negative control for the loop: the two tools that KEEP their guard must trip
+    // the very check the loop applies, or the loop is asserting over nothing.
+    for (const name of ["get_dns_records", "verify_domain"] as const) {
+      const body = (await runDomainTool(name, { domain: "example.com" })).content[0]?.text ?? "";
+      expect(body).toContain("self_hosted API-only mode");
     }
   });
 });

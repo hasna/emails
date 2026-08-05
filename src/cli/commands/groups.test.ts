@@ -1,7 +1,8 @@
-// Self-hosted-ONLY: the groups repo routes every read/write to `/v1/groups` and
-// `/v1/group-members`, so these tests drive the REAL command against an
-// out-of-process /v1 stub (see src/test-support/v1-stub.ts). No local SQLite
-// exists anymore, and member counts are computed from the API — not a local island.
+// The group commands against an API-configured client: these tests drive the REAL
+// command against an out-of-process /v1 stub (see src/test-support/v1-stub.ts). The
+// collapsed `src/db/groups.ts` reaches it through the real HTTP store resolved from
+// the stub's storage configuration; member counts come from full enumerations of the
+// API — never from a local island and never from one clamped page.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { addMember, createGroup } from "../../db/groups.js";
@@ -24,7 +25,10 @@ async function runGroupCommand(args: string[]) {
 }
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  // `openapi: true` because the collapsed family pushes its equality filters down, and
+  // the REAL HTTP store reads the service's published contract before accepting a
+  // filter or a write — a missing document is deliberately a fault there.
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -35,13 +39,13 @@ afterEach(() => stub.clearEnv());
 
 describe("group list command", () => {
   it("paginates groups and returns batched member counts", async () => {
-    createGroup("gamma");
-    createGroup("alpha");
-    const delta = createGroup("delta");
-    const beta = createGroup("beta");
-    addMember(beta.id, "a@example.com");
-    addMember(beta.id, "b@example.com");
-    addMember(delta.id, "c@example.com");
+    await createGroup("gamma");
+    await createGroup("alpha");
+    const delta = await createGroup("delta");
+    const beta = await createGroup("beta");
+    await addMember(beta.id, "a@example.com");
+    await addMember(beta.id, "b@example.com");
+    await addMember(delta.id, "c@example.com");
 
     const result = await runGroupCommand(["group", "list", "--limit", "2", "--offset", "1"]);
     const data = result.data as Array<{ name: string; member_count: number }>;
@@ -55,11 +59,11 @@ describe("group list command", () => {
 
 describe("group members command", () => {
   it("paginates members by email", async () => {
-    const group = createGroup("cli-members");
-    addMember(group.id, "dave@example.com");
-    addMember(group.id, "charlie@example.com");
-    addMember(group.id, "alice@example.com", undefined, { hidden: "large vars ".repeat(100) });
-    addMember(group.id, "bob@example.com", undefined, { hidden: "shown hidden vars ".repeat(100) });
+    const group = await createGroup("cli-members");
+    await addMember(group.id, "dave@example.com");
+    await addMember(group.id, "charlie@example.com");
+    await addMember(group.id, "alice@example.com", undefined, { hidden: "large vars ".repeat(100) });
+    await addMember(group.id, "bob@example.com", undefined, { hidden: "shown hidden vars ".repeat(100) });
 
     const result = await runGroupCommand(["group", "members", "cli-members", "--limit", "2", "--offset", "1"]);
     const data = result.data as Array<{ email: string }>;
@@ -76,11 +80,11 @@ describe("group members command", () => {
   });
 
   it("shows a paged member view in group details", async () => {
-    const group = createGroup("cli-show-members");
-    addMember(group.id, "dave@example.com");
-    addMember(group.id, "charlie@example.com");
-    addMember(group.id, "alice@example.com");
-    addMember(group.id, "bob@example.com", undefined, { hidden: "show hidden vars ".repeat(100) });
+    const group = await createGroup("cli-show-members");
+    await addMember(group.id, "dave@example.com");
+    await addMember(group.id, "charlie@example.com");
+    await addMember(group.id, "alice@example.com");
+    await addMember(group.id, "bob@example.com", undefined, { hidden: "show hidden vars ".repeat(100) });
 
     const result = await runGroupCommand(["group", "show", "cli-show-members", "--limit", "2", "--offset", "1"]);
     const data = result.data as { member_count: number; members: Array<{ email: string }> };

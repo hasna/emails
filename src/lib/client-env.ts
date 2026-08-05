@@ -5,20 +5,35 @@ export const EMAILS_CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 /** The bearer credential a user session persists (see multi-tenancy design §7). */
 export const EMAILS_SESSION_TOKEN_ENV = "EMAILS_SESSION_TOKEN";
 
+/**
+ * The caller's own identity token, minted by the `@hasna/tenants` identity
+ * authority and verified by the server as a first-class principal
+ * (src/server/self-hosted/auth/idp-token.ts). The same env key the legacy
+ * client reads (src/db/self-hosted-store.ts), exported so the seam's
+ * credential resolution and that client cannot drift apart on its name.
+ */
+export const EMAILS_IDP_TOKEN_ENV = "EMAILS_IDP_TOKEN";
+
 // Structural keys the vault entry MUST carry (endpoint + mode). A credential is
 // required too, but a session token OR the API key satisfies it — see
 // CLIENT_ENV_CREDENTIAL_KEYS — so neither credential is individually mandatory.
-const CLIENT_ENV_REQUIRED_KEYS = [
+// Exported as the single source of truth for the client-env vault contract, so a
+// caller that has to construct a vault entry (e.g. an emulated `secrets` store in
+// a test) names these keys from here rather than restating them.
+export const CLIENT_ENV_REQUIRED_KEYS = [
   "EMAILS_MODE",
   "EMAILS_SELF_HOSTED_URL",
 ] as const;
 
-// At least one of these must be present. A session token (emss_…) is preferred
-// over the operator API key by resolveSelfHostedConfig; an operator with only
-// the API key keeps working unchanged.
+// At least one of these must be present — ANY one is a complete credential: a
+// user session token, the caller's own identity token, or the operator API key.
+// Which one WINS when several are set is not decided here; both resolvers pick
+// session first, then identity, then key (see src/store-resolution.ts and the
+// legacy client). An operator with only the API key keeps working unchanged.
 const CLIENT_ENV_CREDENTIAL_KEYS = [
   "EMAILS_SELF_HOSTED_API_KEY",
   EMAILS_SESSION_TOKEN_ENV,
+  EMAILS_IDP_TOKEN_ENV,
 ] as const;
 
 // Every key the vault entry may carry (loaded into env whenever present).
@@ -139,7 +154,17 @@ export function loadEmailsClientEnvSecret(env: NodeJS.ProcessEnv = process.env):
     };
   }
 
-  const result = spawnSync("secrets", ["get", secretPath], {
+  // `--show` is the explicit plaintext opt-in required since @hasna/secrets 0.2.9,
+  // whose default-deny guard makes plain `get` exit non-zero when stdout is
+  // captured (2026-07-30 credential-leak incident). This capture is a private
+  // parent-child pipe — the value never reaches this process's stdout, argv, or
+  // logs. `secrets exec` was considered and rejected: the entry must be PARSED
+  // in-process (env-map merge + write-back below), and this loader runs at lazy
+  // call sites in the server/MCP where a self re-exec is unsafe. Pre-0.2.9 CLIs
+  // accept the flag harmlessly — `show` has been a declared boolean flag in the
+  // CLI's parser since its initial commit, so it can never swallow a following
+  // positional; old `get` simply ignores it. Compatible in both directions.
+  const result = spawnSync("secrets", ["get", secretPath, "--show"], {
     encoding: "utf8",
     env: secretsCommandEnv(env),
     timeout: 5000,
@@ -190,34 +215,51 @@ export interface SessionTokenPersistResult {
 function runSecretsCommand(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-): { status: number; stdout: string } {
+  input?: string,
+): { status: number; stdout: string; stderr: string } {
   const result = spawnSync("secrets", args as string[], {
     encoding: "utf8",
     env: secretsCommandEnv(env),
     timeout: 5000,
     maxBuffer: 1024 * 1024,
+    ...(input === undefined ? {} : { input }),
   });
   if (result.error) {
     // Never include argv (which may carry the token value) in the message.
     throw new Error(`secrets ${args[0]} failed: ${result.error.message}`);
   }
-  return { status: result.status ?? 0, stdout: result.stdout ?? "" };
+  return { status: result.status ?? 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
 /** Read the current vault entry as a string map, or null if it cannot be read. */
 function readClientEnvSecretMap(secretPath: string, env: NodeJS.ProcessEnv): Record<string, string> | null {
-  const result = runSecretsCommand(["get", secretPath], env);
+  // --show: explicit plaintext opt-in for the >=0.2.9 default-deny guard; a
+  // pre-0.2.9 CLI ignores the trailing flag. See loadEmailsClientEnvSecret.
+  const result = runSecretsCommand(["get", secretPath, "--show"], env);
   if (result.status !== 0) return null;
   return parseClientEnvSecret(result.stdout ?? "");
 }
 
 function writeClientEnvSecretMap(secretPath: string, map: Record<string, string>, env: NodeJS.ProcessEnv): void {
-  // The value carries secrets; it is passed as an argv arg to the `secrets` CLI
-  // (its documented `set <key> <value>` interface) and is never logged here.
-  const result = runSecretsCommand(["set", secretPath, JSON.stringify(map)], env);
-  if (result.status !== 0) {
-    throw new Error(`secrets set failed for the EMAILS_CLIENT_ENV_SECRET entry (exit ${result.status}).`);
+  // The value carries secrets. It rides to the `secrets` CLI on STDIN
+  // (`set <key> --stdin`, added in 0.2.9) — never in argv, which any same-user
+  // process can read from `ps`/procfs for the life of the child. That argv
+  // exposure was found while fixing the 2026-07-30 guard incident.
+  const value = JSON.stringify(map);
+  const result = runSecretsCommand(["set", secretPath, "--stdin"], env, value);
+  if (result.status === 0) return;
+  // A pre-0.2.9 CLI rejects `--stdin` with its usage line (the value positional
+  // is missing there). Only THAT failure falls back to the legacy argv form —
+  // a genuine write failure on a current CLI is never retried with the value
+  // in argv. The gate is exact: the pre-0.2.9 usage line never mentions
+  // `--stdin`, while every >=0.2.9 usage variant does, so a current CLI's
+  // usage output can never match.
+  if (result.stderr.includes("Usage: secrets set") && !result.stderr.includes("--stdin")) {
+    const legacy = runSecretsCommand(["set", secretPath, value], env);
+    if (legacy.status === 0) return;
+    throw new Error(`secrets set failed for the EMAILS_CLIENT_ENV_SECRET entry (exit ${legacy.status}).`);
   }
+  throw new Error(`secrets set failed for the EMAILS_CLIENT_ENV_SECRET entry (exit ${result.status}).`);
 }
 
 /**

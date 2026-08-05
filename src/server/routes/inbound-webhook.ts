@@ -84,11 +84,11 @@ export async function recordLocalDeliveryEvent(
 ): Promise<{ id: string } | null> {
   const { getDatabase } = await import("../../db/database.js");
   const { getLatestActiveProviderId } = await import("../../db/providers.local.js");
-  const { createEvent } = await import("../../db/events.local.js");
+  const { createEvent } = await import("../../db/events.js");
   const db = getDatabase();
   const providerId = getLatestActiveProviderId(providerType, db) ?? getLatestActiveProviderId(undefined, db);
   if (!providerId) return null;
-  const stored = createEvent({
+  const stored = await createEvent({
     provider_id: providerId,
     provider_event_id: event.provider_event_id,
     type: event.type,
@@ -128,7 +128,7 @@ export async function handleInboundWebhook(
       prefix: string | undefined,
       region: string | undefined,
       opts?: { keys?: string[]; providerId?: string },
-    ) => Promise<{ synced: number }>;
+    ) => Promise<{ synced: number; errors?: string[] }>;
   },
 ): Promise<Response | null> {
   if (path !== SES_INBOUND_WEBHOOK_PATH || method !== "POST") return null;
@@ -189,7 +189,12 @@ export async function handleInboundWebhook(
           providerId: request.providerId,
         },
       );
-      return { synced: result.synced, resourceId: request.messageId ?? null };
+      // `syncS3Inbox` swallows per-object and listing failures into
+      // `result.errors` instead of throwing. Pass them through: the shared
+      // receiver treats a non-empty list as a FAILED ingest and refuses to
+      // write the receipt, so SNS redelivery re-attempts instead of being
+      // answered "duplicate" for mail that never landed.
+      return { synced: result.synced, resourceId: request.messageId ?? null, errors: result.errors };
     },
     recordDeliveryEvent: (event) => recordLocalDeliveryEvent("ses", event),
   });

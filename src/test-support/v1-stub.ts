@@ -28,7 +28,9 @@
 
 import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { emailsSelfHostedOpenApi } from "../server/self-hosted/openapi.js";
 import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hosted/resources.js";
+import { DATABASE_PATH_SETTINGS } from "../store-resolution.js";
 
 /**
  * The ORDER BY the real generic list route applies to each `/v1/<resource>`, parsed
@@ -42,6 +44,23 @@ import { SELF_HOSTED_RESOURCES, resourceListOrderBy } from "../server/self-hoste
  */
 function declaredListOrder(): Record<string, Array<{ column: string; desc: boolean }>> {
   const order: Record<string, Array<{ column: string; desc: boolean }>> = {};
+  // `/v1/addresses` and `/v1/domains` are hand-coded on the server rather than
+  // registry-driven, so their ORDER BY cannot be read from SELF_HOSTED_RESOURCES:
+  // both are `created_at DESC, id ASC` in src/server/self-hosted/store.ts
+  // (listAddresses / listDomains), restated here (the two hand-coded exceptions to
+  // the read-from-registry rule above) so a client that windows either resource
+  // SERVER-side is tested against the order production actually returns. Without it
+  // the stub served these in INSERTION order and a paging-correct client looked
+  // broken. `listUsableDomains` now windows domains server-side on a bounded page,
+  // so domains gets the same treatment addresses already had.
+  order["addresses"] = [
+    { column: "created_at", desc: true },
+    { column: "id", desc: false },
+  ];
+  order["domains"] = [
+    { column: "created_at", desc: true },
+    { column: "id", desc: false },
+  ];
   for (const spec of SELF_HOSTED_RESOURCES) {
     order[spec.path] = resourceListOrderBy(spec)
       .split(",")
@@ -52,6 +71,34 @@ function declaredListOrder(): Record<string, Array<{ column: string; desc: boole
   return order;
 }
 
+/**
+ * The service's published contract for the generic `/v1/<resource>` routes, sliced to the
+ * two things `src/store-http/resources.ts` reads off it: the list route's query parameters
+ * (its declared equality filters) and the create route's request schema (its writable
+ * columns, with `additionalProperties: false`).
+ *
+ * A SLICE of the generated document, never a restatement of it. The whole document is about
+ * 550 KB, which is a lot to hand a subprocess through its environment; these two fields are
+ * 25 KB and are the entire surface the store consults. Anything else the store ever starts
+ * reading will be ABSENT rather than wrong, which faults loudly in that store by design.
+ */
+function publishedResourceContract(): { paths: Record<string, unknown> } {
+  const published = emailsSelfHostedOpenApi.paths as Record<string, Record<string, unknown>>;
+  const paths: Record<string, unknown> = {};
+  for (const spec of SELF_HOSTED_RESOURCES) {
+    const key = `/v1/${spec.path}`;
+    const route = published[key];
+    if (!route) continue;
+    const get = route["get"] as { parameters?: unknown } | undefined;
+    const post = route["post"] as { requestBody?: unknown } | undefined;
+    paths[key] = {
+      get: { parameters: get?.parameters ?? [] },
+      post: { requestBody: post?.requestBody ?? null },
+    };
+  }
+  return { paths };
+}
+
 /** Seed data keyed by /v1 resource name (e.g. `{ domains: [...], messages: [...] }`). */
 export type V1StubResources = Record<string, Array<Record<string, unknown>>>;
 
@@ -60,6 +107,28 @@ export interface V1StubOptions {
   apiKey?: string;
   /** Initial resources. Also used as the baseline restored by `reset()`. */
   seed?: V1StubResources;
+  /**
+   * Serve `GET /v1/openapi.json`. **Default false**, and the default is load-bearing.
+   *
+   * `src/store-http/` reads the published contract before any filtered list and before any
+   * write — it is that store's only source of truth for which columns a resource accepts
+   * and which query parameters its list route filters on, so it can refuse a field the
+   * service would accept and silently drop. A missing document is deliberately a FAULT
+   * there rather than a refusal, and AT LEAST ONE existing suite uses this fixture's
+   * inability to serve it as a NEGATIVE CONTROL (src/lib/analytics.test.ts asserts the
+   * delivery trend comes back unread, not zero, when the service cannot serve the
+   * contract). Serving it by default would have quietly turned that control green.
+   *
+   * So a suite that needs the contract asks for it, and the ask is visible in the diff.
+   *
+   * Turning this on does NOT make the fixture faithful for filtered reads: the generic
+   * list handler still IGNORES equality filters and merely records the query string, so it
+   * serves the UNFILTERED list for a filter it now declares it accepts. A client that
+   * trusted the filter would be wrong here and right in production, which is worse than no
+   * evidence at all — use `src/test-support/v1-store-api.ts` for filtered or paged
+   * store-seam tests.
+   */
+  openapi?: boolean;
 }
 
 export interface V1Stub {
@@ -101,12 +170,18 @@ export interface V1Stub {
     tenants?: Array<{ slug: string; name: string; role: string }>;
   }): Promise<void>;
   /**
-   * Point the client at this stub: EMAILS_MODE=self_hosted, EMAILS_SELF_HOSTED_URL,
-   * EMAILS_SELF_HOSTED_API_KEY, then reset the config + mail-data-source caches.
-   * Call in `beforeEach`.
+   * Make this stub the ONE store this test context is configured to use:
+   * EMAILS_MODE=self_hosted, EMAILS_SELF_HOSTED_URL, EMAILS_SELF_HOSTED_API_KEY, the
+   * database-path settings UNSET (see `MANAGED_ENV_KEYS`), then the config and
+   * mail-data-source caches reset. Call in `beforeEach`.
    */
   applyEnv(): void;
-  /** Remove the env this helper set and reset caches. Call in `afterEach`. */
+  /**
+   * Put back exactly the environment `applyEnv` found — including the database path it
+   * removed, restored to its prior value or to ABSENT if it had none — and reset the
+   * caches. A no-op when `applyEnv` was never called, because this helper only ever
+   * undoes its own edits. Call in `afterEach`.
+   */
   clearEnv(): void;
   /** Kill the subprocess. Call in `afterAll`. */
   stop(): void;
@@ -241,6 +316,9 @@ let listRotateCalls = {};
 // (SELF_HOSTED_RESOURCES + resourceListOrderBy) so the stub orders lists the way the
 // real route does. Shape: { resource: [{ column, desc }, ...] }.
 const listOrder = safeParse(process.env.V1_STUB_LIST_ORDER);
+// The service's published contract for the generic resource routes, injected from the
+// server's own generated OpenAPI document (see the /v1/openapi.json route below).
+const openApiContract = safeParse(process.env.V1_STUB_OPENAPI);
 // Query string of every generic list request, per resource (see /v1/__list_queries).
 // Lets a test assert that a client pushed its filters SERVER-side instead of
 // dragging the whole table over and filtering in memory. Cleared on __reset.
@@ -272,8 +350,9 @@ function rowsFor(resource) {
 // server to order first — could not be tested here at all: the stub would hand back
 // a differently-ordered window and a correct client would look broken. The order
 // terms come from the server's own registry (V1_STUB_LIST_ORDER), so the stub cannot
-// drift from it. Resources with a bespoke handler (messages) and non-registry paths
-// (domains/addresses) have no terms and keep insertion order.
+// drift from it — plus one restated hand-coded exception (addresses; see
+// declaredListOrder). Resources with a bespoke handler (messages) and the remaining
+// non-registry path (domains) have no terms and keep insertion order.
 function sortForList(resource, rows) {
   const terms = listOrder[resource];
   if (!Array.isArray(terms) || terms.length === 0) return rows.slice();
@@ -602,7 +681,8 @@ function decodeMessageOffsetCursor(raw) {
 
 function listMessages(params) {
   let ordered = rowsFor("messages").slice().sort(function (a, b) {
-    return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""));
+    return String(b.received_at || b.created_at || "").localeCompare(String(a.received_at || a.created_at || ""))
+      || String(b.id || "").localeCompare(String(a.id || ""));
   });
   const direction = params.get("direction");
   if (direction) ordered = ordered.filter(function (r) { return String(r.direction || "").toLowerCase() === direction; });
@@ -625,7 +705,20 @@ function listMessages(params) {
       return Number.isFinite(t) && t >= cutoff;
     });
   }
-  const limit = Number(params.get("limit") || "500");
+  // The bespoke messages route has the same moving-window test control as the
+  // generic resources. Production's order is total, but writes between offset
+  // requests can still shift a legacy client's window; the honest pager must
+  // detect that before exposing a partial read or starting a destructive clear.
+  ordered = rotateForList("messages", ordered);
+  // CLAMP like production. src/server/self-hosted/store.ts clampLimit caps every
+  // list at 500, and the generic stub handler below already mirrors that. This
+  // bespoke /v1/messages handler did NOT, so a client that asked for 1000 rows got
+  // 1000 here and 500 from the real service - the stub was strictly more permissive
+  // than production on the single busiest read in the package. That is how
+  // 'emails export emails' shipped a silently truncated export with green tests:
+  // no test COULD see the truncation. A stub that is easier than production
+  // certifies nothing.
+  const limit = Math.min(Math.max(1, Math.floor(Number(params.get("limit") || "500"))), 500);
   const cursor = params.get("cursor");
   const cursorOffset = cursor === null ? null : decodeMessageOffsetCursor(cursor);
   if (cursor !== null && cursorOffset === null) return { error: "cursor is not a valid pagination cursor" };
@@ -652,6 +745,18 @@ function leanListRow(row) {
   const snippet = body.replace(/\s+/g, " ").trim().slice(0, 500);
   lean.snippet = snippet || null;
   lean.attachment_count = Array.isArray(row.attachments) ? row.attachments.length : 0;
+  // The serve keeps the headers object off list rows but DOES project the one field
+  // inside it that explains a refusal, as its own scalar (see MESSAGE_LIST_COLUMNS in
+  // src/server/self-hosted/store.ts, which selects headers ->> 'policy_denial').
+  // Mirror that here: dropping it would make the stub the only place where a blocked
+  // row cannot state its reason, which is the exact fake-vs-serve gap this helper's
+  // comment above warns about.
+  // (No backticks in this function: the whole stub server is embedded in a template
+  // literal, so a backtick here terminates it and the file stops parsing.)
+  const denial = row.headers && typeof row.headers === "object" && !Array.isArray(row.headers)
+    ? row.headers["policy_denial"]
+    : undefined;
+  lean.policy_denial = typeof denial === "string" && denial.trim() ? denial.trim() : null;
   return lean;
 }
 
@@ -831,6 +936,38 @@ const server = Bun.serve({
       // logout / switch-tenant / bootstrap-owner require auth → fall through.
     }
 
+    // ── the published contract, UNAUTHENTICATED, as the real service serves it ──
+    //
+    // ADDED BY THE db/scheduled COLLAPSE, and purely additive: this path used to 404.
+    //
+    // WHY IT IS NEEDED. A repository that has collapsed onto the store seam reaches an
+    // Emails API through src/store-http/, and that store reads /v1/openapi.json before any
+    // filtered list and before any write. The document is its single source of truth for
+    // which columns a resource accepts and which query parameters its list route filters
+    // on, so it can REFUSE a field the service would otherwise accept and silently drop.
+    // A missing document is deliberately a FAULT rather than a refusal there — a store that
+    // cannot keep that promise must not pretend to — so every stub-driven test whose command
+    // now reads through the seam faulted HERE instead of at whatever it was testing.
+    //
+    // The contract is the SERVER'S OWN, injected by startV1Stub from the generated document
+    // rather than restated in this file, for the same reason the list ordering above is:
+    // a hand-written contract in a fixture is a second source of truth that goes stale
+    // silently, and this fixture's only value is that its contract is the service's.
+    //
+    // THIS DOES NOT MAKE THE STUB FAITHFUL FOR FILTERED READS. The generic list handler
+    // below still IGNORES equality filters and merely records the query string, so it will
+    // serve the UNFILTERED list for a filter it now declares it accepts. A client that
+    // trusted the filter is still wrong here and right in production, which is worse than
+    // useless as evidence: use src/test-support/v1-store-api.ts for filtered or paged
+    // store-seam tests.
+    // Absent unless the suite asked for it (V1StubOptions.openapi) — see that field's note.
+    // Without it this path answers the same 404 it always did, which is what keeps an
+    // existing suite's negative control a control.
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "openapi.json") {
+      if (!openApiContract.paths) return json({ error: "not found" }, 404);
+      return json(openApiContract);
+    }
+
     // Auth gate: accept the operator API key OR a valid user session token.
     const bearer = bearerOf(req);
     const isApiKey = Boolean(KEY) && bearer === KEY;
@@ -985,6 +1122,8 @@ const server = Bun.serve({
       return json({ reconciled: true, outcome: body.outcome, message: target });
     }
     if (resource === "messages" && id === undefined && req.method === "GET") {
+      if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
+      listQueries[resource].push(url.search.replace(/^\?/, ""));
       const page = listMessages(url.searchParams);
       if (page.error) return json({ error: page.error }, 400);
       return json(page);
@@ -1064,10 +1203,13 @@ const server = Bun.serve({
 
     if (id === undefined && req.method === "GET") {
       // Mirror the real server's list windowing (src/server/self-hosted/store.ts
-      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, and
-      // \`offset\` skips rows. Without this the stub handed back every row for any
-      // limit, which hid the fact that a single \`.list({ limit: 1000 })\` can only
-      // ever see 500 rows — the silent-truncation trap behind fabricated totals.
+      // clampLimit/clampOffset): a supplied \`limit\` is CAPPED at 500, a MISSING
+      // (or zero/NaN) \`limit\` defaults to 100, and \`offset\` skips rows. Without
+      // the cap the stub handed back every row for any limit, which hid the fact
+      // that a single \`.list({ limit: 1000 })\` can only ever see 500 rows; and
+      // without the 100-row default it handed back every row for NO limit, which
+      // hid the fact that a no-limit list call sees 100 rows of a 325-row table —
+      // both are the silent-truncation trap behind fabricated totals.
       if (!Array.isArray(listQueries[resource])) listQueries[resource] = [];
       listQueries[resource].push(url.search.replace(/^\?/, ""));
       const rawLimit = url.searchParams.get("limit");
@@ -1077,10 +1219,11 @@ const server = Bun.serve({
         : Math.floor(Number(rawOffset));
       const ordered = rotateForList(resource, sortForList(resource, rows));
       let windowed = offset > 0 ? ordered.slice(offset) : ordered;
-      if (rawLimit !== null && !Number.isNaN(Number(rawLimit))) {
-        const limit = Math.min(Math.max(1, Math.floor(Number(rawLimit))), 500);
-        windowed = windowed.slice(0, limit);
-      }
+      const parsedLimit = rawLimit === null ? Number.NaN : Number(rawLimit);
+      const limit = !parsedLimit || Number.isNaN(parsedLimit)
+        ? 100
+        : Math.min(Math.max(1, Math.floor(parsedLimit)), 500);
+      windowed = windowed.slice(0, limit);
       if (!usesEntityEnvelope(resource)) return json({ items: windowed });
       const out = {};
       out[resource] = windowed;
@@ -1157,6 +1300,37 @@ const SESSION_ENV = "EMAILS_SESSION_TOKEN";
 const CLIENT_ENV_SECRET_ENV = "EMAILS_CLIENT_ENV_SECRET";
 
 /**
+ * Every environment key `applyEnv` writes and `clearEnv` puts back, in one list so the
+ * snapshot and the restore cannot disagree about which keys they cover.
+ *
+ * THE DATABASE-PATH SETTINGS ARE IN HERE, AND THAT IS THE POINT. `scripts/run-hermetic-
+ * tests.sh` sets a database path for the WHOLE suite — a hermeticity floor, so that no
+ * test can ever open the operator's real mail file. For a test that runs against a local
+ * store that floor is exactly right. For a test that runs against THIS STUB it is a
+ * second store: an installation with both a database path and an API base URL configured
+ * has two places to keep its mail and no way to tell which one was meant, which
+ * `planEmailStore` (src/store-resolution.ts) refuses to boot from — correctly, and by
+ * design, because a precedence rule there would silently serve rows from the store the
+ * operator did not choose. So any consumer that resolved its store from configuration
+ * threw instead of running inside every self-hosted test in the repo.
+ *
+ * The resolver is right; the helper was the thing configuring two stores. `applyEnv`
+ * therefore REMOVES the local-store configuration for as long as the API configuration
+ * is installed, and `clearEnv` puts it back — restoring the hermeticity floor for
+ * whatever runs next in this process. Both settings are handled, read from
+ * `DATABASE_PATH_SETTINGS` rather than re-spelled here, so a helper that unset only the
+ * lower-precedence one (and left the higher-precedence one to win) is not expressible.
+ */
+const MANAGED_ENV_KEYS: readonly string[] = Object.freeze([
+  MODE_ENV,
+  URL_ENV,
+  KEY_ENV,
+  SESSION_ENV,
+  CLIENT_ENV_SECRET_ENV,
+  ...DATABASE_PATH_SETTINGS,
+]);
+
+/**
  * Start an out-of-process /v1 stub server and return a handle for driving it.
  *
  * Typical use:
@@ -1180,6 +1354,7 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       V1_STUB_RESOURCE_SPECS: JSON.stringify(V1_STUB_RESOURCE_SPECS),
       V1_STUB_RESOURCE_DEFAULTS: JSON.stringify(V1_STUB_RESOURCE_DEFAULTS),
       V1_STUB_LIST_ORDER: JSON.stringify(declaredListOrder()),
+      V1_STUB_OPENAPI: options.openapi === true ? JSON.stringify(publishedResourceContract()) : "",
     },
     stdout: "pipe",
     stderr: "inherit",
@@ -1272,28 +1447,42 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __seed_user failed: HTTP ${res.status}`);
     },
     applyEnv() {
-      priorEnv = {
-        [MODE_ENV]: process.env[MODE_ENV],
-        [URL_ENV]: process.env[URL_ENV],
-        [KEY_ENV]: process.env[KEY_ENV],
-        [SESSION_ENV]: process.env[SESSION_ENV],
-        [CLIENT_ENV_SECRET_ENV]: process.env[CLIENT_ENV_SECRET_ENV],
-      };
+      // SNAPSHOT ONCE. A second `applyEnv()` with no `clearEnv()` between them must not
+      // re-snapshot, or it would record the values this helper itself installed — and
+      // then `clearEnv()` would "restore" the applied state, leaving the database path
+      // deleted for every file that runs after this one in the shared test process.
+      if (priorEnv === undefined) {
+        const snapshot: Record<string, string | undefined> = {};
+        // `undefined` is recorded for a key that is ABSENT, and the restore below
+        // distinguishes it from `""` — a key put back as empty string is a different
+        // environment from a key that was never there.
+        for (const key of MANAGED_ENV_KEYS) snapshot[key] = process.env[key];
+        priorEnv = snapshot;
+      }
       process.env[MODE_ENV] = "self_hosted";
       process.env[URL_ENV] = baseUrl;
       process.env[KEY_ENV] = apiKey;
       delete process.env[SESSION_ENV];
       delete process.env[CLIENT_ENV_SECRET_ENV];
+      // The local store's configuration goes away while the API's is in force, so this
+      // process is configured with exactly ONE place to keep its mail.
+      for (const key of DATABASE_PATH_SETTINGS) delete process.env[key];
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },
     clearEnv() {
-      for (const key of [MODE_ENV, URL_ENV, KEY_ENV, SESSION_ENV, CLIENT_ENV_SECRET_ENV]) {
-        const value = priorEnv?.[key];
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
+      // Nothing to undo without a snapshot: `clearEnv()` before any `applyEnv()`, or a
+      // second one after a restore, has installed nothing. Deleting the managed keys
+      // here would be the leak this method exists to prevent — it would strip a
+      // database path this helper never set.
+      if (priorEnv !== undefined) {
+        for (const key of MANAGED_ENV_KEYS) {
+          const value = priorEnv[key];
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        priorEnv = undefined;
       }
-      priorEnv = undefined;
       resetSelfHostedConfigCache();
       resetMailDataSource();
     },

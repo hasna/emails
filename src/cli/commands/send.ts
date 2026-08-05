@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { resolveMailDataSource, type MailSendAttachment } from "../../lib/mail-data-source.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
+import { getGroupByName, listMemberSummaries } from "../../db/groups.js";
 import { suppressedRecipientsAmong } from "../../db/contacts.js";
 import { handleError } from "../utils.js";
 import { getEmailsMode } from "../../lib/mode.js";
@@ -12,6 +13,12 @@ import {
   LOCAL_SEND_ATTACHMENT_LIMITS,
   SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
 } from "../../lib/send-attachment-limits.js";
+import { findAddressesByEmail } from "../../db/addresses.js";
+import {
+  describeUncheckedSendPolicy,
+  evaluateAttachmentCaps,
+  evaluateSenderPreflight,
+} from "../../lib/send-preflight.js";
 
 const MAX_ATTACHMENT_SIZE = LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
 const MAX_ATTACHMENT_COUNT = LOCAL_SEND_ATTACHMENT_LIMITS.maxFiles;
@@ -27,6 +34,50 @@ const ATTACHMENT_MIME_TYPES: Record<string, string> = {
   ".csv": "text/csv",
   ".json": "application/json",
 };
+
+/**
+ * Recipients of `--to-group <name>`.
+ *
+ * This used to be an unconditional refusal — "--to-group is not available in
+ * the self-hosted client without a self-hosted group-members send API" — which
+ * was wrong twice: it fired in local mode too, and no send API is needed. Group
+ * fan-out is a CLIENT-side recipient lookup. `src/db/groups.ts` reads the store
+ * seam resolved from storage configuration, and `emails group members <name>`
+ * has been printing exactly this list against both stores all along. The
+ * pre-febe87e implementation did the same two calls against a local handle.
+ *
+ * The member read now enumerates the WHOLE group or throws — never one clamped
+ * page — because this list becomes the To: header: a partial read here mails a
+ * subset of the group while reporting the group.
+ *
+ * The group expands into the To: header, which is what `--to a@x b@y` already
+ * does — no per-recipient fan-out is invented here.
+ */
+async function resolveGroupRecipients(groupName: string): Promise<string[]> {
+  const group = await getGroupByName(groupName);
+  if (!group) {
+    handleError(new Error(
+      `Group not found: ${groupName}. List the groups you have with 'emails group list'.`,
+    ));
+  }
+  const members = await listMemberSummaries(group!.id);
+  if (members.length === 0) {
+    handleError(new Error(
+      `Group '${groupName}' has no members. Add some with 'emails group add ${groupName} <email...>'.`,
+    ));
+  }
+  // A member added twice under different casing is ONE recipient; without this
+  // the address appears twice in the To: header of the delivered message.
+  const seen = new Set<string>();
+  const recipients: string[] = [];
+  for (const member of members) {
+    const key = member.email.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    recipients.push(member.email.trim());
+  }
+  return recipients;
+}
 
 // Read + base64-encode attachment files, enforcing the count/size caps before
 // handing the composed message to the self-hosted send API via the seam.
@@ -75,9 +126,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
     .option("--schedule <datetime>", "Schedule email for later (ISO 8601 datetime)")
     .option("--unsubscribe-url <url>", "Inject List-Unsubscribe headers (RFC 8058 one-click)")
     .option("--idempotency-key <key>", "Prevent duplicate sends — returns existing email if key was used before")
-    .option("--track-opens", "Inject tracking pixel to detect email opens (requires emails serve running)")
-    .option("--track-clicks", "Rewrite links to track clicks (requires emails serve running)")
-    .option("--tracking-url <url>", "Base URL for tracking server (default: http://localhost:3900)")
+    .option("--track-opens", "Open tracking — not supported in this build; refuses rather than silently sending untracked mail")
+    .option("--track-clicks", "Click tracking — not supported in this build; refuses rather than silently sending untracked mail")
+    .option("--tracking-url <url>", "Tracking base URL — not supported in this build; refuses rather than silently sending untracked mail")
     .option("--in-reply-to <id>", "Reply to an existing sent email — sets In-Reply-To/References headers for threading")
     .action(async (opts: {
       from: string;
@@ -97,18 +148,48 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
       force?: boolean;
       dryRun?: boolean;
       schedule?: string;
+      unsubscribeUrl?: string;
       trackOpens?: boolean;
       trackClicks?: boolean;
       trackingUrl?: string;
     }) => {
       try {
+        // The tracking flags are a TYPED REFUSAL, not a capability. They used to be
+        // parsed and never read: the mail left untracked and the command printed
+        // success — an operator relying on open/click analytics believed they
+        // existed. No send path in this build applies tracking (the tracking
+        // utilities in src/lib/tracking.ts have no production caller, and the
+        // rewritten URLs would need the ledger row id, which the local path only
+        // mints after the provider call), so the honest answer is to refuse before
+        // anything is sent.
+        const requestedTracking = [
+          opts.trackOpens ? "--track-opens" : null,
+          opts.trackClicks ? "--track-clicks" : null,
+          opts.trackingUrl ? "--tracking-url" : null,
+        ].filter((flag): flag is string => flag !== null);
+        if (requestedTracking.length > 0) {
+          handleError(new Error(
+            `${requestedTracking.join(", ")}: open/click tracking is not supported in this build — `
+            + "no send path applies a tracking pixel or rewrites links, so the flag would be accepted "
+            + "and silently ignored. Remove the tracking flag(s) to send without tracking.",
+          ));
+        }
+
         const ds = resolveMailDataSource();
 
-        // Resolve recipients from --to or --to-group. Group member fan-out is a
-        // server-side concern in the self-hosted client; require explicit --to.
+        // Resolve recipients from --to or --to-group.
         let toAddresses: string[] = opts.to || [];
         if (opts.toGroup) {
-          handleError(new Error("--to-group is not available in the self-hosted client without a self-hosted group-members send API. Pass explicit --to recipients."));
+          // Refused rather than merged or silently overwritten: the previous
+          // implementation replaced --to with the group, so an operator who
+          // passed both mailed a set they did not ask for and got no warning.
+          if (toAddresses.length > 0) {
+            handleError(new Error(
+              "Pass --to or --to-group, not both: --to-group replaces the recipient list, "
+              + "so combining them would silently drop the explicit --to addresses.",
+            ));
+          }
+          toAddresses = await resolveGroupRecipients(opts.toGroup);
         }
         if (toAddresses.length === 0) handleError(new Error("No recipients specified. Use --to or --to-group"));
 
@@ -121,7 +202,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // Canonical comparison (see db/contacts): `Blocked@ext.com` and
         // `"Blocked Person <blocked@ext.com>"` are the same recipient as
         // `blocked@ext.com`, and an exact string match let both forms through.
-        const suppressedRecipients = suppressedRecipientsAmong(allRecipients);
+        const suppressedRecipients = await suppressedRecipientsAmong(allRecipients);
         if (suppressedRecipients.length > 0) {
           const list = suppressedRecipients.join(", ");
           console.log(chalk.yellow(`Warning: Suppressed recipients: ${list}`));
@@ -168,7 +249,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         let textBody = !opts.html ? body : undefined;
 
         if (opts.template) {
-          const tpl = getTemplate(opts.template);
+          // Async and resolved from storage configuration; the whole-library name
+          // lookup means a template past one API page still resolves here.
+          const tpl = await getTemplate(opts.template);
           if (!tpl) handleError(new Error(`Template not found: ${opts.template}`));
           const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
           subject = renderTemplate(tpl!.subject_template, vars);
@@ -194,6 +277,12 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           console.log(chalk.bold(`\n[DRY RUN] Would send (${selfHosted ? "self-hosted" : "local"}):`));
           console.log(`  ${chalk.dim("From:")}    ${opts.from}`);
           console.log(`  ${chalk.dim("To:")}      ${toAddresses.join(", ")}`);
+          // A group expands into ONE message addressed to every member, so the
+          // preview says so before the operator discovers it in the To: header
+          // of the delivered mail.
+          if (opts.toGroup) {
+            console.log(chalk.dim(`  Group:   ${opts.toGroup} — ${toAddresses.length} member(s), all in one To: header`));
+          }
           if (opts.cc?.length) console.log(`  ${chalk.dim("CC:")}      ${opts.cc.join(", ")}`);
           console.log(`  ${chalk.dim("Subject:")} ${subject}`);
           if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
@@ -201,6 +290,61 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           if (attachments.length) {
             console.log(chalk.dim(`  Attachments: ${attachments.length} inline file(s); ${mode} caps are ${describeSendAttachmentLimits(limits)}`));
           }
+
+          // ── the part that makes this a PRECHECK rather than an echo ──────────
+          //
+          // Everything above restates the arguments. Without what follows, this
+          // command produced byte-identical output for a verified sender, an
+          // unverified one whose send would be refused, and an address that does
+          // not exist at all — while operators used it as a gate before real sends.
+          if (selfHosted) {
+            // Read the sender record over /v1/addresses. This creates no message
+            // row and sends nothing; it answers the checks the server evaluates
+            // first, in the same order, and names the same policy code.
+            let senderRecord = null as { email: string; status: string; verified: boolean } | null;
+            let senderLookupFailed: string | null = null;
+            try {
+              const matches = findAddressesByEmail(opts.from);
+              senderRecord = matches[0]
+                ? { email: matches[0].email, status: matches[0].status, verified: matches[0].verified }
+                : null;
+            } catch (e) {
+              // A lookup that FAILED must never read as "sender is fine". Report the
+              // failure as unknown, not as a pass.
+              senderLookupFailed = e instanceof Error ? e.message : String(e);
+            }
+            if (senderLookupFailed) {
+              console.log(chalk.yellow(`  Sender:  could not be checked — ${senderLookupFailed}`));
+              console.log(chalk.dim("           This preview therefore does NOT predict whether the send is allowed."));
+            } else {
+              const verdict = evaluateSenderPreflight(opts.from, senderRecord);
+              console.log(verdict.ok
+                ? chalk.green(`  Sender:  ${verdict.message}`)
+                : chalk.red(`  Sender:  WOULD BE REFUSED (${verdict.code}) — ${verdict.message}`));
+            }
+          }
+
+          if (attachments.length) {
+            // Evaluate the REAL files against the mode's caps. These numbers were
+            // printed as prose above and never checked, so an attachment set the
+            // self-hosted route refuses previewed as fine.
+            const files = attachments.map((attachment) => ({
+              filename: attachment.filename,
+              bytes: Buffer.from(attachment.content, "base64").length,
+            }));
+            const capFindings = evaluateAttachmentCaps(files, limits);
+            if (capFindings.length > 0) {
+              for (const finding of capFindings) {
+                console.log(chalk.red(`  Attach:  WOULD BE REFUSED (${finding.rule}) — ${finding.detail}`));
+              }
+            } else {
+              console.log(chalk.green(`  Attach:  ${files.length} file(s) within the ${mode} caps.`));
+            }
+          }
+
+          // Say what this did NOT prove. A preview that stops at its own green lines
+          // is read as a guarantee it never made.
+          console.log(chalk.dim(`  Note:    ${describeUncheckedSendPolicy(selfHosted)}`));
           if (opts.schedule) {
             console.log(selfHosted
               ? chalk.yellow(`  Schedule:    ${opts.schedule} — the self-hosted server does not accept a scheduled send (a real send would fail)`)
@@ -224,6 +368,13 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           // explicitly (the server chooses the sender), so it is never silently
           // ignored again.
           providerId: opts.provider,
+          // `--unsubscribe-url` was in the same parsed-and-dropped class: declared,
+          // typed, and never read, so bulk mail left WITHOUT the RFC 8058 one-click
+          // headers the operator relied on for compliance. Local sends inject the
+          // List-Unsubscribe / List-Unsubscribe-Post pair at the provider; the serve
+          // API's send contract cannot carry the field, so that path refuses loudly
+          // instead of mailing without the headers.
+          unsubscribeUrl: opts.unsubscribeUrl,
           replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
           attachments: attachments.length > 0 ? attachments : undefined,
           scheduledAt: opts.schedule,

@@ -13,7 +13,7 @@ import { runDomainTool } from "./tools/domains-impl.js";
 let stub: V1Stub;
 
 beforeAll(async () => {
-  stub = await startV1Stub();
+  stub = await startV1Stub({ openapi: true });
 });
 afterAll(() => stub.stop());
 beforeEach(async () => {
@@ -32,16 +32,16 @@ interface OwnershipDetail {
   history: Array<{ action: string; reason: string | null }>;
 }
 
-function seedOwnedAddress() {
+async function seedOwnedAddress() {
   const address = createAddress({ provider_id: "prov-1", email: "svc@example.com" });
-  const human = createOwner({ type: "human", name: "ada" });
-  const agent = createOwner({ type: "agent", name: "ops-bot" });
+  const human = await createOwner({ type: "human", name: "ada" });
+  const agent = await createOwner({ type: "agent", name: "ops-bot" });
   return { address, human, agent };
 }
 
 describe("MCP address-ownership tools in self_hosted mode", () => {
   it("set_address_owner writes ownership through /v1", async () => {
-    const { address, human, agent } = seedOwnedAddress();
+    const { address, human, agent } = await seedOwnedAddress();
 
     const result = await runDomainTool("set_address_owner", { address: "svc@example.com", owner: "ada", administrator: "ops-bot" });
 
@@ -55,7 +55,7 @@ describe("MCP address-ownership tools in self_hosted mode", () => {
   });
 
   it("get_address_owner reads ownership through /v1", async () => {
-    const { human, agent } = seedOwnedAddress();
+    const { human, agent } = await seedOwnedAddress();
     await runDomainTool("set_address_owner", { address: "svc@example.com", owner: "ada", administrator: "ops-bot" });
 
     const result = await runDomainTool("get_address_owner", { address: "svc@example.com" });
@@ -68,8 +68,8 @@ describe("MCP address-ownership tools in self_hosted mode", () => {
   });
 
   it("transfer_address_owner records the transfer and its audit event", async () => {
-    seedOwnedAddress();
-    const successor = createOwner({ type: "agent", name: "successor-bot" });
+    await seedOwnedAddress();
+    const successor = await createOwner({ type: "agent", name: "successor-bot" });
     await runDomainTool("set_address_owner", { address: "svc@example.com", owner: "ada", administrator: "ops-bot" });
 
     const result = await runDomainTool("transfer_address_owner", { address: "svc@example.com", owner: "successor-bot", reason: "handoff" });
@@ -83,7 +83,7 @@ describe("MCP address-ownership tools in self_hosted mode", () => {
   });
 
   it("unassign_address_owner clears ownership through /v1", async () => {
-    const { address } = seedOwnedAddress();
+    const { address } = await seedOwnedAddress();
     await runDomainTool("set_address_owner", { address: "svc@example.com", owner: "ada", administrator: "ops-bot" });
 
     const result = await runDomainTool("unassign_address_owner", { address: "svc@example.com", reason: "retired" });
@@ -95,7 +95,7 @@ describe("MCP address-ownership tools in self_hosted mode", () => {
   });
 
   it("list_address_owner_history returns the audit trail newest first", async () => {
-    seedOwnedAddress();
+    await seedOwnedAddress();
     await runDomainTool("set_address_owner", { address: "svc@example.com", owner: "ada", administrator: "ops-bot" });
     await runDomainTool("unassign_address_owner", { address: "svc@example.com", reason: "retired" });
 

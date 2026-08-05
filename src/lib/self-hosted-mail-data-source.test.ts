@@ -82,16 +82,23 @@ function listV1(row: Record<string, unknown>): Record<string, unknown> {
   const {
     body_text: bodyText,
     body_html: _bodyHtml,
-    headers: _headers,
+    headers,
     attachments,
     ...summary
   } = row;
+  // Mirrors the serve: the headers OBJECT stays off list rows, but the denial code
+  // inside it is projected as its own scalar, so a `blocked` row can state its
+  // reason without re-adding the payload the lean projection exists to avoid.
+  const denial = headers && typeof headers === "object" && !Array.isArray(headers)
+    ? (headers as Record<string, unknown>)["policy_denial"]
+    : undefined;
   return {
     ...summary,
     snippet: typeof bodyText === "string"
       ? bodyText.replace(/\s+/g, " ").trim().slice(0, 140)
       : null,
     attachment_count: Array.isArray(attachments) ? attachments.length : 0,
+    policy_denial: typeof denial === "string" && denial.trim() ? denial.trim() : null,
   };
 }
 
@@ -598,7 +605,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     const msgs = await ds.listMailbox("inbox", { limit: 1 });
     expect(msgs).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -615,7 +622,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(msgs.map((m) => m.id)).toEqual(["today"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&since=2026-07-11T21%3A00%3A00.000Z",
     ]);
   });
 
@@ -625,7 +632,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(unread.map((m) => m.id).sort()).toEqual(["3", "5"]);
     const hits = await ds.listMailbox("inbox", { search: "oana" });
     expect(hits.map((m) => m.id)).toEqual(["3"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&search=oana");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&folder=inbox&direction=inbound&search=oana");
   });
 
   it("locally verifies server-returned rows when a stale server ignores filters", async () => {
@@ -643,7 +650,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
 
     expect(hits.map((m) => m.id)).toEqual(["match"]);
-    expect(serve.requests).toContain("GET /v1/messages?limit=200&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
+    expect(serve.requests).toContain("GET /v1/messages?limit=200&folder=inbox&direction=inbound&since=2026-07-12T00%3A00%3A00.000Z&to=target%40example.com&search=needle");
   });
 
   it("hydrates lean rows before rejecting body-only search matches with label filters", async () => {
@@ -747,7 +754,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages.map((message) => message.id)).toEqual(["attachment-final"]);
     expect(serve.requests).toContain(
-      "GET /v1/messages?limit=50&cursor=cursor%3A50&direction=inbound&search=final-reconciliation.pdf",
+      "GET /v1/messages?limit=50&cursor=cursor%3A50&folder=inbox&direction=inbound&search=final-reconciliation.pdf",
     );
     expect(serve.requests).toContain("GET /v1/messages/attachment-final");
   });
@@ -792,9 +799,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(messages.map((message) => message.id)).toEqual(["oldest", "middle", "newest"]);
     expect(new Set(messages.map((message) => message.id)).size).toBe(3);
     expect(serve.requests).toEqual([
-      "GET /v1/messages?limit=500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=after-50000&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=after-100000&direction=inbound",
+      "GET /v1/messages?limit=500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-50000&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=after-100000&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -832,9 +839,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
     expect(oldest.map((message) => message.id)).toEqual(["legacy-1000"]);
     expect(oldestServe.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&direction=inbound",
-      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&direction=inbound",
+      "GET /v1/messages?limit=500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A500&folder=inbox&direction=inbound",
+      "GET /v1/messages?limit=500&cursor=legacy-offset%3A1000&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -850,7 +857,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages).toHaveLength(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound",
     ]);
   });
 
@@ -904,9 +911,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
 
     expect(messages.map((message) => message.id)).toEqual(["legacy-search-100"]);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&cursor=legacy-offset%3A50&direction=inbound&search=deep+legacy+needle",
-      "GET /v1/messages?limit=50&cursor=legacy-offset%3A100&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A50&folder=inbox&direction=inbound&search=deep+legacy+needle",
+      "GET /v1/messages?limit=50&cursor=legacy-offset%3A100&folder=inbox&direction=inbound&search=deep+legacy+needle",
     ]);
   });
 
@@ -1004,9 +1011,9 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(Array.isArray(messages)).toBe(true);
     expect(messages.map((message) => message.id)).toEqual(["older-hit"]);
     expect(serve.requests).toEqual([
-      "GET /v1/messages?limit=50&direction=inbound&search=needle",
+      "GET /v1/messages?limit=50&folder=inbox&direction=inbound&search=needle",
       "GET /v1/messages/newer-miss",
-      "GET /v1/messages?limit=50&cursor=after-100000&direction=inbound&search=needle",
+      "GET /v1/messages?limit=50&cursor=after-100000&folder=inbox&direction=inbound&search=needle",
     ]);
   });
 
@@ -1600,7 +1607,7 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect((await ds.listMailbox("starred")).map((m) => m.id)).toEqual(["1"]);
     expect((await ds.mailboxCounts()).starred).toBe(1);
     expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=200&direction=inbound",
+      "GET /v1/messages?limit=200&folder=starred&direction=inbound",
     ]);
   });
 
@@ -2480,5 +2487,60 @@ describe("SelfHostedMailDataSource — read filter", () => {
     const page = await ds.listMailbox("inbox", { read: true, limit: 2 });
     expect(page.map((m) => m.id)).toEqual(["read-new", "read-old"]);
     expect(page.every((m) => m.is_read)).toBe(true);
+  });
+});
+
+// THE REASON A REFUSED SEND WAS REFUSED, END TO END THROUGH THE MAPPING (2026-07-27).
+//
+// The client reads the denial code from two DIFFERENT places depending on the route,
+// and both have to work or the fix only half-lands:
+//   * LIST rows carry a `policy_denial` scalar (the serve strips the headers object
+//     from list pages for payload size);
+//   * the DETAIL read carries the full `headers`, with the code inside it.
+// A test that constructs a TuiMessage with `policy_denial` already set would pass
+// against either half being broken, so these drive the real mapping instead.
+describe("SelfHostedMailDataSource — a blocked message carries its reason", () => {
+  const blocked = (over: Record<string, unknown> = {}) => ({
+    ...v1("77"),
+    direction: "outbound",
+    status: "blocked",
+    send_state: "blocked",
+    ...over,
+  });
+
+  it("reads the code from the DETAIL response's headers", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "sender_unverified" } })]);
+    const msg = await ds.getMessage("77");
+    expect(msg?.send_state).toBe("blocked");
+    expect(msg?.policy_denial).toBe("sender_unverified");
+  });
+
+  it("reads the code from a LIST row's scalar, where headers are absent", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "sender_unverified" } })]);
+    const rows = await ds.listMailbox("sent", { limit: 10 });
+    const row = rows.find((candidate) => candidate.id === "77");
+    expect(row?.send_state).toBe("blocked");
+    // listV1 strips `headers` exactly as the serve does, so this can only pass via
+    // the projected scalar.
+    expect(row?.policy_denial).toBe("sender_unverified");
+  });
+
+  it("leaves it undefined when the row was not refused, rather than inventing one", async () => {
+    const { ds } = make([{ ...v1("78"), direction: "outbound", status: "sent", send_state: "sent" }]);
+    expect((await ds.getMessage("78"))?.policy_denial).toBeUndefined();
+  });
+
+  it("tolerates a server that sends neither the scalar nor a headers entry", async () => {
+    // An older serve predates the field entirely. The reason is simply unavailable —
+    // that must degrade to "no reason shown", never to an error or a fabricated code.
+    const { ds } = make([blocked({ headers: {} })]);
+    const msg = await ds.getMessage("77");
+    expect(msg?.send_state).toBe("blocked");
+    expect(msg?.policy_denial).toBeUndefined();
+  });
+
+  it("ignores a blank code instead of rendering an empty reason", async () => {
+    const { ds } = make([blocked({ headers: { policy_denial: "   " } })]);
+    expect((await ds.getMessage("77"))?.policy_denial).toBeUndefined();
   });
 });

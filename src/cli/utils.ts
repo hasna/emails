@@ -1,4 +1,5 @@
 import chalk from "../lib/chalk-lite.js";
+import { SCHEDULED_STATUSES, type ScheduledStatus } from "../db/scheduled.js";
 import { writeSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolveResourceId, listResourceIdMatches } from "../db/self-hosted-store.js";
@@ -20,6 +21,12 @@ let jsonOutputFailure: Error | null = null;
 
 export const DEFAULT_CLI_PAGE_LIMIT = 50;
 export const MAX_CLI_PAGE_LIMIT = 1000;
+// The API list contract clamps every list read ("Server clamps: limit defaults
+// to 100, hard cap 500" — src/store/records.ts). The CLI keeps accepting up to
+// MAX_CLI_PAGE_LIMIT because the local database serves such pages in full, but
+// any hint about completeness must key on the page size a clamping store can
+// actually return — see formatListHint (task 9ec32ef4).
+export const SEAM_LIST_HARD_CAP = 500;
 export const DEFAULT_COMPACT_CLI_PAGE_LIMIT = 20;
 
 function jsonDocument(data: unknown): string {
@@ -119,6 +126,10 @@ export function configureCliRuntime(opts: { json?: boolean; verbose?: boolean })
 
 export function isCliVerboseOutput(): boolean {
   return verboseOutput;
+}
+
+export function isCliJsonOutput(): boolean {
+  return jsonOutput;
 }
 
 export function hasCliOption(name: string): boolean {
@@ -329,6 +340,19 @@ export function parseDuration(str: string): number {
   }
 }
 
+/**
+ * Validate a `--status` value for the scheduled-email list commands against the
+ * store's own enum. A blind cast here answered `--status bogus` with `[]` and
+ * exit 0, so a typo like `canceled` read as "nothing is cancelled" while the
+ * sibling `email list --status` refused the same shape of input (task 6d5ebed5).
+ */
+export function parseScheduledStatusFilter(value: string | undefined): ScheduledStatus | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if ((SCHEDULED_STATUSES as readonly string[]).includes(normalized)) return normalized as ScheduledStatus;
+  throw new Error(`Unknown --status ${JSON.stringify(value)}. Valid statuses: ${SCHEDULED_STATUSES.join(", ")}.`);
+}
+
 export function parseCliPositiveIntOption(
   value: number | string | undefined,
   fallback: number,
@@ -399,7 +423,13 @@ export function formatListHint(opts: {
   const hints: string[] = [];
   if (!opts.verbose) hints.push("use --verbose for expanded rows");
   if (opts.detailCommand) hints.push(opts.detailCommand);
-  if (opts.shown >= opts.limit) hints.push(`page with --offset ${offset + opts.shown} or set --limit`);
+  // Keyed to the EFFECTIVE page size, not the requested one: a store that
+  // clamps at SEAM_LIST_HARD_CAP can never fill a larger request, and keying on
+  // the request made this hint vanish exactly when the page was incomplete —
+  // `provider list --limit 1000` printed a clamped 500-row page as if it were
+  // the complete set (task 9ec32ef4). Against a store that serves the full
+  // request, a set that ends exactly at the cap earns a harmless extra hint.
+  if (opts.shown >= Math.min(opts.limit, SEAM_LIST_HARD_CAP)) hints.push(`page with --offset ${offset + opts.shown} or set --limit`);
   if (hints.length > 0) parts.push(hints.join("; "));
   return chalk.dim(parts.join(" "));
 }

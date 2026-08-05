@@ -15099,6 +15099,581 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     }
   },
   {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "idp_principals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sub": {
+                "type": "string"
+              },
+              "tenant_id": {
+                "type": "string"
+              },
+              "idp_tid": {
+                "type": "string",
+                "nullable": true
+              },
+              "principal_type": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "service"
+                ]
+              },
+              "note": {
+                "type": "string",
+                "nullable": true
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "revoked_at": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              }
+            },
+            "required": [
+              "sub",
+              "tenant_id",
+              "idp_tid",
+              "principal_type",
+              "revoked_at"
+            ]
+          }
+        }
+      },
+      "required": [
+        "idp_principals"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "operationId": "listIdpPrincipals",
+    "path": "/v1/idp-principals",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 201,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "grant": {
+          "type": "object",
+          "properties": {
+            "sub": {
+              "type": "string"
+            },
+            "tenant_id": {
+              "type": "string"
+            },
+            "idp_tid": {
+              "type": "string",
+              "nullable": true
+            },
+            "principal_type": {
+              "type": "string",
+              "enum": [
+                "user",
+                "service"
+              ]
+            },
+            "note": {
+              "type": "string",
+              "nullable": true
+            },
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "revoked_at": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true
+            }
+          },
+          "required": [
+            "sub",
+            "tenant_id",
+            "idp_tid",
+            "principal_type",
+            "revoked_at"
+          ]
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 400,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "grantIdpPrincipal",
+    "path": "/v1/idp-principals",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revoked",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "operationId": "revokeIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "restored": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "restored",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "restoreIdpPrincipal",
+    "path": "/v1/idp-principals/{sub}/restore",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        },
+        "sub": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revoked",
+        "sub"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "revokeIdpPrincipalByPost",
+    "path": "/v1/idp-principals/{sub}/revoke",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
     "method": "POST",
     "operationId": "acceptInvite",
     "path": "/v1/invites/accept",
@@ -15960,6 +16535,74 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
           "required": [
             "principal_type",
             "kid",
+            "tenant",
+            "scopes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "principal_type": {
+              "type": "string",
+              "enum": [
+                "idp"
+              ]
+            },
+            "sub": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tenant": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "slug": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "slug",
+                    "name",
+                    "status"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              ]
+            },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "principal_type",
+            "sub",
             "tenant",
             "scopes"
           ]
@@ -18522,6 +19165,171 @@ export const SELF_HOSTED_RESPONSE_CONTRACTS: readonly SelfHostedResponseContract
     "method": "GET",
     "operationId": "getMessageGroups",
     "path": "/v1/messages/groups",
+    "status": 500,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "internal error"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 200,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "$ref": "#/components/schemas/Message"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 201,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "$ref": "#/components/schemas/Message"
+        }
+      },
+      "required": [
+        "message"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 400,
+    "schema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 401,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 403,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "error",
+        "reason"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
+    "status": 413,
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "request body too large"
+          ]
+        }
+      },
+      "required": [
+        "error"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "operationId": "recordMessage",
+    "path": "/v1/messages/record",
     "status": 500,
     "schema": {
       "type": "object",
@@ -36516,6 +37324,11 @@ export const SELF_HOSTED_RESPONSE_COMPONENTS: Readonly<Record<string, unknown>> 
       "send_state": {
         "type": "string",
         "description": "none | pending | sending | sent | failed | uncertain | blocked | cancelled"
+      },
+      "policy_denial": {
+        "type": "string",
+        "nullable": true,
+        "description": "Why an outbound policy gate refused this message (e.g. sender_unverified), or null when it was not refused. Mirrors headers.policy_denial. Full headers are stripped from list rows for payload size, so without this field a send_state of 'blocked' cannot be explained by any list consumer. OPTIONAL, unlike its neighbours, and deliberately so: a client that required it would refuse every list response from a server older than this field, turning a missing explanation into a total loss of `emails log` / `emails email list` across the whole installed base. Absent and null both mean 'no reason available here'; read it from GET /v1/messages/{id} headers.policy_denial when a list row omits it. The SERVER's obligation to project it is enforced by src/server/self-hosted/policy-denial-visibility.test.ts, not by the wire contract."
       },
       "send_started_at": {
         "type": "string",

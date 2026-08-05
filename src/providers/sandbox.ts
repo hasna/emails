@@ -34,7 +34,7 @@ export class SandboxAdapter implements ProviderAdapter {
   }
 
   async sendEmail(opts: SendEmailOptions): Promise<string> {
-    const email = storeSandboxEmail(
+    const email = await storeSandboxEmail(
       {
         provider_id: this.provider.id,
         from_address: opts.from,
@@ -46,7 +46,20 @@ export class SandboxAdapter implements ProviderAdapter {
         html: opts.html ?? null,
         text_body: opts.text ?? null,
         attachments: opts.attachments ?? [],
-        headers: {},
+        // Capture the EFFECTIVE wire headers, the way the real adapters build them:
+        // caller headers plus the RFC 8058 pair derived from `unsubscribe_url` (the
+        // same derivation ses.ts and resend.ts perform). The sandbox exists so local
+        // runs and tests can observe what would have left — a hardcoded `{}` here hid
+        // the delivered headers from every observer.
+        headers: {
+          ...(opts.headers ?? {}),
+          ...(opts.unsubscribe_url
+            ? {
+                "List-Unsubscribe": `<${opts.unsubscribe_url}>`,
+                "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+              }
+            : {}),
+        },
       },
     );
     const toStr = Array.isArray(opts.to) ? opts.to.join(", ") : opts.to;
@@ -61,7 +74,25 @@ export class SandboxAdapter implements ProviderAdapter {
   }
 
   async getStats(_period?: string): Promise<Stats> {
-    const count = getSandboxCount(this.provider.id);
+    const count = await getSandboxCount(this.provider.id);
+    // `null` MEANS "NOT A TOTAL", AND `Stats` HAS NOWHERE TO SAY SO. Every field on `Stats`
+    // (src/types/index.ts) is a plain `number` — it is the shape four provider adapters
+    // return, and it carries no availability or completeness marker — so a lower bound
+    // written into `sent` would be read as a total by everything downstream, and a `0`
+    // would report a full sandbox as an empty one. Both are the fabricated value this
+    // family's collapse removes, so the only honest answer left is to fail loudly.
+    //
+    // Reachable whenever the capture table could not be enumerated to its end. That is NOT
+    // only a scale limit: the 200-page budget is one cause, and a row inserted or deleted
+    // between two pages is the other, which adversarial review measured at three rows. A store
+    // REFUSAL or a transport fault already throws out of `getSandboxCount` itself.
+    if (count === null) {
+      throw new Error(
+        `Sandbox provider ${this.provider.id}: the captured emails could not be counted to the end of the `
+          + "table, so this figure would be a lower bound rather than a total. Refusing to report it as one; "
+          + "clear the capture table or narrow the provider.",
+      );
+    }
     return {
       provider_id: this.provider.id,
       period: "all",

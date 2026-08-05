@@ -37,29 +37,44 @@ import type { EmailsMode } from "./mode.js";
  * because those helpers throw regardless of mode. Enforced by
  * src/lib/status-commands-coverage.test.ts — do not hand-maintain this list
  * against a remembered grep.
+ *
+ * The enforcement runs in ONE direction: it fails when a refusal is missing
+ * here, not when an entry has no refusal left. So when a command is WIRED UP,
+ * its entry has to be deleted by hand or the command stays silently suppressed
+ * from `next_actions` and `fix_commands` while working perfectly.
  */
 export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
   // src/cli/commands/provision.ts — notImplementedAnywhere()
   "emails provision",
-  // src/cli/commands/address.ts — serverOnly()
+  // src/cli/commands/address.ts — notImplementedAnywhere()
   "emails address provision",
-  // src/cli/commands/domain.ts — serverOnly(). Both the singular `domain` and the
-  // plural `domains` alias refuse, and `emails domain status` is the one that was
-  // reaching `next_actions`.
-  "emails domain check",
+  // src/cli/commands/domain.ts — notImplementedAnywhere(). Both the singular
+  // `domain` and the plural `domains` alias refuse, and `emails domain status`
+  // is the one that was reaching `next_actions`.
+  //
+  // `domain check`, `domains check`, `domain dns` and `domains dns` are NOT here
+  // any more: they were wired to src/lib/dns.ts + src/lib/dns-check.ts +
+  // src/lib/mx-ownership.ts, which always implemented them, and are now the
+  // remedies several of the refusals below point at. Leaving them listed would
+  // have suppressed a working command from every suggestion path.
   "emails domain connect",
-  "emails domain dns",
   "emails domain setup",
   "emails domain setup-cloudflare",
   "emails domain status",
   "emails domain verify",
-  "emails domains check",
   "emails domains connect",
   "emails domains disable-outbound",
-  "emails domains dns",
   "emails domains enable-inbound",
   "emails domains enable-outbound",
   "emails domains verify",
+  // NOT a refusal call site — `emails refresh` is not a registered command at all
+  // (`error: unknown command 'refresh'`; the verb is `emails pull`, alias
+  // `emails provider sync`). It belongs here rather than in a per-mode list for
+  // exactly the reason this file documents above: it sat in
+  // SELF_HOSTED_REFUSED_COMMANDS alone, so local mode still proposed it, and
+  // `emails inbox status` printed "Pull now: emails refresh" to every local
+  // operator. A command that exists in NO mode must be unavailable in every mode.
+  "emails refresh",
 ];
 
 /**
@@ -70,24 +85,40 @@ export const NEVER_AVAILABLE_COMMANDS: readonly string[] = [
 export const SELF_HOSTED_REFUSED_COMMANDS: readonly string[] = [
   "emails analytics",
   "emails batch",
-  "emails daemon",
-  "emails doctor",
-  "emails export",
+  // Only the delivery sub-diagnosis refuses; `emails doctor` itself reads through
+  // the store seam (src/lib/doctor.ts) and is a real remedy.
+  "emails doctor delivery",
   "emails inbox explain",
   "emails inbox listen",
   "emails inbox open",
   "emails inbox realtime-status",
   "emails inbox setup-realtime",
-  "emails inbox source",
   "emails inbox sync-s3",
   "emails inbox watch",
-  "emails logs tail",
+  // ── FLAG-CONDITIONAL refusals ───────────────────────────────────────────────
+  // The base commands all RUN; only these flag forms throw, from an inline
+  // `handleError(new Error(...))` rather than a `serverOnly("emails ...")` call.
+  // src/lib/status-commands-coverage.test.ts reads those string literals, so it is
+  // structurally blind to every one of these — they can only be caught by hand, and
+  // are pinned by name in src/lib/status-commands.test.ts so they cannot drift.
+  // Nothing proposes these flag forms today; the entries make that hold by
+  // construction rather than by nobody having tried.
+  //
+  // `emails send --to-group` is deliberately NOT here. It used to belong on this
+  // list and no longer refuses — group fan-out is now a client-side recipient
+  // lookup (src/cli/commands/send.ts) — and listing a command that runs would
+  // suppress a real remedy from every suggestion path, which is the mirror image of
+  // the defect this registry exists to prevent. Verify before adding.
+  "emails inbox unread-count --by-address",
+  "emails inbox clear --provider",
   "emails monitor",
   "emails provider sync",
   "emails pull",
-  "emails refresh",
-  "emails schedule",
-  "emails scheduled",
+  // `emails refresh` moved to NEVER_AVAILABLE_COMMANDS — it is not a command in
+  // any mode, and a per-mode entry only suppressed it in self_hosted.
+  // The scheduler LOOP refuses (it needs the local send pipeline); reading and
+  // cancelling the schedule over /v1/scheduled does not.
+  "emails schedule run",
   "emails scheduler",
   "emails stats",
   "emails test",

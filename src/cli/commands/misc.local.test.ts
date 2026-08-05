@@ -2,10 +2,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.local.js";
-import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.local.js";
-import { listSandboxEmails } from "../../db/sandbox.local.js";
-import { createTemplate } from "../../db/templates.local.js";
-import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.local.js";
+import { createScheduledEmail, getScheduledEmail } from "../../db/scheduled.js";
+import { listSandboxEmails } from "../../db/sandbox.js";
+import { createSqliteEmailStore } from "../../store-sqlite/index.js";
+import { createTemplate } from "../../db/templates.js";
+import { addStep, createSequence, enroll, listEnrollments } from "../../db/sequences.js";
 import { registerMiscCommands, runSchedulerTick } from "./misc.local.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -54,7 +55,9 @@ describe("schedule list commands", () => {
   it("renders scheduled-email summaries without exposing payload bodies", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "list-sandbox", type: "sandbox" }, db);
-    createScheduledEmail({
+    // No `db` handle and no `await`-free call: `src/db/scheduled.ts` reads the store seam,
+    // which binds to the same process-wide connection `getDatabase()` returns here.
+    await createScheduledEmail({
       provider_id: provider.id,
       from_address: "sender@example.com",
       to_addresses: ["scheduled@example.com"],
@@ -64,7 +67,7 @@ describe("schedule list commands", () => {
       attachments_json: [{ filename: "secret.txt", content: "hidden attachment".repeat(50) }],
       template_vars: { hidden: "hidden template vars".repeat(50) },
       scheduled_at: "2030-01-01T00:00:00.000Z",
-    }, db);
+    });
 
     const output = await runMiscCommand(["schedule", "list", "--limit", "1"]);
 
@@ -81,29 +84,33 @@ describe("scheduler tick", () => {
   it("processes scheduled emails and sequence enrollments through one shared tick", async () => {
     const db = getDatabase();
     const provider = createProvider({ name: "tick-sandbox", type: "sandbox" }, db);
-    const scheduled = createScheduledEmail({
+    const scheduled = await createScheduledEmail({
       provider_id: provider.id,
       from_address: "sender@example.com",
       to_addresses: ["scheduled@example.com"],
       subject: "Scheduled smoke",
       text_body: "scheduled body",
       scheduled_at: "2000-01-01T00:00:00.000Z",
-    }, db);
+    });
 
-    createTemplate({
+    // The collapsed templates family is async; the trailing `db` handle still means
+    // "this exact database", now as a SQLite store bound to it.
+    await createTemplate({
       name: "tick-template",
       subject_template: "Welcome {{email}}",
       text_template: "hello {{email}}",
     }, db);
-    const sequence = createSequence({ name: "tick-sequence" }, db);
-    addStep({
+    // The collapsed sequences family is async; the trailing `db` handle still means
+    // "this exact database", now as a SQLite store bound to it.
+    const sequence = await createSequence({ name: "tick-sequence" }, db);
+    await addStep({
       sequence_id: sequence.id,
       step_number: 1,
       delay_hours: 0,
       template_name: "tick-template",
       from_address: "sender@example.com",
     }, db);
-    const enrollment = enroll({ sequence_id: sequence.id, contact_email: "sequence@example.com", provider_id: provider.id }, db);
+    const enrollment = await enroll({ sequence_id: sequence.id, contact_email: "sequence@example.com", provider_id: provider.id }, db);
     db.run("UPDATE sequence_enrollments SET next_send_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", enrollment.id]);
 
     const logs: string[] = [];
@@ -111,12 +118,13 @@ describe("scheduler tick", () => {
 
     expect(result.scheduled).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
     expect(result.sequences).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
-    expect(getScheduledEmail(scheduled.id, db)?.status).toBe("sent");
+    expect((await getScheduledEmail(scheduled.id))?.status).toBe("sent");
 
-    const subjects = listSandboxEmails(provider.id, 10, db).map((email) => email.subject);
+    const subjects = (await listSandboxEmails(provider.id, 10, 0, createSqliteEmailStore({ database: db })))
+      .map((email) => email.subject);
     expect(subjects).toContain("Scheduled smoke");
     expect(subjects).toContain("Welcome sequence@example.com");
-    expect(listEnrollments({ sequence_id: sequence.id }, db)[0]?.status).toBe("completed");
+    expect((await listEnrollments({ sequence_id: sequence.id }, db))[0]?.status).toBe("completed");
     expect(logs.some((line) => line.includes("Sent scheduled email"))).toBe(true);
     expect(logs.some((line) => line.includes("Sent sequence step"))).toBe(true);
   });

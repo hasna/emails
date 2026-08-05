@@ -40,7 +40,7 @@ export interface Address { "id": string; "email": string; "domain"?: string | nu
 
 export interface SendKey { "id": string; "owner_id": string | null; "prefix": string | null; "label": string | null; "last_used_at": string | null; "revoked_at": string | null; "created_at": string; "updated_at": string }
 
-export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs": Array<string>; "subject": string | null; "snippet": string | null; "status": string; "provider_message_id": string | null; "message_id": string | null; "in_reply_to": string | null; "received_at": string | null; "is_read": boolean; "is_starred": boolean; "labels": Array<string>; "attachment_count": number; "source_id": string | null; "send_state": string; "send_started_at": string | null; "created_at": string; "updated_at": string }
+export interface MessageListItem { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs": Array<string>; "subject": string | null; "snippet": string | null; "status": string; "provider_message_id": string | null; "message_id": string | null; "in_reply_to": string | null; "received_at": string | null; "is_read": boolean; "is_starred": boolean; "labels": Array<string>; "attachment_count": number; "source_id": string | null; "send_state": string; "policy_denial"?: string | null; "send_started_at": string | null; "created_at": string; "updated_at": string }
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs": Array<string>; "subject": string | null; "body_text": string | null; "body_html": string | null; "status": string; "provider_message_id": string | null; "message_id": string | null; "in_reply_to": string | null; "received_at": string | null; "is_read": boolean; "is_starred": boolean; "labels": Array<string>; "headers": Record<string, unknown>; "attachments": Array<AttachmentMeta | null>; "source_id": string | null; "send_state": string; "send_started_at": string | null; "created_at": string; "updated_at": string }
 
@@ -831,7 +831,7 @@ export class EmailsSelfHostClient {
     }
 
     /** List tenant-scoped events */
-    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
+    async listResourceEvents(query?: { "limit"?: number; "offset"?: number; "email_id"?: string | null; "provider_id"?: string | null; "type"?: string | null; "recipient"?: string | null; "provider_event_id"?: string | null }, init?: RequestInit): Promise<{ "items": Array<{ "email_id": string | null; "provider_id": string | null; "provider_event_id": string | null; "type": string | null; "recipient": string | null; "metadata": unknown; "occurred_at": string | null; "id": string; "tenant_id": string; "created_at": string; "updated_at": string }> }> {
       return this.request("GET", `/v1/events`, {
         body: undefined,
         query,
@@ -1046,6 +1046,51 @@ export class EmailsSelfHostClient {
       });
     }
 
+    /** List this tenant's IdP-principal federation grants (revoked included); tenant operator required */
+    async listIdpPrincipals(init?: RequestInit): Promise<{ "idp_principals": Array<{ "sub": string; "tenant_id": string; "idp_tid": string | null; "principal_type": "user" | "service"; "note"?: string | null; "created_at"?: string; "revoked_at": string | null }> }> {
+      return this.request("GET", `/v1/idp-principals`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Grant an IdP principal (sub) access to the caller's tenant; a re-grant never un-revokes */
+    async grantIdpPrincipal(body: { "sub": string; "idp_tid"?: string | null; "principal_type"?: "user" | "service"; "note"?: string | null }, init?: RequestInit): Promise<{ "grant": { "sub": string; "tenant_id": string; "idp_tid": string | null; "principal_type": "user" | "service"; "note"?: string | null; "created_at"?: string; "revoked_at": string | null }; "warning"?: string }> {
+      return this.request("POST", `/v1/idp-principals`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Throw the emails-side kill switch on a federation grant; tenant operator required */
+    async revokeIdpPrincipal(sub: string, init?: RequestInit): Promise<{ "revoked": true; "sub": string }> {
+      return this.request("DELETE", `/v1/idp-principals/${encodeURIComponent(String(sub))}`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Deliberately lift the kill switch on one federation grant; tenant operator required */
+    async restoreIdpPrincipal(sub: string, init?: RequestInit): Promise<{ "restored": true; "sub": string }> {
+      return this.request("POST", `/v1/idp-principals/${encodeURIComponent(String(sub))}/restore`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Compatibility verb for revoking a federation grant */
+    async revokeIdpPrincipalByPost(sub: string, init?: RequestInit): Promise<{ "revoked": true; "sub": string }> {
+      return this.request("POST", `/v1/idp-principals/${encodeURIComponent(String(sub))}/revoke`, {
+        body: undefined,
+        query: undefined,
+        init,
+      });
+    }
+
     /** Accept an invitation and create a tenant-bound session */
     async acceptInvite(body: { "token": string; "password"?: string | null; "name"?: string | null }, init?: RequestInit): Promise<{ "session_token": string; "expires_at": string; "user": User; "tenant": Tenant | null; "role": "owner" | "admin" | "member" | "viewer" }> {
       return this.request("POST", `/v1/invites/accept`, {
@@ -1101,7 +1146,7 @@ export class EmailsSelfHostClient {
     }
 
     /** Return the authenticated user or API-key principal and active tenant */
-    async getCurrentPrincipal(init?: RequestInit): Promise<{ "principal_type": "apikey"; "kid": string; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "scopes": Array<string> } | { "principal_type": "user"; "user": ({ "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string }) | null; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "role": "owner" | "admin" | "member" | "viewer"; "scopes": Array<string>; "memberships": Array<{ "tenant_id": string; "slug": string; "name": string; "role": "owner" | "admin" | "member" | "viewer" }>; "email_identities": Array<EmailIdentity> }> {
+    async getCurrentPrincipal(init?: RequestInit): Promise<{ "principal_type": "apikey"; "kid": string; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "scopes": Array<string> } | { "principal_type": "idp"; "sub": string; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "scopes": Array<string> } | { "principal_type": "user"; "user": ({ "id": string; "email": string; "name": string | null; "status": string; "email_verified": boolean; "global_role"?: "user" | "super_admin"; "is_primary_super_admin"?: boolean; "created_at": string }) | null; "tenant": { "id": string; "slug": string; "name": string; "status": string } | { "id": string }; "role": "owner" | "admin" | "member" | "viewer"; "scopes": Array<string>; "memberships": Array<{ "tenant_id": string; "slug": string; "name": string; "role": "owner" | "admin" | "member" | "viewer" }>; "email_identities": Array<EmailIdentity> }> {
       return this.request("GET", `/v1/me`, {
         body: undefined,
         query: undefined,
@@ -1203,6 +1248,15 @@ export class EmailsSelfHostClient {
       return this.request("GET", `/v1/messages/groups`, {
         body: undefined,
         query,
+        init,
+      });
+    }
+
+    /** Record a message in either direction WITHOUT sending it. Supplying source_id makes the write idempotent. Scope emails:write. */
+    async recordMessage(body: { "from": string; "to": Array<string>; "cc"?: Array<string>; "subject"?: string | null; "text"?: string | null; "html"?: string | null; "status"?: string; "direction"?: "inbound" | "outbound"; "received_at"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "provider_message_id"?: string | null; "source_id"?: string }, init?: RequestInit): Promise<{ "message": Message }> {
+      return this.request("POST", `/v1/messages/record`, {
+        body,
+        query: undefined,
         init,
       });
     }

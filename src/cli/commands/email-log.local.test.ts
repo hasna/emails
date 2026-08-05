@@ -4,12 +4,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createEmail } from "../../db/emails.local.js";
-import { storeEmailContent } from "../../db/email-content.js";
+import { createSentEmailLedger, storeSentEmailContent } from "../../lib/sent-ledger.local.js";
 import { storeInboundEmail } from "../../db/inbound.local.js";
 import { createProvider } from "../../db/providers.local.js";
 import { createAddress, markVerified } from "../../db/addresses.local.js";
 import { setConfigValue } from "../../lib/config.js";
+import {
+  API_BASE_URL_SETTING,
+  API_CREDENTIAL_SETTINGS,
+  DATABASE_PATH_SETTINGS,
+} from "../../store-resolution.js";
 import { registerEmailLogCommands } from "./email-log.local.js";
 
 let INHERITED_PROCESS_ENV: NodeJS.ProcessEnv;
@@ -23,12 +27,12 @@ function restoreInheritedProcessEnv(): void {
   Object.assign(process.env, INHERITED_PROCESS_ENV);
 }
 
-function setupDb() {
+async function setupDb() {
   resetDatabase();
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();
   const provider = createProvider({ name: "sandbox", type: "sandbox" }, db);
-  const sent = createEmail(provider.id, {
+  const sent = await createSentEmailLedger(provider.id, {
     from: "agent@example.com",
     to: "person@example.com",
     subject: "Original subject",
@@ -78,9 +82,12 @@ async function runEmailLogCommand(args: string[]) {
   return { data, formatted, consoleOutput: consoleLines.join("\n") };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   captureInheritedProcessEnv();
-  setupDb();
+  // AWAITED. `setupDb` is async because the sent-ledger writer is, and a `beforeEach` that
+  // fired it without awaiting would let the first case run against an empty ledger — a
+  // failure that would look like a behaviour change in the command under test.
+  await setupDb();
 });
 
 afterEach(() => {
@@ -99,7 +106,7 @@ describe("email log list and search commands", () => {
       new Date(Date.UTC(2025, 0, 1)).toISOString(),
     ]);
     for (let i = 0; i < 3; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "agent@example.com",
         to: `person${i}@example.com`,
         subject: `Paged sent ${i}`,
@@ -126,7 +133,7 @@ describe("email log list and search commands", () => {
     const db = getDatabase();
     const provider = db.query("SELECT id FROM providers LIMIT 1").get() as { id: string };
     for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
+      const email = await createSentEmailLedger(provider.id, {
         from: "agent@example.com",
         to: `search${i}@example.com`,
         subject: `Searchable sent ${i}`,
@@ -154,7 +161,11 @@ describe("email show command", () => {
   it("renders stored HTML as readable text", async () => {
     const db = getDatabase();
     const sent = db.query("SELECT id FROM emails LIMIT 1").get() as { id: string };
-    storeEmailContent(sent.id, { html: "<p>Hello <strong>there</strong> &amp; welcome</p>" }, db);
+    // SEEDED THROUGH THE SURVIVING WRITER. `storeEmailContent` on the email-content family is
+    // now a typed refusal — the seam has no write that sets a body on an existing message — and
+    // the local ledger write lives in `src/lib/sent-ledger.local.ts`, which is what the two
+    // production senders call.
+    await storeSentEmailContent(sent.id, { html: "<p>Hello <strong>there</strong> &amp; welcome</p>" }, db);
 
     const { consoleOutput } = await runEmailLogCommand(["show", sent.id]);
 
@@ -300,5 +311,66 @@ describe("email test command", () => {
 
     expect(queries.some((sql) => sql.includes("ORDER BY verified DESC, created_at DESC"))).toBe(true);
     expect(queries.some((sql) => sql.includes("FROM addresses WHERE provider_id = ? ORDER BY created_at DESC"))).toBe(false);
+  });
+});
+
+describe("webhook listen command", () => {
+  // THE REFUSAL HAS TO REACH THE OPERATOR, not just the function. `emails webhook listen` is the
+  // path an operator actually takes, and this command's own arm imported the DELETED
+  // `src/lib/webhook.local.ts` directly — bypassing the facade — so the consumer swap is exercised
+  // here rather than assumed. Asserted through the CLI's own error channel.
+  //
+  // NO CASE STARTS A LISTENER THAT IS NEVER STOPPED. The command discards the server it creates, so
+  // a successful start would hold the port and the event loop for the rest of the file. The passing
+  // side of the gate is proved by occupying the port first: reaching an "address in use" failure
+  // proves the gate was passed, because that error is raised by the bind the gate precedes.
+
+  async function runExpectingError(args: string[]): Promise<string> {
+    const program = new Command();
+    program.exitOverride();
+    const errors: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    const originalExit = process.exit;
+    console.error = ((...a: unknown[]) => { errors.push(a.map(String).join(" ")); }) as typeof console.error;
+    console.log = (() => {}) as typeof console.log;
+    process.exit = ((code?: number) => { throw new Error(`exit:${code ?? 0}`); }) as typeof process.exit;
+    registerEmailLogCommands(program, () => {});
+    try {
+      await program.parseAsync(["node", "emails", ...args]);
+    } catch {
+      // handleError exits through the stubbed process.exit (or commander throws).
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exit = originalExit;
+    }
+    return errors.join("\n");
+  }
+
+  it("REFUSES at the command level when the mail lives behind the API, naming the setting", async () => {
+    // SETTINGS NAMED FROM THE RESOLVER'S CONSTANTS, not as literals, and ITERATED rather than
+    // spelled one at a time. `DATABASE_PATH_SETTINGS` has TWO entries and an earlier version of
+    // this case deleted only the second by name — it passed solely because the hermetic runner
+    // happens to unset the first, which is a dependency on the runner rather than on this file.
+    for (const setting of DATABASE_PATH_SETTINGS) delete process.env[setting];
+    process.env[API_BASE_URL_SETTING] = "https://mail.example.test";
+    process.env[API_CREDENTIAL_SETTINGS[2]] = "not-a-real-credential";
+    const errors = await runExpectingError(["webhook", "listen", "--port", "0"]);
+    expect(errors).toContain("durable provider webhook receiver runs where the mail is stored");
+    expect(errors).toContain(API_BASE_URL_SETTING);
+  });
+
+  it("gets PAST the gate on a local database, failing on the port instead of on storage", async () => {
+    const occupied = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      const errors = await runExpectingError(["webhook", "listen", "--port", String(occupied.port)]);
+      // The gate passed: the failure is about the address, not about where the mail is.
+      expect(errors).not.toContain("durable provider webhook receiver runs where the mail is stored");
+      expect(errors.length, "the command neither refused nor failed to bind").toBeGreaterThan(0);
+      expect(errors).toMatch(/in use|EADDRINUSE|Failed to start/i);
+    } finally {
+      occupied.stop(true);
+    }
   });
 });
