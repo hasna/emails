@@ -298,18 +298,101 @@ const MAX_SCOPED_COUNT_REQUESTS = 10_000;
 // Must exceed the TUI's 30s sidebar refresh, for the same reason as the tally.
 const SCOPED_COUNT_TTL_MS = 60_000;
 
+// ── a SUCCESSFUL walk is the expensive case, and the 60s TTL re-buys it ──────
+//
+// MEASURED AGAINST A REAL SERVE, 2026-08-05, one address scope on a six-figure
+// production mailbox (inbox ~174_000): the walk COMPLETES at 205 requests and
+// ~74 MB. It does not trip MAX_SCAN_ROWS, because the serve DOES honour ?to=
+// (control: ?to=<address that cannot exist> returns 0 rows) and the matched set
+// is under the bound. So the bound never fires and the failure cache below
+// never engages — the whole cost is a SUCCESSFUL walk, cached for 60s, re-run
+// on the next refresh, forever. Six-minute live run: 615 requests, 222 MB, one
+// full walk per minute.
+//
+// The 60s TTL was chosen to outlive the TUI's 30s refresh, which it does. What
+// it does not do is bound the SUSTAINED cost: 205 requests per 60s is 205
+// req/min and ~4.4 GB/hour for one idle sidebar.
+//
+// So the cache lifetime is derived from what the walk actually COST, against a
+// stated budget for sidebar metadata. A scope that answers in a handful of
+// requests keeps today's 60s freshness exactly; a scope that costs hundreds
+// backs off until it fits the budget, capped so staleness stays bounded.
+//
+// THIS IS NOT "raise the refresh interval". The refresh interval is untouched,
+// the message list still refreshes at 30s, every write still invalidates
+// immediately, and a cheap scope is bit-for-bit unaffected. What changes is
+// only how long an EXPENSIVE tally is reused, which is the one term in
+// requests-per-minute that a client can set without a server-side aggregate.
+//
+// THE BURST IS NOT REMOVED, ONLY ITS DUTY CYCLE. Each refill still costs one
+// whole walk, because /v1/messages/counts takes no recipient filter (measured:
+// ?to=<bogus> returns the WHOLE-STORE counts, byte-identical to unfiltered) and
+// the list envelope carries only `messages` and `next_cursor` — no total to
+// read. Removing the burst needs a server-side filtered count; that is filed
+// separately and is the actual fix.
+const SCOPED_COUNT_REQUEST_BUDGET_PER_MIN = 12;
+// Staleness ceiling. Counts are sidebar metadata and every write invalidates
+// them, so this only bounds how long NEW INBOUND mail can go uncounted.
+const SCOPED_COUNT_MAX_TTL_MS = 15 * 60_000;
+
+function scopedCountTtlMs(requests: number): number {
+  const budgeted = (requests / SCOPED_COUNT_REQUEST_BUDGET_PER_MIN) * 60_000;
+  return Math.min(SCOPED_COUNT_MAX_TTL_MS, Math.max(SCOPED_COUNT_TTL_MS, budgeted));
+}
+
+// ── remembering a walk that failed closed ────────────────────────────────────
+//
+// THE BOUND ABOVE MAKES ONE WALK FINITE. IT DOES NOT MAKE THE SEQUENCE OF WALKS
+// FINITE. Only a walk that COMPLETES reaches the cache write at the end of the
+// walk body, so a scope that trips the bound was remembered nowhere: the TUI
+// catches the throw into `lastError`, reschedules the sidebar 30s later, and
+// pays the whole walk again. Measured on the regression added with this change:
+// the second call issued 201 further requests, and would have kept doing so for
+// as long as the inbox stayed selected.
+//
+// That is the STEADY STATE on the real mailbox rather than an edge case —
+// 174_482 messages against a MAX_SCAN_ROWS of 100_000 cannot complete, so the
+// production configuration is exactly the one that never caches.
+//
+// The failure is STRUCTURAL: it is a property of the store's size against a
+// compile-time constant, so it cannot resolve on the 60s timescale that suits a
+// count. Re-deriving it also costs the MAXIMUM walk the bound allows (~200
+// requests) rather than a typical one, so it is the most expensive thing to
+// recompute and the least likely to have changed. Hence a longer window than
+// SCOPED_COUNT_TTL_MS.
+//
+// It is deliberately not permanent. A scope that failed during a serve deploy,
+// or before an operator narrowed the read, has to become countable again
+// without restarting the TUI — and a write invalidates it immediately, so a
+// clear() or a move is reflected at once rather than after the window.
+const SCOPED_COUNT_FAILURE_TTL_MS = 15 * 60_000;
+
 // Both figures are the REAL ones. An earlier revision reported
 // `requests * PAGE_LIMIT`, which invented a row count — a 600-row store claimed
 // "scanned 100500 rows … holds more than 100000 messages" and so corroborated
 // the wrong one of the two causes it offers.
+// Marks the ONE failure that is a structural property of the store rather than
+// an event: the walk hit its own bound. Everything else reaching the same catch
+// — a 503, a socket reset, a timeout — is transient and must NOT be remembered,
+// or one network blip freezes a scope's counts for the whole failure window.
+// A property rather than the message text, so rewording the error cannot
+// silently turn a structural failure back into a retried one.
+const SCOPED_COUNT_EXHAUSTED = Symbol.for("emails.scopedCountWalkExhausted");
+
+function isScopedCountWalkExhausted(error: unknown): boolean {
+  return typeof error === "object" && error !== null && SCOPED_COUNT_EXHAUSTED in error;
+}
+
 function scopedCountWalkExhausted(scannedRows: number, requests: number): Error {
-  return new Error(
+  const error = new Error(
     `self-hosted emails: scoped folder counts scanned ${scannedRows} rows over `
       + `${requests} requests without completing. Either this server ignored the `
       + "GET /v1/messages ?to=/?from= recipient filters, or this one address holds more "
       + `than ${MAX_SCAN_ROWS} messages — upgrade the emails-serve deployment, or scope the `
       + "read to a domain instead of an address.",
   );
+  Object.defineProperty(error, SCOPED_COUNT_EXHAUSTED, { value: true, enumerable: false });
+  return error;
 }
 
 // The cache key IS the scope, so two scopes can never share an entry. Both
@@ -937,8 +1020,12 @@ export class SelfHostedMailDataSource implements MailDataSource {
   // not enough on its own: a walk already in flight would still install its
   // now-stale result afterwards and serve it for a full TTL.
   private labelTallyGeneration = 0;
-  private scopedCountsCache = new Map<string, { at: number; counts: MailboxCounts }>();
+  // `ttl` is per-entry because it is derived from what THAT scope's walk cost.
+  private scopedCountsCache = new Map<string, { at: number; ttl: number; counts: MailboxCounts }>();
   private scopedCountsInFlight = new Map<string, { generation: number; promise: Promise<MailboxCounts> }>();
+  // A walk that failed CLOSED is a result too, and until it was remembered here
+  // it was the only outcome this class recomputed from scratch on every refresh.
+  private scopedCountsFailureCache = new Map<string, { at: number; error: unknown }>();
   // Its own fence, moving in lockstep with the tally's but kept separate so the
   // shipped label path is untouched by this change.
   private scopedCountsGeneration = 0;
@@ -1219,6 +1306,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
     // scoped counts must drop too — and any counting walk already in flight must
     // be fenced, since its pages predate this write.
     this.scopedCountsCache.clear();
+    // A remembered failure must drop on the same write, or a clear() or a move
+    // that makes the scope countable again keeps reporting the old failure for
+    // the rest of its (deliberately long) window.
+    this.scopedCountsFailureCache.clear();
     this.scopedCountsGeneration += 1;
   }
 
@@ -1453,7 +1544,14 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const key = scopedCountsKey(scope);
     const generation = this.scopedCountsGeneration;
     const cached = this.scopedCountsCache.get(key);
-    if (cached && this.now() - cached.at < SCOPED_COUNT_TTL_MS) return { ...cached.counts };
+    if (cached && this.now() - cached.at < cached.ttl) return { ...cached.counts };
+    // A remembered failure is re-thrown as the ORIGINAL error, not a fresh one
+    // wrapped in "(cached)": its text already names both causes and both
+    // remedies, and that advice is exactly as true the second time. Rewording it
+    // per-hit would drift the message that the sibling walks' errors are matched
+    // against, to tell the reader something they cannot act on differently.
+    const failed = this.scopedCountsFailureCache.get(key);
+    if (failed && this.now() - failed.at < SCOPED_COUNT_FAILURE_TTL_MS) throw failed.error;
     // Coalesce: the TUI starts a new sidebar load every 30s without awaiting the
     // previous one, so without this the walks stack instead of replacing one
     // another — the accumulation behind the climbing idle CPU. A walk from an
@@ -1464,36 +1562,58 @@ export class SelfHostedMailDataSource implements MailDataSource {
     const walk = (async () => {
       const counts = emptyCounts();
       const seen = new Set<string>();
-      for (const filters of scopeServerFilterSets(scope)) {
-        // PER FILTER SET, not across the union. An address scope reads the same
-        // store twice (?to= then ?from=) and today's bound counts DEDUPED
-        // matches, so a store of 60_000 rows read twice is 60_000 against that
-        // bound and would be 120_000 against a shared one — which would have
-        // thrown on a store that completes today. Each set gets the same
-        // MAX_SCAN_ROWS headroom the single-scan path already has.
-        let requests = 0;
-        let scannedRows = 0;
-        for await (const page of this.listPages(PAGE_LIMIT, filters)) {
-          requests += 1;
-          scannedRows += page.length;
-          if (scannedRows > MAX_SCAN_ROWS || requests > MAX_SCOPED_COUNT_REQUESTS) {
-            throw scopedCountWalkExhausted(scannedRows, requests);
-          }
-          for (const message of page) {
-            // An address scope is a union of two server reads, so the same
-            // message can arrive twice; count it once.
-            if (!scopeMatch(message, scope) || seen.has(message.id)) continue;
-            seen.add(message.id);
-            for (const folder of MAILBOXES) {
-              if (folderMatch(message, folder)) counts[folder] += 1;
+      // Across the WHOLE walk, including both halves of an address's to/from
+      // union: the budget is about what one refill costs the network, and the
+      // caller pays for both halves.
+      let walkRequests = 0;
+      try {
+        for (const filters of scopeServerFilterSets(scope)) {
+          // PER FILTER SET, not across the union. An address scope reads the same
+          // store twice (?to= then ?from=) and today's bound counts DEDUPED
+          // matches, so a store of 60_000 rows read twice is 60_000 against that
+          // bound and would be 120_000 against a shared one — which would have
+          // thrown on a store that completes today. Each set gets the same
+          // MAX_SCAN_ROWS headroom the single-scan path already has.
+          let requests = 0;
+          let scannedRows = 0;
+          for await (const page of this.listPages(PAGE_LIMIT, filters)) {
+            requests += 1;
+            walkRequests += 1;
+            scannedRows += page.length;
+            if (scannedRows > MAX_SCAN_ROWS || requests > MAX_SCOPED_COUNT_REQUESTS) {
+              throw scopedCountWalkExhausted(scannedRows, requests);
+            }
+            for (const message of page) {
+              // An address scope is a union of two server reads, so the same
+              // message can arrive twice; count it once.
+              if (!scopeMatch(message, scope) || seen.has(message.id)) continue;
+              seen.add(message.id);
+              for (const folder of MAILBOXES) {
+                if (folderMatch(message, folder)) counts[folder] += 1;
+              }
             }
           }
         }
+      } catch (error) {
+        // ONLY the walk's own bound is remembered. A 503, a reset socket or a
+        // timeout lands here too and is transient: caching it would freeze this
+        // scope's counts for the whole window over one blip, which is strictly
+        // worse than the re-walk this cache exists to prevent.
+        //
+        // Remembered under the SAME generation fence the success path uses: a
+        // write that landed mid-walk may be exactly what makes this scope
+        // countable again, so a failure from before it must not be installed.
+        if (isScopedCountWalkExhausted(error) && this.scopedCountsGeneration === generation) {
+          this.scopedCountsFailureCache.set(key, { at: this.now(), error });
+        }
+        throw error;
       }
       // Only install if no write landed while this walk was running: those pages
       // are already stale, and caching them would serve pre-write counts for a
       // full TTL.
-      if (this.scopedCountsGeneration === generation) this.scopedCountsCache.set(key, { at: this.now(), counts });
+      if (this.scopedCountsGeneration === generation) {
+        this.scopedCountsCache.set(key, { at: this.now(), ttl: scopedCountTtlMs(walkRequests), counts });
+      }
       return counts;
     })();
 

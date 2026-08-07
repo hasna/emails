@@ -2919,7 +2919,225 @@ describe("SelfHostedMailDataSource — scoped mailboxCounts scan budget", () => 
     // 110_000 synthetic rows: slow to build, so it needs more than the 5s default.
   }, 60_000);
 
+  // A serve whose page is BUILT ONCE and handed back for every cursor. The
+  // property under test is what a REPEAT call costs after the walk has already
+  // failed closed, so rebuilding 100k synthetic rows per walk would make the
+  // test's own cost dominate the thing it measures. Row ids repeat, which the
+  // dedupe set absorbs; `scannedRows` still accumulates page.length, and that is
+  // the bound these exercise.
+  function exhaustingServe(pageCount: number): { fetchImpl: SelfHostedFetch; requests: string[] } {
+    const requests: string[] = [];
+    const page = Array.from({ length: 500 }, (_, i) => listV1(v1(`row${i}`, { to_addrs: [SCOPED] })));
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      const method = (init.method ?? "GET").toUpperCase();
+      requests.push(`${method} ${u.pathname}${u.search}`);
+      const ok = (body: unknown, status = 200) => ({ status, async text() { return JSON.stringify(body); } });
+      const idMatch = u.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+      if (idMatch && method === "PATCH") return ok({ message: v1(decodeURIComponent(idMatch[1]!)) });
+      if (method !== "GET" || u.pathname !== "/v1/messages") return ok({ error: "not found" }, 404);
+      const cursor = u.searchParams.get("cursor") ?? "";
+      const index = cursor === "" ? 0 : Number(cursor.slice("page-".length));
+      if (!Number.isInteger(index) || index < 0 || index >= pageCount) {
+        return ok({ error: "cursor is not a valid pagination cursor" }, 400);
+      }
+      return ok({ messages: page, next_cursor: index + 1 < pageCount ? `page-${index + 1}` : null });
+    };
+    return { fetchImpl, requests };
+  }
+
+  it("does not re-walk a scope whose count walk already failed closed", async () => {
+    // THE RESIDUAL THE ROW BOUND LEFT BEHIND. The bound makes one walk finite;
+    // it does not make the SEQUENCE of walks finite. Only a SUCCEEDING walk
+    // reaches the `scopedCountsCache.set` at the end of the walk body, so a
+    // scope that fails closed is remembered nowhere: the TUI catches the throw
+    // into `lastError`, reschedules the sidebar 30s later, and pays the whole
+    // 200-request walk again — forever, for as long as the inbox stays selected.
+    // On the production mailbox (174_482 messages against MAX_SCAN_ROWS =
+    // 100_000) that is the steady state, not an edge case.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+    // Control: the first walk really did walk, so a low delta below cannot be an
+    // artefact of the serve refusing to page at all.
+    expect(afterFirst).toBeGreaterThan(100);
+
+    clock += 30_000;
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeLessThanOrEqual(1);
+  }, 120_000);
+
+  it("does NOT remember a TRANSIENT failure — one 503 must not freeze a scope for the window", async () => {
+    // The failure cache exists for the walk's own bound, which is a property of
+    // the store. A 503, a reset socket or a timeout reaches the same catch and is
+    // an event: remembering it would take one blip and turn it into fifteen
+    // minutes of missing counts, which is worse than the re-walk being prevented.
+    let failing = true;
+    const requests: string[] = [];
+    const page = [listV1(v1("only", { to_addrs: [SCOPED] }))];
+    const fetchImpl: SelfHostedFetch = async (url, init) => {
+      const u = new URL(url);
+      requests.push(`${(init.method ?? "GET").toUpperCase()} ${u.pathname}`);
+      if (failing) return { status: 503, async text() { return JSON.stringify({ error: "upstream unavailable" }); } };
+      return { status: 200, async text() { return JSON.stringify({ messages: page, next_cursor: null }); } };
+    };
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow();
+    const afterFailure = requests.length;
+    expect(afterFailure).toBeGreaterThan(0);
+
+    // The blip clears. The very next refresh must go back to the network rather
+    // than replay the remembered error.
+    failing = false;
+    clock += 30_000;
+    const counts = await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(requests.length).toBeGreaterThan(afterFailure);
+    expect(counts.inbox).toBe(1);
+  });
+
+  it("retries an exhausted scope once the failure has aged out", async () => {
+    // The other side of the same property: remembering the failure must not
+    // become a permanent lockout. A scope that fails while the server is
+    // mid-deploy, or before an operator narrows the read, has to become
+    // countable again without restarting the TUI.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+
+    // Past SCOPED_COUNT_FAILURE_TTL_MS (15 min). The window is deliberately much
+    // longer than the 60s success TTL — the failure is a property of the store's
+    // size against a compile-time constant, so it cannot resolve on a
+    // count's timescale — but it is a window, not a permanent lockout.
+    clock += 20 * 60_000;
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeGreaterThan(100);
+  }, 120_000);
+
+  it("re-counts a failed scope immediately after a write, instead of serving the remembered failure", async () => {
+    // A remembered failure must be fenced by the same write invalidation the
+    // remembered COUNTS are, or a write that fixes the scope (a clear, a move)
+    // keeps reporting the old failure for a full TTL.
+    const serve = exhaustingServe(400);
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    const afterFirst = serve.requests.length;
+
+    await ds.setRead("row0", true);
+    await expect(ds.mailboxCounts({ source: source(SCOPED) })).rejects.toThrow(/scoped folder counts/i);
+    expect(serve.requests.length - afterFirst).toBeGreaterThan(100);
+  }, 120_000);
+
+  it("keeps a CHEAP scope on the original 60s freshness", async () => {
+    // The budget must not tax the common case. A scope that answers in a
+    // handful of requests has to behave exactly as it did before the cost-aware
+    // TTL existed: stale after 60s, re-walked on the next refresh.
+    const serve = scopedDeepServe(3, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+
+    clock += 30_000; // inside 60s: still served from cache
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBe(afterFirst);
+
+    clock += 31_000; // past 60s: a cheap scope refreshes as it always did
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  });
+
+  it("backs an EXPENSIVE scope off past the 60s TTL, so an idle sidebar stops re-buying it", async () => {
+    // The production shape, measured: the walk SUCCEEDS at ~205 requests and the
+    // 60s TTL then re-buys it every minute — 205 req/min, ~4.4 GB/hour, for one
+    // idle sidebar. 205 requests against a 12/min budget earns ~17min, capped at
+    // SCOPED_COUNT_MAX_TTL_MS (15min).
+    const serve = scopedDeepServe(205, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+    // Control: this scope really is expensive, so the assertions below are about
+    // the budget and not about a walk that never happened.
+    expect(afterFirst).toBeGreaterThan(200);
+
+    // Five minutes of 30s refreshes: every one of these cost a full walk before.
+    for (let i = 0; i < 10; i += 1) {
+      clock += 30_000;
+      await ds.mailboxCounts({ source: source(SCOPED) });
+    }
+    expect(serve.requests.length).toBe(afterFirst);
+
+    // Past the ceiling it refreshes, so counts cannot be frozen indefinitely.
+    clock += 16 * 60_000;
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  }, 60_000);
+
+  it("still drops an expensive scope's long-lived counts the moment a write lands", async () => {
+    // The longer TTL must not outrank invalidation, or a user action appears to
+    // do nothing to the sidebar for up to fifteen minutes.
+    const serve = scopedDeepServe(205, { rowsPerPage: 2 });
+    let clock = 1_000_000;
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "test-key",
+      fetchImpl: serve.fetchImpl,
+      now: () => clock,
+    });
+
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    const afterFirst = serve.requests.length;
+
+    await ds.setRead("p0i0", true);
+    clock += 1_000;
+    await ds.mailboxCounts({ source: source(SCOPED) });
+    expect(serve.requests.length).toBeGreaterThan(afterFirst);
+  }, 60_000);
+
   it("does NOT break scoped stores that complete today with many small pages", async () => {
+    // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
     // THE REGRESSION GUARD FOR THE BOUND ITSELF. An earlier revision capped this
     // walk at 200 REQUESTS; adversarial review measured two stores that resolve
     // exactly on the pre-fix code and threw under that cap. Both sit far below
