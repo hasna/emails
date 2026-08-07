@@ -875,6 +875,39 @@ function clampOffset(offset: number | undefined): number {
   return Math.min(Math.floor(offset), 100_000);
 }
 
+/**
+ * LIKE metacharacters (`\ % _`), escaped so a caller-supplied string is matched
+ * as the LITERAL text the caller typed. Pair every use with `ESCAPE '\'`.
+ */
+function escapeLikeMetacharacters(value: string): string {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+/**
+ * A caller-supplied filter term as a case-folded LITERAL substring pattern.
+ *
+ * The escape is load-bearing, not hygiene. `_` and `%` are LIKE wildcards, so an
+ * unescaped term silently means something wider than the caller typed: `inv_ice`
+ * matched "invoice", and `invoic%` matched every subject starting "invoic". That
+ * costs twice, and the second is the expensive one:
+ *
+ *  1. CORRECTNESS — the API answers with rows that do not contain the term.
+ *  2. A HANG on every API-store client — the CLI re-checks each returned row with
+ *     a LITERAL JS `includes()` (lib/self-hosted-mail-data-source.ts), so a
+ *     wildcard term makes this query match rows the client then rejects, pays one
+ *     extra per-row hydration request for each, and never fills its page.
+ *     Measured on installed 1.3.9 against this store: `--search invoice` returned
+ *     in 11.5s; `--search inv_ice` was still running when a 400s cap killed it.
+ *
+ * Postgres already defaults its LIKE escape to backslash, so `ESCAPE '\'` is
+ * explicit rather than strictly required here — it is written anyway to match
+ * resolveMessageId() and because the sibling SQLite store has NO default and
+ * genuinely requires it.
+ */
+function likeContains(value: string): string {
+  return `%${escapeLikeMetacharacters(value.trim().toLowerCase())}%`;
+}
+
 /** Normalize a possibly-string JSONB column into a string[]. */
 function toStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((v) => String(v));
@@ -2320,19 +2353,19 @@ export class TenantScopedStore {
     if (opts.direction === "outbound") where.push(OUTBOUND_SQL);
     if (opts.folder) for (const predicate of FOLDER_PREDICATES[opts.folder]) where.push(predicate);
     if (opts.to?.trim()) {
-      params.push(`%${opts.to.trim().toLowerCase()}%`);
-      where.push(`lower(to_addrs::text) LIKE $${params.length}`);
+      params.push(likeContains(opts.to));
+      where.push(`lower(to_addrs::text) LIKE $${params.length} ESCAPE '\\'`);
     }
     if (opts.from?.trim()) {
-      params.push(`%${opts.from.trim().toLowerCase()}%`);
-      where.push(`lower(COALESCE(from_addr, '')) LIKE $${params.length}`);
+      params.push(likeContains(opts.from));
+      where.push(`lower(COALESCE(from_addr, '')) LIKE $${params.length} ESCAPE '\\'`);
     }
     if (opts.subject?.trim()) {
-      params.push(`%${opts.subject.trim().toLowerCase()}%`);
-      where.push(`lower(COALESCE(subject, '')) LIKE $${params.length}`);
+      params.push(likeContains(opts.subject));
+      where.push(`lower(COALESCE(subject, '')) LIKE $${params.length} ESCAPE '\\'`);
     }
     if (opts.search?.trim()) {
-      params.push(`%${opts.search.trim().toLowerCase()}%`);
+      params.push(likeContains(opts.search));
       // Stays a scan by design: all text-search operators are non-LEAKPROOF,
       // so under FORCE RLS (0013) no trigram/FTS index can serve this — see
       // the measured note in migration 0019.
@@ -2347,12 +2380,12 @@ export class TenantScopedStore {
       // firehose. The correlated jsonb scan runs per surviving row inside the
       // already-tenant-scoped (tenant_id = $1) query, so it adds no leak surface.
       where.push(
-        `(lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length}
+        `(lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length} ESCAPE '\\'
           OR EXISTS (
             SELECT 1 FROM jsonb_array_elements(
               CASE WHEN jsonb_typeof(messages.attachments) = 'array' THEN messages.attachments ELSE '[]'::jsonb END
             ) AS att
-            WHERE lower(concat_ws(' ', COALESCE(att ->> 'filename', ''), COALESCE(att ->> 'content_type', ''))) LIKE $${params.length}
+            WHERE lower(concat_ws(' ', COALESCE(att ->> 'filename', ''), COALESCE(att ->> 'content_type', ''))) LIKE $${params.length} ESCAPE '\\'
           ))`,
       );
     }
@@ -3452,7 +3485,7 @@ export class TenantScopedStore {
     // match within the tenant, and a leading wildcard would force a non-indexable
     // scan (adversarial review). Escaping — not a hex-charset reject — keeps
     // legacy non-UUID message ids (e.g. "legacy-import-…") resolvable by prefix.
-    const likePrefix = value.replace(/[\\%_]/g, "\\$&");
+    const likePrefix = escapeLikeMetacharacters(value);
     const rows = await this.client.many<{ id: string }>(
       `SELECT id FROM messages WHERE (id)::text LIKE $1 || '%' ESCAPE '\\' AND tenant_id = $2 ORDER BY id LIMIT 2`,
       [likePrefix, this.tenantId],

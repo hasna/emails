@@ -1935,6 +1935,83 @@ function buildConformanceCases(): ConformanceCase[] {
       },
     },
 
+    {
+      id: "messages/search-treats-like-metacharacters-as-literal-text",
+      what: "a search term carrying LIKE metacharacters (_ % \\) matches those characters literally, never as wildcards",
+      requires: "keysetPagination",
+      async exercise(store: EmailStore): Promise<unknown> {
+        // Every store reaches its search through SQL LIKE, where `_` and `%` are
+        // wildcards. Unescaped, the store answers with rows the caller's term does
+        // not contain — and on the API store that also HANGS the CLI, which
+        // re-checks each returned row with a literal JS includes(): the server
+        // matches rows the client then rejects, one extra per-row hydration each,
+        // and the page never fills. Measured on 1.3.9: `--search invoice` 11.5s,
+        // `--search inv_ice` still running at a 400s cap.
+        //
+        // This case lives here, in the shared suite, rather than twice in two
+        // store tests: the escaping regex is one line and cheap to duplicate, but
+        // the SEMANTICS are what drift, and this suite is what binds every
+        // implementation to the same ones.
+        const shared = token("likemeta");
+        const body = "this body says";
+        const write = async (tag: string, text: string) => must(
+          store.messages.createMessage({
+            ...inboundMessage(`${tag}-${token(tag)}@example.test`, `${shared} ${tag}`),
+            body_text: `${body} ${text}`,
+          }),
+          `createMessage (${tag})`,
+        );
+        // `bait` is the row a WILDCARD reading matches and a LITERAL one does not:
+        // `inv_ice` matches "invoice" only if `_` stands in for the "o".
+        const bait = await write("bait", "invoice with no underscore");
+        const under = await write("under", "inv_ice with a real underscore");
+        const pct = await write("pct", "100%pure with a real percent");
+        const back = await write("back", "back\\slash with a real backslash");
+
+        const ids = async (search: string): Promise<string[] | { refused: unknown }> => {
+          const answer = await store.messages.listMessages({ subject: shared, search, limit: 50 });
+          if (!answer.ok) return { refused: answer };
+          return answer.value.items.map((item) => item.id);
+        };
+
+        // POSITIVE CONTROL. Without it, a store that answered every search with an
+        // empty page would pass every negative assertion below.
+        const all = await ids(body);
+        if (!Array.isArray(all)) return all.refused;
+        same(all.length, 4, "a plain term reaches all four written rows, so the search works at all");
+
+        // `_` — both directions. It must match the literal underscore and must NOT
+        // reach the bait row it would match as a wildcard.
+        const underscore = await ids("inv_ice");
+        if (!Array.isArray(underscore)) return underscore.refused;
+        same(underscore.join(","), under.id, "a term with _ matches the literal underscore and not the wildcard bait");
+
+        // `%` — both directions. `says inv%ice` as a wildcard spans "says invoice".
+        const wildPercent = await ids("says inv%ice");
+        if (!Array.isArray(wildPercent)) return wildPercent.refused;
+        same(wildPercent.length, 0, "a % that would span the bait row as a wildcard matches nothing literally");
+        const litPercent = await ids("100%pure");
+        if (!Array.isArray(litPercent)) return litPercent.refused;
+        same(litPercent.join(","), pct.id, "a term with % matches the row carrying a literal percent");
+
+        // `\` — the escape character itself must survive as ordinary text.
+        const backslash = await ids("back\\slash");
+        if (!Array.isArray(backslash)) return backslash.refused;
+        same(backslash.join(","), back.id, "a term with a backslash matches the row carrying a literal backslash");
+
+        stash("messages/search-treats-like-metacharacters-as-literal-text", { under: under.id, bait: bait.id });
+        return store.messages.listMessages({ subject: shared, search: "inv_ice", limit: 50 });
+      },
+      expect(outcome: unknown): void {
+        const state = stashed("messages/search-treats-like-metacharacters-as-literal-text");
+        const page = pageOf(value(outcome, "listMessages(search with _)"), "metacharacter page");
+        same(page.items.length, 1, "the underscore term returns exactly one row");
+        const item = page.items[0];
+        if (item === undefined) fail("the metacharacter page is empty");
+        same(item.id, state["under"], "and it is the row carrying a literal underscore, not the wildcard bait");
+      },
+    },
+
     // ---- attachmentContent ----------------------------------------------
     {
       id: "attachments/content-lookup-answers-with-the-stored-bytes",

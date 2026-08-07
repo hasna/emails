@@ -77,8 +77,28 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, "\\$&");
 }
 
+/**
+ * A caller-supplied filter term as a LITERAL substring pattern.
+ *
+ * The escape is not optional and not cosmetic. `_` and `%` are LIKE wildcards,
+ * so an unescaped term silently means something wider than the user typed:
+ * `inv_ice` matched "invoice", and `invoic%` matched every subject beginning
+ * "invoic". Two costs, and the second is the expensive one:
+ *
+ *  1. CORRECTNESS — this store answers with rows the term does not contain.
+ *  2. A HANG on the API store — the CLI re-checks every returned row with a
+ *     LITERAL JS `includes()` (self-hosted-mail-data-source.ts), so a wildcard
+ *     term makes the server match rows the client then rejects, one extra
+ *     per-row HTTP hydration each, and the walk never fills. Measured on
+ *     installed 1.3.9: `--search invoice` 11.5s, `--search inv_ice` still
+ *     running at a 400s cap.
+ *
+ * SQLite has NO default LIKE escape character, so every pattern built here MUST
+ * be used with an explicit `ESCAPE '\'` clause. Escaping without that clause is
+ * worse than not escaping: the backslash becomes a character to match.
+ */
 function lowered(value: string): string {
-  return `%${value.trim().toLowerCase()}%`;
+  return `%${escapeLike(value.trim().toLowerCase())}%`;
 }
 
 function normalizeLabel(label: string): string {
@@ -106,15 +126,15 @@ function messageFilters(opts: ListMessagesOptions | undefined): MessageQuery {
   // than an answer; a JS caller reaches this even though TypeScript cannot.
   if (opts?.folder) conditions.push(...(FOLDER_PREDICATES[opts.folder] ?? []));
   if (opts?.to?.trim()) {
-    conditions.push("lower(COALESCE(m.to_addrs_json, '')) LIKE ?");
+    conditions.push("lower(COALESCE(m.to_addrs_json, '')) LIKE ? ESCAPE '\\'");
     params.push(lowered(opts.to));
   }
   if (opts?.from?.trim()) {
-    conditions.push("lower(COALESCE(m.from_addr, '')) LIKE ?");
+    conditions.push("lower(COALESCE(m.from_addr, '')) LIKE ? ESCAPE '\\'");
     params.push(lowered(opts.from));
   }
   if (opts?.subject?.trim()) {
-    conditions.push("lower(COALESCE(m.subject, '')) LIKE ?");
+    conditions.push("lower(COALESCE(m.subject, '')) LIKE ? ESCAPE '\\'");
     params.push(lowered(opts.subject));
   }
   if (opts?.search?.trim()) {
@@ -123,14 +143,14 @@ function messageFilters(opts: ListMessagesOptions | undefined): MessageQuery {
     // the server: a message whose only occurrence of the term is an attachment
     // name must still be found.
     conditions.push(`(
-      lower(COALESCE(m.from_addr, '')) LIKE ?
-      OR lower(COALESCE(m.to_addrs_json, '')) LIKE ?
-      OR lower(COALESCE(m.subject, '')) LIKE ?
-      OR lower(COALESCE(m.body_text, '')) LIKE ?
+      lower(COALESCE(m.from_addr, '')) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(m.to_addrs_json, '')) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(m.subject, '')) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(m.body_text, '')) LIKE ? ESCAPE '\\'
       OR EXISTS (
         SELECT 1 FROM json_each(m.attachments_json) att
-         WHERE lower(COALESCE(json_extract(att.value, '$.filename'), '')) LIKE ?
-            OR lower(COALESCE(json_extract(att.value, '$.content_type'), '')) LIKE ?
+         WHERE lower(COALESCE(json_extract(att.value, '$.filename'), '')) LIKE ? ESCAPE '\\'
+            OR lower(COALESCE(json_extract(att.value, '$.content_type'), '')) LIKE ? ESCAPE '\\'
       )
     )`);
     for (let index = 0; index < 6; index += 1) params.push(needle);
