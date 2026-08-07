@@ -204,15 +204,19 @@ describe.skipIf(!pgClient)("HttpEmailStore conformance against the real /v1 serv
       expect(conformanceFailures(report)).toEqual([]);
       expect(() => assertUniformCaseCoverage(report, CONFORMANCE_CASES)).not.toThrow();
 
-      // THE NUMBERS, pinned exactly rather than as inequalities. 54 / 8 / 0 is the claim
+      // THE NUMBERS, pinned exactly rather than as inequalities. 55 / 8 / 0 is the claim
       // this phase makes about the real service; the previous phase measured 36 / 8 / 4
       // against it, and the four failures were the outbound writes that had no route.
       // The 54th pass is `resources/boolean-equality-filter-round-trip` (OPE105-00241):
       // the SQLite arm mismatched boolean equality filters and was fixed at the store,
       // so both arms now conform — the case proves parity, it does not paper over it.
+      // The 55th is `messages/search-treats-like-metacharacters-as-literal-text`: both
+      // stores passed a caller's search term to SQL LIKE unescaped, so `_` and `%` were
+      // wildcards rather than literals. It requires `keysetPagination`, which this store
+      // declares true, so it is counted as a pass and never as a refusal.
       const counted = totals(report);
-      expect(CONFORMANCE_CASES.length).toBe(62);
-      expect(counted).toEqual({ passed: 54, refused: 8, failed: 0 });
+      expect(CONFORMANCE_CASES.length).toBe(63);
+      expect(counted).toEqual({ passed: 55, refused: 8, failed: 0 });
       // The 8 refusals are exactly the cases whose capability this store declares false —
       // never one it claims to support.
       const refusedCapabilities = new Set<string>();

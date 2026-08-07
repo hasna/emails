@@ -749,6 +749,7 @@ describe("conformance harness", () => {
       "messages/list-filters-narrow-to-the-written-message",
       "messages/raw-mime-carries-the-written-headers",
       "messages/resolve-id-answers-not-found-for-an-unknown-id",
+      "messages/search-treats-like-metacharacters-as-literal-text",
       "messages/status-patch-round-trip",
       "messages/upsert-is-idempotent-on-source-id",
       "policy/a-suspended-sender-is-not-allowed",
