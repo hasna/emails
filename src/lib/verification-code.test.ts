@@ -595,7 +595,7 @@ describe("a candidate read that cannot be performed refuses", () => {
     try {
       await listVerificationCodeCandidates("me@example.com", {}, refusing);
     } catch (error) {
-      thrown = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
+      thrown = error instanceof Error ? error.message : String(error);
     }
 
     expect(thrown).not.toBe("");

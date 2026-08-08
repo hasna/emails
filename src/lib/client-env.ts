@@ -100,6 +100,11 @@ export interface EmailsClientEnvSecretLoad {
 
 const loadedClientEnvSecrets = new WeakMap<NodeJS.ProcessEnv, string>();
 
+function safeProcessErrorCode(error: unknown): string | null {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : null;
+}
+
 function parseClientEnvSecret(raw: string): Record<string, string> {
   try {
     const parsed = JSON.parse(raw);
@@ -203,10 +208,17 @@ export function loadEmailsClientEnvSecret(env: NodeJS.ProcessEnv = process.env):
     maxBuffer: 1024 * 1024,
   });
   if (result.error) {
-    throw new Error(`${EMAILS_CLIENT_ENV_SECRET_ENV} failed to load '${secretPath}' from the secrets vault: ${result.error.message}`);
+    const code = safeProcessErrorCode(result.error);
+    throw new Error(
+      `${EMAILS_CLIENT_ENV_SECRET_ENV} failed to load from the secrets vault because the secrets command could not start` +
+        `${code ? ` (${code})` : ""}.`,
+    );
   }
   if (result.status !== 0) {
-    throw new Error(`${EMAILS_CLIENT_ENV_SECRET_ENV} failed to load '${secretPath}' from the secrets vault.`);
+    throw new Error(
+      `${EMAILS_CLIENT_ENV_SECRET_ENV} failed to load from the secrets vault because the secrets command exited with status ` +
+        `${result.status ?? "unknown"}.`,
+    );
   }
 
   const loaded = parseClientEnvSecret(result.stdout ?? "");
@@ -221,7 +233,8 @@ export function loadEmailsClientEnvSecret(env: NodeJS.ProcessEnv = process.env):
   if (!hasClientEnvCredential(env)) missing.push(CLIENT_ENV_CREDENTIAL_KEYS.join(" or "));
   if (missing.length > 0) {
     throw new Error(
-      `${EMAILS_CLIENT_ENV_SECRET_ENV} '${secretPath}' must contain ${CLIENT_ENV_REQUIRED_KEYS.join(", ")} ` +
+      `${EMAILS_CLIENT_ENV_SECRET_ENV} loaded from the secrets vault, but its entry must contain ` +
+        `${CLIENT_ENV_REQUIRED_KEYS.join(", ")} ` +
         `and a credential (${CLIENT_ENV_CREDENTIAL_KEYS.join(" or ")}); missing ${missing.join(", ")}.`,
     );
   }
