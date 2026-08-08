@@ -51,6 +51,10 @@ All notable changes to `@hasna/emails` are documented here.
 - perf(cli): `emails domain warm-list` reads the sent-mail ledger **once per page** instead of once per row, via a new `getTodaySentCountsByDomain`. In self-hosted mode each read is a synchronous `curl` spawn over today's messages, so a default 20-row page cost 20 identical requests.
 - refactor(warming): ramp position (`current_day`, `total_days`, `progress_percent`, `today_limit`, `today_sent`) is computed once in `describeWarmingProgress` and shared by the CLI, the MCP tools, the local `GET /api/warming/:domain` route, and `formatWarmingStatus` — replacing four copies of the same date math, one of which had already drifted from the server. `formatWarmingStatus` and `describeWarmingProgress` accept precomputed inputs so a single command does not read the sent-mail ledger more than once.
 
+## 1.3.13 (2026-08-08)
+
+- **fix(cli): distinguish a missing attachment message from a non-exact message-id prefix.** An exact full message id absent from the active inbox store now reports `not_found`; a resolvable prefix still reports that attachment downloads require the exact full message id.
+
 ## 1.3.12 (2026-08-08)
 
 - **feat(send): add the controlled production-send envelope.** A package-owned CLI reads a private descriptor, keeps message fields off process, log, and receipt surfaces, uses server-owned idempotency, writes atomic mode-0600 receipts with bounded replay/readback proof, and preserves the legacy inline send path.
