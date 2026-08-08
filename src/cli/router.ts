@@ -41,6 +41,7 @@ export const knownCommandNames = new Set([
   "address",
   "addresses",
   "send",
+  "send-controlled",
   "email",
   "log",
   "search",
@@ -116,7 +117,8 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "domains": return ["domain"];
     case "address":
     case "addresses": return ["address"];
-    case "send": return ["send"];
+    case "send":
+    case "send-controlled": return ["send"];
     case "email":
     case "log":
     case "search":

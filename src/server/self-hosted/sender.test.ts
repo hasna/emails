@@ -5,7 +5,11 @@
 // "uncertain" and require reconciliation.
 
 import { describe, expect, it } from "bun:test";
-import { buildSelfHostedSender, classifyProviderSendError } from "./sender.js";
+import {
+  buildSelfHostedSender,
+  classifyProviderSendError,
+  providerSendLogFields,
+} from "./sender.js";
 
 function awsError(name: string, message: string, httpStatusCode: number | undefined, fault?: "client" | "server"): Error {
   const err = new Error(message);
@@ -61,6 +65,18 @@ describe("classifyProviderSendError", () => {
   it("caps the surfaced detail so a pathological provider message cannot flood the response", () => {
     const outcome = classifyProviderSendError(awsError("MessageRejected", "x".repeat(10_000), 400, "client"));
     expect(outcome.detail.length).toBeLessThanOrEqual(600);
+  });
+
+  it("keeps provider detail and private mailbox text out of structured server logs", () => {
+    const privateSentinel = "PRIVATE_RECIPIENT_SENTINEL@external.example";
+    const outcome = classifyProviderSendError(awsError(
+      "MessageRejected",
+      `Email address is not verified: ${privateSentinel}`,
+      400,
+      "client",
+    ));
+    expect(outcome.detail).toContain(privateSentinel);
+    expect(JSON.stringify(providerSendLogFields(outcome))).not.toContain(privateSentinel);
   });
 });
 
