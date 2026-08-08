@@ -50,6 +50,26 @@ export type ProviderSendErrorOutcome = {
   httpStatus?: number;
 };
 
+/**
+ * Safe structured fields for provider-failure logs. The provider's message can
+ * contain sender or recipient addresses, so it stays in the authenticated API
+ * response for ordinary inline clients but is never copied into server logs.
+ */
+export function providerSendLogFields(outcome: ProviderSendErrorOutcome): {
+  outcome: ProviderSendErrorOutcome["kind"];
+  provider_error: string;
+  http_status: number | null;
+} {
+  const providerError = /^[A-Za-z0-9_.:-]{1,100}$/.test(outcome.providerErrorName)
+    ? outcome.providerErrorName
+    : "ProviderError";
+  return {
+    outcome: outcome.kind,
+    provider_error: providerError,
+    http_status: outcome.httpStatus ?? null,
+  };
+}
+
 const PROVIDER_ERROR_DETAIL_MAX_CHARS = 600;
 
 /** Read a numeric HTTP status from the shapes real provider SDKs throw. */

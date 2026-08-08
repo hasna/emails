@@ -19,6 +19,7 @@ import {
   evaluateAttachmentCaps,
   evaluateSenderPreflight,
 } from "../../lib/send-preflight.js";
+import { registerControlledSendCommands } from "./send-controlled.js";
 
 const MAX_ATTACHMENT_SIZE = LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
 const MAX_ATTACHMENT_COUNT = LOCAL_SEND_ATTACHMENT_LIMITS.maxFiles;
@@ -103,7 +104,8 @@ function readSendAttachments(paths: string[] | undefined): MailSendAttachment[] 
   return attachments;
 }
 
-export function registerSendCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
+export function registerSendCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
+  registerControlledSendCommands(program, output);
   program
     .command("send")
     .description("Send an email")

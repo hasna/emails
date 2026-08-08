@@ -144,6 +144,10 @@ export interface V1Stub {
   list(resource: string): Promise<Array<Record<string, unknown>>>;
   /** Read the entire store back from the stub. */
   dump(): Promise<V1StubResources>;
+  /** Select a deterministic send outcome for controlled-send regressions. */
+  setSendBehavior(behavior: "normal" | "delayed_success" | "post_send_warning"): Promise<void>;
+  /** Read the number of provider-send calls made since the last reset. */
+  sendStats(): Promise<{ providerCalls: number }>;
   /**
    * Emulate a non-total list ORDER BY: before every list window the named
    * resources (or all of them) are rotated by `rotate` positions, so a
@@ -312,6 +316,10 @@ let bootstrapped = false;
 let listRotate = 0;
 let listRotateResources = null;
 let listRotateCalls = {};
+// Test-only send controls. They stay outside the dumped resource store so the
+// fixture cannot accidentally expose them as product data.
+let sendBehavior = "normal";
+let providerSendCalls = 0;
 // Declared ORDER BY per generic resource, injected from the server's own registry
 // (SELF_HOSTED_RESOURCES + resourceListOrderBy) so the stub orders lists the way the
 // real route does. Shape: { resource: [{ column, desc }, ...] }.
@@ -780,6 +788,13 @@ function detailRow(row) {
   return out;
 }
 
+function publicSendRow(row) {
+  const out = detailRow(row);
+  delete out.idempotency_key;
+  delete out.send_payload_hash;
+  return out;
+}
+
 function messageCounts() {
   const messages = rowsFor("messages");
   const inboxRows = messages.filter(function (r) {
@@ -825,10 +840,24 @@ const server = Bun.serve({
       listRotateResources = null;
       listRotateCalls = {};
       listQueries = {};
+      sendBehavior = "normal";
+      providerSendCalls = 0;
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
       return json({ resources: store });
+    }
+    if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__send_behavior") {
+      const body = await req.json().catch(function () { return {}; });
+      const next = String(body.behavior || "");
+      if (next !== "normal" && next !== "delayed_success" && next !== "post_send_warning") {
+        return json({ error: "unsupported send behavior" }, 400);
+      }
+      sendBehavior = next;
+      return json({ ok: true });
+    }
+    if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__send_stats") {
+      return json({ provider_calls: providerSendCalls });
     }
     // Test-only: the query string of every generic list request for a resource, in
     // order. A client that filters only in memory shows nothing but limit/offset.
@@ -1070,6 +1099,31 @@ const server = Bun.serve({
     }
     if (resource === "messages" && sub === "send" && req.method === "POST") {
       const body = await req.json().catch(function () { return {}; });
+      const key = typeof body.idempotency_key === "string" ? body.idempotency_key : "";
+      const existing = rowsFor("messages").find(function (row) {
+        return key && row.idempotency_key === key;
+      });
+      if (existing) {
+        if (existing.send_state === "sent") {
+          return json({
+            message: publicSendRow(existing),
+            provider: "stub",
+            sent: true,
+            idempotent_replay: true,
+            provider_message_id: existing.provider_message_id,
+          });
+        }
+        return json({
+          error: "send outcome is uncertain; reconcile the provider message before any retry",
+          reason: "provider_outcome_uncertain",
+          sent: null,
+          message: detailRow(existing),
+          retry_safe: false,
+          reconciliation_required: true,
+        }, 409);
+      }
+      providerSendCalls += 1;
+      if (sendBehavior === "delayed_success") await Bun.sleep(300);
       const now = new Date().toISOString();
       const providerMessageId = "stub-provider-" + (rowsFor("messages").length + 1);
       const rec = normalizeMessageRow({
@@ -1085,17 +1139,50 @@ const server = Bun.serve({
         provider_message_id: providerMessageId,
         message_id: "stub-" + (rowsFor("messages").length + 1),
         is_read: true,
-        send_state: "sent",
+        send_state: sendBehavior === "post_send_warning" ? "uncertain" : "sent",
+        idempotency_key: key,
         created_at: now,
         updated_at: now,
       });
       rowsFor("messages").push(rec);
+      if (sendBehavior === "post_send_warning") {
+        return json({
+          message: publicSendRow(rec),
+          provider: "stub",
+          sent: true,
+          provider_message_id: providerMessageId,
+          warning: "the provider accepted the message but the terminal ledger write failed",
+          retry_safe: false,
+        }, 202);
+      }
       return json({
-        message: detailRow(rec),
+        message: publicSendRow(rec),
         provider: "stub",
         sent: true,
         provider_message_id: providerMessageId,
       }, 202);
+    }
+    if (resource === "messages" && sub === "send-intents" && parts[3] === "lookup" && req.method === "POST") {
+      const body = await req.json().catch(function () { return {}; });
+      const key = typeof body.idempotency_key === "string" ? body.idempotency_key : "";
+      const existing = rowsFor("messages").find(function (row) {
+        return key && row.idempotency_key === key;
+      });
+      return json({
+        send_intent: existing
+          ? {
+              found: true,
+              tombstoned: false,
+              reconciliation_required: existing.send_state === "uncertain",
+              message: { id: existing.id, send_state: existing.send_state },
+            }
+          : {
+              found: false,
+              tombstoned: false,
+              reconciliation_required: false,
+              message: null,
+            },
+      });
     }
     // Send-intent reconciliation: enough of the real contract for CLI tests.
     if (resource === "messages" && sub === "send-intents" && parts[3] === "uncertain" && req.method === "GET") {
@@ -1409,6 +1496,20 @@ export async function startV1Stub(options: V1StubOptions = {}): Promise<V1Stub> 
       if (!res.ok) throw new Error(`v1-stub __dump failed: HTTP ${res.status}`);
       const body = (await res.json()) as { resources?: V1StubResources };
       return body.resources ?? {};
+    },
+    async setSendBehavior(behavior) {
+      const res = await fetch(`${baseUrl}/v1/__send_behavior`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ behavior }),
+      });
+      if (!res.ok) throw new Error(`v1-stub __send_behavior failed: HTTP ${res.status}`);
+    },
+    async sendStats() {
+      const res = await fetch(`${baseUrl}/v1/__send_stats`);
+      if (!res.ok) throw new Error(`v1-stub __send_stats failed: HTTP ${res.status}`);
+      const body = (await res.json()) as { provider_calls?: number };
+      return { providerCalls: body.provider_calls ?? 0 };
     },
     async setListOrderInstability(rotate, resources) {
       const res = await fetch(`${baseUrl}/v1/__list_order`, {

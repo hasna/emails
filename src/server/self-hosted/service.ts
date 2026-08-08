@@ -57,7 +57,11 @@ import {
   RESEND_INBOUND_V1_WEBHOOK_PATH,
   SES_INBOUND_V1_WEBHOOK_PATH,
 } from "../webhooks/receivers.js";
-import { classifyProviderSendError, type SelfHostedSender } from "./sender.js";
+import {
+  classifyProviderSendError,
+  providerSendLogFields,
+  type SelfHostedSender,
+} from "./sender.js";
 import {
   isTenantOperator,
   resolveRequestContext,
@@ -1439,10 +1443,7 @@ export async function handleSelfHostedRequest(
         console.error("[emails-self-hosted] provider send failed", {
           message_id: claimed.id,
           provider: deps.sender.provider,
-          outcome: outcome.kind,
-          provider_error: outcome.providerErrorName,
-          http_status: outcome.httpStatus ?? null,
-          detail: outcome.detail,
+          ...providerSendLogFields(outcome),
         });
         if (outcome.kind === "rejected") {
           // The provider REFUSED the request (4xx): nothing was sent. This is
