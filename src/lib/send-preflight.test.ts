@@ -91,41 +91,59 @@ describe("attachment caps are evaluated, not merely printed", () => {
     )).toEqual([]);
   });
 
+  // These fixtures are DERIVED from the caps rather than written as literals.
+  // They used to be fixed sizes (600KiB, 400KiB) chosen against a 512KiB/768KiB
+  // cap, so raising the caps turned every "oversize" fixture into a legal one and
+  // the suite asserted the opposite of what it was named for. A fixture that
+  // encodes a constant is the same drift this module exists to prevent.
+  const SH = SELF_HOSTED_SEND_ATTACHMENT_LIMITS;
+
   it("catches a per-file overage that the old preview printed as fine", () => {
-    // 600KiB is under the 25MB global ceiling readSendAttachments enforces, so
+    // Still under the much larger local ceiling readSendAttachments enforces, so
     // nothing else in the pipeline would have caught it before the server did.
+    const oversize = SH.maxBytesPerFile + 1;
+    expect(oversize).toBeLessThanOrEqual(LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile);
     const findings = evaluateAttachmentCaps(
-      [{ filename: "big.pdf", bytes: 600 * K }],
-      SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
+      [{ filename: "big.pdf", bytes: oversize }],
+      SH,
     );
     expect(findings.map((f) => f.rule)).toContain("bytes_per_file");
     expect(findings[0]!.detail).toContain("big.pdf");
   });
 
   it("catches a total overage even when every file is individually legal", () => {
-    const files = Array.from({ length: 3 }, (_, i) => ({ filename: `f${i}.pdf`, bytes: 400 * K }));
-    const findings = evaluateAttachmentCaps(files, SELF_HOSTED_SEND_ATTACHMENT_LIMITS);
+    // Enough max-size files to exceed the total, each one legal on its own.
+    const count = Math.ceil(SH.maxTotalBytes / SH.maxBytesPerFile) + 1;
+    expect(count).toBeLessThanOrEqual(SH.maxFiles);
+    const files = Array.from({ length: count }, (_, i) => ({ filename: `f${i}.pdf`, bytes: SH.maxBytesPerFile }));
+    const findings = evaluateAttachmentCaps(files, SH);
     expect(findings.map((f) => f.rule)).toContain("total_bytes");
     expect(findings.map((f) => f.rule)).not.toContain("bytes_per_file");
   });
 
   it("catches too many files", () => {
-    const files = Array.from({ length: 6 }, (_, i) => ({ filename: `f${i}.txt`, bytes: 1 }));
-    expect(evaluateAttachmentCaps(files, SELF_HOSTED_SEND_ATTACHMENT_LIMITS).map((f) => f.rule))
+    const files = Array.from({ length: SH.maxFiles + 1 }, (_, i) => ({ filename: `f${i}.txt`, bytes: 1 }));
+    expect(evaluateAttachmentCaps(files, SH).map((f) => f.rule))
       .toContain("file_count");
   });
 
   it("applies the LOCAL caps in local mode, not the server's", () => {
-    // A 600KiB file is refused self-hosted and fine locally. Predicting the wrong
-    // mode's limits is the same class of defect as not predicting at all.
-    const files = [{ filename: "big.pdf", bytes: 600 * K }];
+    // A file over the self-hosted per-file cap but inside the local one is
+    // refused self-hosted and fine locally. Predicting the wrong mode's limits is
+    // the same class of defect as not predicting at all.
+    const bytes = SH.maxBytesPerFile + 1;
+    expect(bytes).toBeLessThanOrEqual(LOCAL_SEND_ATTACHMENT_LIMITS.maxBytesPerFile);
+    const files = [{ filename: "big.pdf", bytes }];
     expect(evaluateAttachmentCaps(files, LOCAL_SEND_ATTACHMENT_LIMITS)).toEqual([]);
-    expect(evaluateAttachmentCaps(files, SELF_HOSTED_SEND_ATTACHMENT_LIMITS).length).toBeGreaterThan(0);
+    expect(evaluateAttachmentCaps(files, SH).length).toBeGreaterThan(0);
   });
 
   it("reports every distinct violation rather than stopping at the first", () => {
-    const files = Array.from({ length: 6 }, (_, i) => ({ filename: `f${i}.pdf`, bytes: 600 * K }));
-    const rules = new Set(evaluateAttachmentCaps(files, SELF_HOSTED_SEND_ATTACHMENT_LIMITS).map((f) => f.rule));
+    const files = Array.from(
+      { length: SH.maxFiles + 1 },
+      (_, i) => ({ filename: `f${i}.pdf`, bytes: SH.maxBytesPerFile + 1 }),
+    );
+    const rules = new Set(evaluateAttachmentCaps(files, SH).map((f) => f.rule));
     expect(rules).toEqual(new Set(["file_count", "bytes_per_file", "total_bytes"]));
   });
 });

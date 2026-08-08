@@ -3,6 +3,7 @@ import { mintApiKey, verifyApiKey } from "@hasna/contracts/auth";
 import type { TypedQueryClient } from "../../storage-kit/index.js";
 import { EmailsSelfHostedStore } from "./store.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import { SELF_HOSTED_SEND_ATTACHMENT_LIMITS } from "../../lib/send-attachment-limits.js";
 import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
@@ -743,7 +744,12 @@ describe("Emails self-hosted inbound messages", () => {
       }),
     }));
     expect((await send("not-base64"))?.status).toBe(400);
-    expect((await send(Buffer.alloc(513 * 1024).toString("base64")))?.status).toBe(400);
+    // Derived from the cap, not written as a literal. This read `513 * 1024`,
+    // one KiB over the old 512KiB per-file cap — so raising the cap turned the
+    // fixture into a legal attachment and the assertion asserted the opposite of
+    // its own name.
+    const overCap = Buffer.alloc(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile + 1);
+    expect((await send(overCap.toString("base64")))?.status).toBe(400);
   });
 
   it("rejects outbound header injection before reservation or provider send", async () => {
