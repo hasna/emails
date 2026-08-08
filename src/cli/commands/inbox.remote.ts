@@ -907,7 +907,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       try {
         const ds = resolveMailDataSource();
         const msg = opts.download ? await ds.getMessage(emailId) : await requireMessage(ds, emailId);
-        if (!msg || (opts.download && msg.id !== emailId)) {
+        if (!msg) {
+          throw new Error("attachment message not found in the active inbox store");
+        }
+        if (opts.download && msg.id !== emailId) {
           throw new Error("attachment download requires the exact full message id");
         }
         const fullId = msg.id;

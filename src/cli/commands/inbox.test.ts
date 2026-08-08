@@ -1234,6 +1234,35 @@ describe("inbox attachments", () => {
 // ─── inbox attachment ────────────────────────────────────────────────────────
 
 describe("inbox attachment", () => {
+  it("reports an exact full message id missing from the active store as not found", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-missing-attachment-"));
+    try {
+      const failed = await runInboxSubprocessExpectingExit([
+        "--json",
+        "inbox",
+        "attachment",
+        id,
+        "--download",
+        "--index",
+        "0",
+        "--output-dir",
+        dir,
+      ]);
+
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stdout).toBe("");
+      const payload = JSON.parse(failed.stderr) as {
+        error: { code: string; message: string };
+      };
+      expect(payload.error.code).toBe("not_found");
+      expect(payload.error.message).toBe("attachment message not found in the active inbox store");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("lists attachment metadata (no local paths in self-hosted mode)", async () => {
     const email = seedEmail({
       subject: "Has attachments",
