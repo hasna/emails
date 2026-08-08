@@ -34,6 +34,7 @@ import {
   SelfHostedResponseSizeError,
   validateSelfHostedSdkSuccessResponse,
 } from "../lib/self-hosted-wire.js";
+import { redactStructuredDiagnosticValue } from "../lib/redaction.js";
 
 const APP = "emails";
 
@@ -129,7 +130,9 @@ function credentialSettingsSignature(candidates: readonly EmailsClientCredential
 
 function assertSupportedMode(modeRaw: string | undefined): void {
   if (modeRaw !== "self_hosted") {
-    const received = modeRaw ? `received '${modeRaw}'` : "no explicit mode was selected";
+    const received = modeRaw
+      ? `received '${redactStructuredDiagnosticValue(modeRaw)}'`
+      : "no explicit mode was selected";
     throw new Error(
       `${APP}: self-hosted configuration requires EMAILS_MODE=self_hosted; ${received}. ${CONFIG_HELP}`,
     );
