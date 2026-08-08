@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -47,6 +47,24 @@ function selfHostedEnv(): NodeJS.ProcessEnv {
     EMAILS_MODE: "self_hosted",
     EMAILS_SELF_HOSTED_URL: stub.baseUrl,
     EMAILS_SELF_HOSTED_API_KEY: stub.apiKey,
+  };
+}
+
+function rejectedClientEnvPointer(): { env: NodeJS.ProcessEnv; sentinel: string } {
+  const env = isolatedEnv();
+  const binDir = mkdtempSync(join(tmpdir(), "emails-cli-client-env-rejection-"));
+  tempDirs.push(binDir);
+  const secretsBin = join(binDir, "secrets");
+  writeFileSync(secretsBin, "#!/bin/sh\nexit 2\n");
+  chmodSync(secretsBin, 0o700);
+  const sentinel = "OPE105_00301_SYNTHETIC_SENTINEL";
+  return {
+    env: {
+      ...env,
+      PATH: `${binDir}:${env.PATH ?? ""}`,
+      EMAILS_CLIENT_ENV_SECRET: JSON.stringify({ fixture: sentinel }),
+    },
+    sentinel,
   };
 }
 
@@ -165,6 +183,54 @@ describe("CLI JSON output safety", () => {
 });
 
 describe("CLI self-hosted bootstrap failures", () => {
+  it("redacts rejected client-env input from human and JSON stderr", () => {
+    for (const json of [false, true]) {
+      const { env, sentinel } = rejectedClientEnvPointer();
+      const result = runCli(json ? ["--json", "status"] : ["status"], env);
+      const stdout = text(result.stdout);
+      const stderr = text(result.stderr);
+
+      expect(result.exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).not.toContain(sentinel);
+      expect(stderr).not.toContain(env.EMAILS_CLIENT_ENV_SECRET!);
+
+      if (json) {
+        const parsed = JSON.parse(stderr) as {
+          error: { code: string; message: string; fix_commands: string[] };
+        };
+        expect(parsed.error.code).toBe("error");
+        expect(parsed.error.message).toContain("EMAILS_CLIENT_ENV_SECRET failed to load from the secrets vault");
+        expect(parsed.error.fix_commands).toContain("emails --help");
+      } else {
+        expect(stderr).toContain("EMAILS_CLIENT_ENV_SECRET failed to load from the secrets vault");
+      }
+    }
+  });
+
+  it("keeps ordinary nonsecret configuration diagnostics descriptive", () => {
+    const modeSetting = ["EMAILS", "MODE"].join("_");
+    for (const json of [false, true]) {
+      const result = runCli(
+        json ? ["--json", "status"] : ["status"],
+        { ...isolatedEnv(), [modeSetting]: "staging" },
+      );
+      const stderr = text(result.stderr);
+
+      expect(result.exitCode).toBe(1);
+      expect(text(result.stdout)).toBe("");
+      if (json) {
+        const parsed = JSON.parse(stderr) as { error: { code: string; message: string } };
+        expect(parsed.error.code).toBe("error");
+        expect(parsed.error.message).toContain("Unknown Emails mode 'staging'");
+        expect(parsed.error.message).toContain("Use exactly local or self_hosted");
+      } else {
+        expect(stderr).toContain("Unknown Emails mode 'staging'");
+        expect(stderr).toContain("Use exactly local or self_hosted");
+      }
+    }
+  });
+
   it("returns one structured JSON error and creates no local SQLite state for missing or invalid configuration", () => {
     const cases = [
       {

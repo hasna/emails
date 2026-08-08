@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CLIENT_ENV_REQUIRED_KEYS,
   EMAILS_CLIENT_ENV_SECRET_ENV,
   EMAILS_IDP_TOKEN_ENV,
   EMAILS_SESSION_TOKEN_ENV,
@@ -101,6 +102,15 @@ exit 2
   process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
 }
 
+function installFailingSecretsCommand(status: number): void {
+  const dir = mkdtempSync(join(tmpdir(), "emails-client-env-failure-"));
+  tempDirs.push(dir);
+  const bin = join(dir, "secrets");
+  writeFileSync(bin, `#!/bin/sh\nexit ${status}\n`);
+  chmodSync(bin, 0o700);
+  process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+}
+
 // A fake `secrets` backed by a JSON file so get/set round-trips (persist tests).
 // Emulates the CURRENT (>= 0.2.9) CLI: plaintext `get` requires --show on a
 // captured stdout, `set` accepts the value on stdin via --stdin, and the argv
@@ -149,6 +159,63 @@ afterEach(() => {
 });
 
 describe("Emails client-env loader", () => {
+  it("does not echo rejected client-env input when the secrets command exits nonzero", () => {
+    installFailingSecretsCommand(2);
+    const sentinel = "OPE105_00301_NONZERO_SENTINEL";
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = JSON.stringify({ fixture: sentinel });
+
+    let message = "";
+    try {
+      loadEmailsClientEnvSecret();
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("EMAILS_CLIENT_ENV_SECRET failed to load from the secrets vault");
+    expect(message).toContain("status 2");
+    expect(message).not.toContain(sentinel);
+    expect(message).not.toContain(process.env[EMAILS_CLIENT_ENV_SECRET_ENV]!);
+  });
+
+  it("does not echo client-env input when the secrets command cannot start", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-client-env-no-secrets-bin-"));
+    tempDirs.push(dir);
+    process.env["PATH"] = dir;
+    const sentinel = "OPE105_00301_SPAWN_SENTINEL";
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = JSON.stringify({ fixture: sentinel });
+
+    let message = "";
+    try {
+      loadEmailsClientEnvSecret();
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("EMAILS_CLIENT_ENV_SECRET failed to load from the secrets vault");
+    expect(message).toContain("could not start");
+    expect(message).toContain("ENOENT");
+    expect(message).not.toContain(sentinel);
+    expect(message).not.toContain(process.env[EMAILS_CLIENT_ENV_SECRET_ENV]!);
+  });
+
+  it("does not echo client-env input when the loaded entry is incomplete", () => {
+    installStaticSecretsCommand("{}");
+    const sentinel = "OPE105_00301_INCOMPLETE_SENTINEL";
+    process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = JSON.stringify({ fixture: sentinel });
+
+    let message = "";
+    try {
+      loadEmailsClientEnvSecret();
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("EMAILS_CLIENT_ENV_SECRET loaded from the secrets vault");
+    expect(message).toContain(`missing ${CLIENT_ENV_REQUIRED_KEYS[0]}`);
+    expect(message).not.toContain(sentinel);
+    expect(message).not.toContain(process.env[EMAILS_CLIENT_ENV_SECRET_ENV]!);
+  });
+
   it("runs secrets get with a scrubbed environment", () => {
     const envPath = installCapturingSecretsCommand();
     process.env[EMAILS_CLIENT_ENV_SECRET_ENV] = "hasna/test/opensource/emails/prod/client-env";
