@@ -34,6 +34,28 @@ function shouldRedactValue(value: unknown): boolean {
   return value !== null && value !== undefined && value !== "";
 }
 
+/**
+ * Render an operator-supplied diagnostic value without echoing an inline
+ * structured payload. Environment selectors and vault pointers are normally
+ * short strings, so a complete JSON object/array is configuration data, not a
+ * useful label; emitting it can disclose every value it carries.
+ */
+export function redactStructuredDiagnosticValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    !((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]")))
+  ) {
+    return value;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed !== null && typeof parsed === "object" ? REDACTED : value;
+  } catch {
+    return value;
+  }
+}
+
 export function redactSecrets<T>(value: T): T {
   if (Array.isArray(value)) {
     return value.map((item) => redactSecrets(item)) as T;
@@ -49,4 +71,3 @@ export function redactSecrets<T>(value: T): T {
   }
   return out as T;
 }
-

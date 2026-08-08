@@ -68,6 +68,66 @@ function rejectedClientEnvPointer(): { env: NodeJS.ProcessEnv; sentinel: string 
   };
 }
 
+function loadedClientEnvWithInvalidStructuredMode(): {
+  env: NodeJS.ProcessEnv;
+  sentinel: string;
+  invalidMode: string;
+} {
+  const env = isolatedEnv();
+  const binDir = mkdtempSync(join(tmpdir(), "emails-cli-client-env-invalid-mode-"));
+  tempDirs.push(binDir);
+  const secretsBin = join(binDir, "secrets");
+  const sentinel = "OPE105_00301_LOADED_MODE_SENTINEL";
+  const invalidMode = JSON.stringify({ credential: sentinel });
+  const payload = JSON.stringify({
+    [MODE_ENV_KEYS[1]]: invalidMode,
+    EMAILS_SELF_HOSTED_URL: "https://emails.example.invalid",
+    EMAILS_SELF_HOSTED_API_KEY: "not-a-real-key",
+  });
+  writeFileSync(secretsBin, `#!/bin/sh
+if [ "$1" = "get" ]; then
+  printf '%s\\n' ${JSON.stringify(payload)}
+  exit 0
+fi
+exit 2
+`);
+  chmodSync(secretsBin, 0o700);
+  return {
+    env: {
+      ...env,
+      PATH: `${binDir}:${env.PATH ?? ""}`,
+      EMAILS_CLIENT_ENV_SECRET: "hasna/test/opensource/emails/prod/client-env",
+    },
+    sentinel,
+    invalidMode,
+  };
+}
+
+function localModeWithStructuredClientEnv(): {
+  env: NodeJS.ProcessEnv;
+  sentinel: string;
+  clientEnv: string;
+} {
+  const env = isolatedEnv();
+  for (const key of ["DATABASE_URL", "EMAILS_DATABASE_URL", "HASNA_EMAILS_DATABASE_URL"]) {
+    delete env[key];
+  }
+  chmodSync(env.HOME!, 0o700);
+  const sentinel = "OPE105_00301_LOCAL_WARNING_SENTINEL";
+  const clientEnv = JSON.stringify({ credential: sentinel });
+  return {
+    env: {
+      ...env,
+      [MODE_ENV_KEYS[1]]: "local",
+      EMAILS_CLIENT_ENV_SECRET: clientEnv,
+      EMAILS_DB_PATH: join(env.HOME!, "local.db"),
+      HASNA_EMAILS_DB_PATH: join(env.HOME!, "local.db"),
+    },
+    sentinel,
+    clientEnv,
+  };
+}
+
 function runCli(args: string[], env: NodeJS.ProcessEnv) {
   return Bun.spawnSync({
     cmd: ["bun", "src/cli/index.tsx", ...args],
@@ -183,6 +243,53 @@ describe("CLI JSON output safety", () => {
 });
 
 describe("CLI self-hosted bootstrap failures", () => {
+  it("redacts invalid structured mode loaded from client-env on human and JSON stderr", () => {
+    for (const json of [false, true]) {
+      const { env, sentinel, invalidMode } = loadedClientEnvWithInvalidStructuredMode();
+      const result = runCli(json ? ["--json", "status"] : ["status"], env);
+      const stdout = text(result.stdout);
+      const stderr = text(result.stderr);
+
+      expect(result.exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).not.toContain(sentinel);
+      expect(stderr).not.toContain(invalidMode);
+      expect(stderr).toContain("***");
+
+      if (json) {
+        const parsed = JSON.parse(stderr) as { error: { message: string } };
+        expect(parsed.error.message).toContain("self-hosted configuration requires");
+        expect(parsed.error.message).toContain("***");
+      } else {
+        expect(stderr).toContain("self-hosted configuration requires");
+      }
+    }
+  });
+
+  it("redacts structured EMAILS_CLIENT_ENV_SECRET from local-mode warnings on human and JSON stdout", () => {
+    for (const json of [false, true]) {
+      const { env, sentinel, clientEnv } = localModeWithStructuredClientEnv();
+      const result = runCli(json ? ["--json", "status"] : ["status"], env);
+      const stdout = text(result.stdout);
+      const stderr = text(result.stderr);
+
+      expect(result.exitCode, stderr).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).not.toContain(sentinel);
+      expect(stdout).not.toContain(clientEnv);
+      expect(stdout).toContain("***");
+
+      if (json) {
+        const parsed = JSON.parse(stdout) as { mode: { warning: string | null } };
+        expect(parsed.mode.warning).toContain("is overriding");
+        expect(parsed.mode.warning).toContain("***");
+      } else {
+        expect(stdout).toContain("Mode note:");
+        expect(stdout).toContain("is overriding");
+      }
+    }
+  });
+
   it("redacts rejected client-env input from human and JSON stderr", () => {
     for (const json of [false, true]) {
       const { env, sentinel } = rejectedClientEnvPointer();

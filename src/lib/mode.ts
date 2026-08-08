@@ -2,6 +2,7 @@ import { resolveSelfHostedConfig } from "../db/self-hosted-store.js";
 import { API_BASE_URL_SETTING, StoreConfigurationError, planEmailStore } from "../store-resolution.js";
 import { loadConfig } from "./config.js";
 import { EMAILS_CLIENT_ENV_SECRET_ENV, EMAILS_SESSION_TOKEN_ENV, loadEmailsClientEnvSecret } from "./client-env.js";
+import { redactStructuredDiagnosticValue } from "./redaction.js";
 export { EMAILS_CLIENT_ENV_SECRET_ENV } from "./client-env.js";
 
 export type EmailsMode = "local" | "self_hosted";
@@ -162,8 +163,9 @@ function resolution(
  * no cleanup.
  */
 export function clientEnvPointerOverrideWarning(modeEnvKey: string, pointer: string): string {
+  const renderedPointer = redactStructuredDiagnosticValue(pointer);
   return `${modeEnvKey}=local is overriding the ${EMAILS_CLIENT_ENV_SECRET_ENV} vault pointer `
-    + `'${pointer}': the self-hosted client env was NOT loaded and this process is reading the `
+    + `'${renderedPointer}': the self-hosted client env was NOT loaded and this process is reading the `
     + `local database instead. Counts and message lists here do NOT describe the self-hosted `
     + `deployment. If that is not what you meant, unset ${modeEnvKey} — note that it may be `
     + `exported by a parent process rather than by any config file, in which case already-running `
