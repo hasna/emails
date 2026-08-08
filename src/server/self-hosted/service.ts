@@ -36,7 +36,11 @@ import {
   type AddressProvisioningPatch,
   type AddressOwnershipPatch,
 } from "./store.js";
-import { SELF_HOSTED_SEND_ATTACHMENT_LIMITS } from "../../lib/send-attachment-limits.js";
+import {
+  humanLimitBytes,
+  requiredSendJsonBodyBytes,
+  SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
+} from "../../lib/send-attachment-limits.js";
 import {
   MAX_ATTACHMENT_REPAIR_PAGE_ITEMS,
   normalizeAttachmentRepairManifestEntries,
@@ -91,6 +95,22 @@ interface ReadyResult {
 }
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+
+/**
+ * The send route's own body budget, DERIVED from the attachment caps it
+ * enforces.
+ *
+ * Every other route keeps `MAX_JSON_BODY_BYTES`. Only `/v1/messages/send`
+ * legitimately carries megabytes of base64 attachment content, and widening the
+ * cap for every route would hand every endpoint the same buffering cost for no
+ * reason.
+ *
+ * This constant is why raising the attachment caps has any effect at all:
+ * `readJsonBody` runs BEFORE the attachment branch, so a body cap below the
+ * encoded size of a permitted attachment set refuses the request 413 and the
+ * attachment rules are never reached.
+ */
+const MAX_SEND_JSON_BODY_BYTES = requiredSendJsonBodyBytes(SELF_HOSTED_SEND_ATTACHMENT_LIMITS);
 const MESSAGE_PATCH_FIELDS = new Set([
   "status",
   "provider_message_id",
@@ -438,9 +458,12 @@ function parseDailyQuota(
   return { provided: true, value: null, error: "daily_quota must be a non-negative integer or null" };
 }
 
-async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  req: Request,
+  maxBytes: number = MAX_JSON_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   const contentLength = Number(req.headers.get("content-length") ?? "0");
-  if (Number.isFinite(contentLength) && contentLength > MAX_JSON_BODY_BYTES) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new RequestBodyTooLargeError("request body exceeds the limit");
   }
   const reader = req.body?.getReader();
@@ -451,7 +474,7 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_JSON_BODY_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel();
         throw new RequestBodyTooLargeError("request body exceeds the limit");
       }
@@ -1186,7 +1209,10 @@ export async function handleSelfHostedRequest(
       if (method !== "POST") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, write);
       if (!auth.ok) return auth.response;
-      const body = await readJsonBody(req);
+      // The one route whose body legitimately carries base64 attachment
+      // content, so it reads against the attachment-derived budget rather than
+      // the 1MiB default every other route keeps.
+      const body = await readJsonBody(req, MAX_SEND_JSON_BODY_BYTES);
       const rawFrom = String(body.from ?? "").trim();
       const rawTo = asStringArray(body.to);
       if (!rawFrom) return json(400, { error: "from is required" });
@@ -1225,10 +1251,16 @@ export async function handleSelfHostedRequest(
           const bytes = decodeStrictBase64(content).byteLength;
           totalAttachmentBytes += bytes;
           if (!content || bytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile) {
-            throw new Error(`attachment ${index} requires base64 content no larger than 512KiB`);
+            throw new Error(
+              `attachment ${index} requires base64 content no larger than `
+              + humanLimitBytes(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile),
+            );
           }
           if (totalAttachmentBytes > SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes) {
-            throw new Error("inline attachments may total at most 768KiB");
+            throw new Error(
+              "inline attachments may total at most "
+              + humanLimitBytes(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes),
+            );
           }
           const filename = safeHeaderValue("attachment filename", String(item.filename ?? `attachment-${index + 1}`));
           if (!filename.trim() || filename.length > 255) throw new Error(`attachment ${index} filename must be 1-255 characters`);

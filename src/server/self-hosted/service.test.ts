@@ -14,6 +14,10 @@ import {
 } from "./store.js";
 import { attachmentRepairRunResultSha256 } from "./attachment-repair-maintenance.js";
 import { handleSelfHostedRequest, type SelfHostedServiceDeps } from "./service.js";
+import {
+  requiredSendJsonBodyBytes,
+  SELF_HOSTED_SEND_ATTACHMENT_LIMITS,
+} from "../../lib/send-attachment-limits.js";
 import { testAuthDeps, selfScopedStore } from "./auth/test-support.js";
 import { emailsSelfHostedMigrations } from "./migrations.js";
 
@@ -1603,5 +1607,154 @@ describe("Emails self-hosted service", () => {
     const writeToken = mintApiKey({ app: "emails", scopes: ["emails:write"], signingSecret: SIGNING_SECRET }).token;
     const res = await handleSelfHostedRequest(deps(), req("POST", "/v1/domains", { token: writeToken, body: {} }));
     expect(res?.status).toBe(400);
+  });
+});
+
+// The send route's attachment caps, exercised through the real route.
+//
+// The caps were 512KiB per file, which cannot carry a scanned page, and the
+// route refused ordinary notarised paperwork. Raising them required raising the
+// route's JSON body budget too: attachments are base64 inside the body, and
+// `readJsonBody` runs BEFORE the attachment branch, so the old 1MiB body cap
+// answered 413 long before any attachment rule was consulted.
+//
+// Both halves are asserted here, and so is the fact that the caps are still
+// caps. A change that merely deleted enforcement would satisfy "a big document
+// is accepted" while failing every rejection case below.
+describe("POST /v1/messages/send attachment caps", () => {
+  const sendToken = () =>
+    mintApiKey({ app: "emails", scopes: ["emails:write"], signingSecret: SIGNING_SECRET }).token;
+
+  /** A base64 payload whose DECODED length is exactly `bytes`. */
+  function attachmentOf(bytes: number, filename = "procura.pdf") {
+    return {
+      filename,
+      content: Buffer.alloc(bytes).toString("base64"),
+      content_type: "application/pdf",
+    };
+  }
+
+  let idempotencyCounter = 0;
+  function sendBody(attachments: unknown[]) {
+    // `idempotency_key` is validated BEFORE the attachment branch. Omitting it
+    // made every case below fail at that earlier gate, which silently turned the
+    // acceptance assertions vacuous — they passed because the request never
+    // reached the caps at all.
+    idempotencyCounter += 1;
+    return {
+      from: "ops@example.test",
+      to: ["recipient@example.test"],
+      subject: "Notarised documents",
+      text: "Attached.",
+      idempotency_key: `test-attachment-caps-${idempotencyCounter}`,
+      attachments,
+    };
+  }
+
+  /**
+   * The attachment gate's own refusals. Reaching past these is what "accepted by
+   * the cap" means — the request may still fail further down on a stubbed store,
+   * which is a different layer and not what these tests measure.
+   */
+  function isAttachmentRefusal(status: number, body: { error?: string }): boolean {
+    if (status === 413) return true;
+    if (status !== 400) return false;
+    const error = body.error ?? "";
+    return /attachment|inline attachments/i.test(error);
+  }
+
+  test("a document-sized attachment is no longer refused by the caps", async () => {
+    // 3.8MB: the size of the notarised 6-page scan this cap was raised for.
+    // Under the old 512KiB/768KiB caps and 1MiB body cap this answered 413.
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/messages/send", { token: sendToken(), body: sendBody([attachmentOf(3_800_000)]) }),
+    );
+    const body = await res!.json().catch(() => ({}));
+    expect(isAttachmentRefusal(res!.status, body)).toBe(false);
+    // Stronger than "not an attachment error": no 400-class refusal at all, so
+    // the request provably cleared every validation gate including the caps.
+    expect(res!.status).not.toBe(400);
+  });
+
+  test("two document-sized attachments are no longer refused by the caps", async () => {
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/messages/send", {
+        token: sendToken(),
+        body: sendBody([attachmentOf(3_800_000, "procura-1.pdf"), attachmentOf(3_800_000, "procura-2.pdf")]),
+      }),
+    );
+    const body = await res!.json().catch(() => ({}));
+    expect(isAttachmentRefusal(res!.status, body)).toBe(false);
+    expect(res!.status).not.toBe(400);
+  });
+
+  test("an attachment one byte over the per-file cap is still refused", async () => {
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/messages/send", {
+        token: sendToken(),
+        body: sendBody([attachmentOf(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile + 1)]),
+      }),
+    );
+    const body = await res!.json().catch(() => ({}));
+    expect(isAttachmentRefusal(res!.status, body)).toBe(true);
+  });
+
+  test("a set over the total cap is still refused", async () => {
+    // Each file is legal on its own; together they exceed the total.
+    const perFile = SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
+    const count = Math.ceil(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes / perFile) + 1;
+    expect(count).toBeLessThanOrEqual(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles);
+    const files = Array.from({ length: count }, (_, i) => attachmentOf(perFile, `f${i}.pdf`));
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/messages/send", { token: sendToken(), body: sendBody(files) }),
+    );
+    const body = await res!.json().catch(() => ({}));
+    expect(isAttachmentRefusal(res!.status, body)).toBe(true);
+  });
+
+  test("more files than the count cap is still refused", async () => {
+    const files = Array.from(
+      { length: SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles + 1 },
+      (_, i) => attachmentOf(1024, `f${i}.pdf`),
+    );
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/messages/send", { token: sendToken(), body: sendBody(files) }),
+    );
+    expect(res!.status).toBe(400);
+    expect((await res!.json()).error).toContain("inline attachments are allowed");
+  });
+
+  test("the send route still refuses a body beyond its own raised budget", async () => {
+    // The budget moved; it did not disappear. Declaring a content-length past it
+    // is refused before the body is read.
+    const request = new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": sendToken(),
+        "content-length": String(requiredSendJsonBodyBytes(SELF_HOSTED_SEND_ATTACHMENT_LIMITS) + 1),
+      },
+      body: JSON.stringify(sendBody([])),
+    });
+    const res = await handleSelfHostedRequest(deps(), request);
+    expect(res?.status).toBe(413);
+    expect(await res!.json()).toEqual({ error: "request body too large" });
+  });
+
+  test("the raised budget is scoped to the send route only", async () => {
+    // A body that the send route would now accept must STILL be refused on an
+    // ordinary route. Without this, the fix would have widened every endpoint.
+    const oversizeForDefaultRoute = "x".repeat(2 * 1024 * 1024);
+    const res = await handleSelfHostedRequest(
+      deps(),
+      req("POST", "/v1/domains", { token: sendToken(), body: { domain: `${oversizeForDefaultRoute}.com` } }),
+    );
+    expect(res?.status).toBe(413);
+    expect(await res!.json()).toEqual({ error: "request body too large" });
   });
 });

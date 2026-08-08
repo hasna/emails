@@ -110,9 +110,11 @@ export interface AttachmentCapFinding {
  * Evaluate the REAL files against the mode's caps.
  *
  * These caps were printed as prose next to the attachment count and never checked,
- * so a set that the self-hosted route refuses (5 files / 512KiB each / 768KiB
- * total) previewed as fine. `readSendAttachments` only enforces the much larger
- * global ceilings (25MB), so nothing else caught it either.
+ * so a set that the self-hosted route refuses previewed as fine.
+ * `readSendAttachments` only enforces the much larger local ceilings, so nothing
+ * else caught it either. The exact numbers deliberately are not repeated here —
+ * they live in `SELF_HOSTED_SEND_ATTACHMENT_LIMITS`, and a prose copy of them is
+ * how the prediction drifted from the enforcement in the first place.
  *
  * `sizes` are decoded byte lengths, not base64 lengths — the caps are on content.
  */
