@@ -1702,18 +1702,33 @@ describe("POST /v1/messages/send attachment caps", () => {
     expect(isAttachmentRefusal(res!.status, body)).toBe(true);
   });
 
-  test("a set over the total cap is still refused", async () => {
-    // Each file is legal on its own; together they exceed the total.
+  test("a set over the total cap is still refused BY THE TOTAL CAP", async () => {
+    // The overage must be the SMALLEST one that still fits the body budget,
+    // otherwise the body cap answers 413 first and this test passes without ever
+    // reaching the branch it is named for. An earlier version used
+    // `3 * maxBytesPerFile` = 30MiB raw, whose JSON is 41,943,406 bytes against a
+    // 30,059,180-byte budget — so deleting the route's total-cap enforcement
+    // entirely left this suite fully green.
+    //
+    // Two max-size files plus one byte: over the total, inside the body budget.
     const perFile = SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxBytesPerFile;
-    const count = Math.ceil(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes / perFile) + 1;
-    expect(count).toBeLessThanOrEqual(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles);
-    const files = Array.from({ length: count }, (_, i) => attachmentOf(perFile, `f${i}.pdf`));
+    const files = [attachmentOf(perFile, "f0.pdf"), attachmentOf(perFile, "f1.pdf"), attachmentOf(1, "f2.pdf")];
+    expect(files.length).toBeLessThanOrEqual(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxFiles);
+    const rawTotal = perFile * 2 + 1;
+    expect(rawTotal).toBeGreaterThan(SELF_HOSTED_SEND_ATTACHMENT_LIMITS.maxTotalBytes);
+    const payload = JSON.stringify(sendBody(files));
+    expect(Buffer.byteLength(payload)).toBeLessThan(
+      requiredSendJsonBodyBytes(SELF_HOSTED_SEND_ATTACHMENT_LIMITS),
+    );
+
     const res = await handleSelfHostedRequest(
       deps(),
       req("POST", "/v1/messages/send", { token: sendToken(), body: sendBody(files) }),
     );
-    const body = await res!.json().catch(() => ({}));
-    expect(isAttachmentRefusal(res!.status, body)).toBe(true);
+    // Assert the SPECIFIC refusal, not merely "some refusal": a 413 here would
+    // mean the body cap fired and the total cap went untested.
+    expect(res!.status).toBe(400);
+    expect((await res!.json()).error).toContain("total at most");
   });
 
   test("more files than the count cap is still refused", async () => {
